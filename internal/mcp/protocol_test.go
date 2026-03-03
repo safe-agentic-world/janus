@@ -82,6 +82,86 @@ func TestFramedInitializeAndToolsList(t *testing.T) {
 	}
 }
 
+func TestLineDelimitedRPCInitialize(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	var stderr bytes.Buffer
+	server, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "info",
+		LogFormat: "text",
+		ErrWriter: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	in := bytes.NewBufferString("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+	var out bytes.Buffer
+	if err := server.ServeStdio(in, &out); err != nil {
+		t.Fatalf("serve stdio: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode line-delimited response: %v body=%q", err, out.String())
+	}
+	if resp["error"] != nil {
+		t.Fatalf("unexpected initialize error: %+v", resp["error"])
+	}
+	if resp["jsonrpc"] != "2.0" {
+		t.Fatalf("missing jsonrpc envelope: %+v", resp)
+	}
+	result := resp["result"].(map[string]any)
+	if result["protocolVersion"] == "" {
+		t.Fatalf("missing protocolVersion: %+v", result)
+	}
+}
+
+func TestLineDelimitedLegacyRequestStillUsesLegacyEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	in := bytes.NewBufferString("{\"id\":\"1\",\"method\":\"nomos.capabilities\",\"params\":{}}\n")
+	var out bytes.Buffer
+	if err := server.ServeStdio(in, &out); err != nil {
+		t.Fatalf("serve stdio: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode legacy response: %v body=%q", err, out.String())
+	}
+	if _, ok := resp["jsonrpc"]; ok {
+		t.Fatalf("expected legacy line response without jsonrpc envelope: %+v", resp)
+	}
+	if resp["error"] != nil {
+		t.Fatalf("unexpected legacy error: %+v", resp["error"])
+	}
+}
+
 func TestFramedToolsCallFsRead(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0o600); err != nil {

@@ -9,7 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
+	"path"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
@@ -22,6 +26,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/service"
 	"github.com/safe-agentic-world/nomos/internal/version"
+	"github.com/safe-agentic-world/nomos/internal/normalize"
 )
 
 type Gateway struct {
@@ -330,6 +335,10 @@ func (g *Gateway) handleAction(w http.ResponseWriter, r *http.Request) {
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
+	if err := g.validateUpstreamRoute(act); err != nil {
+		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
+		return
+	}
 
 	resp, err := g.service.Process(act)
 	if err != nil {
@@ -372,6 +381,102 @@ func (g *Gateway) respondError(w http.ResponseWriter, status int, code string, m
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(redacted)
+}
+
+func (g *Gateway) validateUpstreamRoute(act action.Action) error {
+	if act.ActionType != "net.http_request" {
+		return nil
+	}
+	if len(g.cfg.Upstream.Routes) == 0 {
+		return nil
+	}
+	normalized, err := normalize.NormalizeResource(act.Resource)
+	if err != nil {
+		return err
+	}
+	host, reqPath, err := routeTargetFromNormalized(normalized)
+	if err != nil {
+		return err
+	}
+	method, err := requestMethodFromParams(act.Params)
+	if err != nil {
+		return err
+	}
+	for _, route := range g.cfg.Upstream.Routes {
+		if upstreamRouteMatches(route, host, reqPath, method) {
+			return nil
+		}
+	}
+	return errors.New("upstream route not configured")
+}
+
+func requestMethodFromParams(raw json.RawMessage) (string, error) {
+	var params struct {
+		Method string `json:"method"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&params); err != nil {
+		return "", err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return "", errors.New("unexpected trailing data")
+	}
+	method := strings.ToUpper(strings.TrimSpace(params.Method))
+	if method == "" {
+		return http.MethodGet, nil
+	}
+	return method, nil
+}
+
+func upstreamRouteMatches(route UpstreamRoute, host, reqPath, method string) bool {
+	parsed, err := neturl.Parse(strings.TrimSpace(route.URL))
+	if err != nil {
+		return false
+	}
+	routeHost := strings.ToLower(parsed.Host)
+	if routeHost != strings.ToLower(host) {
+		return false
+	}
+	if len(route.Methods) > 0 {
+		allowed := make([]string, 0, len(route.Methods))
+		for _, item := range route.Methods {
+			allowed = append(allowed, strings.ToUpper(strings.TrimSpace(item)))
+		}
+		if !slices.Contains(allowed, method) {
+			return false
+		}
+	}
+	prefix := strings.TrimSpace(route.PathPrefix)
+	if prefix == "" {
+		prefix = parsed.EscapedPath()
+		if prefix == "" {
+			prefix = "/"
+		}
+	}
+	if reqPath == prefix {
+		return true
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(reqPath, prefix)
+	}
+	return strings.HasPrefix(reqPath, prefix+"/")
+}
+
+func routeTargetFromNormalized(resource string) (string, string, error) {
+	if !strings.HasPrefix(resource, "url://") {
+		return "", "", errors.New("resource is not url")
+	}
+	raw := strings.TrimPrefix(resource, "url://")
+	host, pathValue, ok := strings.Cut(raw, "/")
+	if !ok {
+		return host, "/", nil
+	}
+	cleaned := path.Clean("/" + pathValue)
+	if cleaned == "." || cleaned == "" {
+		cleaned = "/"
+	}
+	return host, cleaned, nil
 }
 
 func (g *Gateway) emitTraceEvent(eventType, traceID, actionID string) {

@@ -20,7 +20,7 @@
     "deployment_mode": "unmanaged"
   },
   "policy": {
-    "policy_bundle_path": "C:\\Users\\prudh\\repos\\safe-agentic-world\\nomos\\policies\\safe-dev.json",
+    "policy_bundle_path": "C:\\Users\\prudh\\repos\\safe-agentic-world\\nomos\\policies\\safe-dev.yaml",
     "verify_signatures": false,
     "signature_path": "",
     "public_key_path": "",
@@ -29,7 +29,7 @@
   "executor": {
     "sandbox_enabled": true,
     "sandbox_profile": "local",
-    "workspace_root": "."
+    "workspace_root": "C:\\Users\\prudh\\repos\\safe-agentic-world\\nomos"
   },
   "credentials": {
     "enabled": false,

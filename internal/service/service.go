@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/approval"
@@ -258,12 +259,11 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 			return response, err
 		}
 		redacted := s.redactor.RedactText(readResult.Content)
-		response.Output = redacted
-		response.Truncated = readResult.Truncated
+		response.Output, response.Truncated = applyOutputObligations(redacted, decision.Obligations, readResult.Truncated)
 		auditCtx.executorMetadata = map[string]any{
 			"bytes_read": readResult.BytesRead,
 			"lines_read": readResult.LinesRead,
-			"truncated":  readResult.Truncated,
+			"truncated":  response.Truncated,
 		}
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
@@ -388,20 +388,18 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 			if err != nil {
 				return response, nil, err
 			}
-			response.Stdout = redactSecrets(s.redactor.RedactText(result.Stdout), secretValues)
-			response.Stderr = redactSecrets(s.redactor.RedactText(result.Stderr), secretValues)
+			response.Stdout, response.Truncated = applyOutputObligations(redactSecrets(s.redactor.RedactText(result.Stdout), secretValues), obligations, result.Truncated)
+			response.Stderr, response.Truncated = applyOutputObligations(redactSecrets(s.redactor.RedactText(result.Stderr), secretValues), obligations, response.Truncated)
 			response.ExitCode = result.ExitCode
-			response.Truncated = result.Truncated
 			return response, map[string]any{"exit_code": response.ExitCode, "truncated": response.Truncated}, nil
 		}
 		result, err := s.execRunner.Run(params)
 		if err != nil {
 			return response, nil, err
 		}
-		response.Stdout = s.redactor.RedactText(result.Stdout)
-		response.Stderr = s.redactor.RedactText(result.Stderr)
+		response.Stdout, response.Truncated = applyOutputObligations(s.redactor.RedactText(result.Stdout), obligations, result.Truncated)
+		response.Stderr, response.Truncated = applyOutputObligations(s.redactor.RedactText(result.Stderr), obligations, response.Truncated)
 		response.ExitCode = result.ExitCode
-		response.Truncated = result.Truncated
 		return response, map[string]any{"exit_code": response.ExitCode, "truncated": response.Truncated}, nil
 	case "net.http_request":
 		host, urlString, err := parseURLFromResource(normalized.Resource)
@@ -426,8 +424,7 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 			return response, nil, err
 		}
 		response.StatusCode = result.StatusCode
-		response.Output = s.redactor.RedactText(result.Body)
-		response.Truncated = result.Truncated
+		response.Output, response.Truncated = applyOutputObligations(s.redactor.RedactText(result.Body), obligations, result.Truncated)
 		return response, map[string]any{
 			"status_code":    response.StatusCode,
 			"truncated":      response.Truncated,
@@ -439,4 +436,62 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 		response.Reason = "unsupported_action"
 		return response, nil, nil
 	}
+}
+
+func applyOutputObligations(text string, obligations map[string]any, alreadyTruncated bool) (string, bool) {
+	out := text
+	truncated := alreadyTruncated
+	if maxBytes, ok := intObligation(obligations["output_max_bytes"]); ok && maxBytes >= 0 {
+		if len(out) > maxBytes {
+			out = trimToBytes(out, maxBytes)
+			truncated = true
+		}
+	}
+	if maxLines, ok := intObligation(obligations["output_max_lines"]); ok && maxLines >= 0 {
+		limited, wasTrimmed := trimToLines(out, maxLines)
+		out = limited
+		if wasTrimmed {
+			truncated = true
+		}
+	}
+	return out, truncated
+}
+
+func trimToBytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	cut := value[:limit]
+	for !utf8.ValidString(cut) && len(cut) > 0 {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
+}
+
+func trimToLines(value string, maxLines int) (string, bool) {
+	if maxLines <= 0 {
+		if value == "" {
+			return value, false
+		}
+		return "", true
+	}
+	if value == "" {
+		return value, false
+	}
+	lineCount := 0
+	for idx, r := range value {
+		if lineCount >= maxLines {
+			return value[:idx], true
+		}
+		if r == '\n' {
+			lineCount++
+		}
+	}
+	if lineCount >= maxLines {
+		return "", false
+	}
+	return value, false
 }

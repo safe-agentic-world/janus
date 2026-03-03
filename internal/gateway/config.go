@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -89,8 +91,47 @@ type MCPConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+type UpstreamRoute struct {
+	URL        string   `json:"url"`
+	Methods    []string `json:"methods,omitempty"`
+	PathPrefix string   `json:"path_prefix,omitempty"`
+}
+
 type UpstreamConfig struct {
-	Routes []string `json:"routes"`
+	Routes []UpstreamRoute `json:"routes"`
+}
+
+func (u *UpstreamConfig) UnmarshalJSON(data []byte) error {
+	type typedUpstreamConfig struct {
+		Routes []UpstreamRoute `json:"routes"`
+	}
+	var typed typedUpstreamConfig
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&typed); err == nil {
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			return errors.New("upstream config contains trailing data")
+		}
+		u.Routes = typed.Routes
+		return nil
+	}
+
+	var legacy struct {
+		Routes []string `json:"routes"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&legacy); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("upstream config contains trailing data")
+	}
+	u.Routes = make([]UpstreamRoute, 0, len(legacy.Routes))
+	for _, route := range legacy.Routes {
+		u.Routes = append(u.Routes, UpstreamRoute{URL: route})
+	}
+	return nil
 }
 
 type ApprovalsConfig struct {
@@ -138,6 +179,9 @@ func LoadConfig(path string, getenv func(string) string, policyBundleOverride st
 	ApplyEnvOverrides(&cfg, getenv)
 	if policyBundleOverride != "" {
 		cfg.Policy.BundlePath = policyBundleOverride
+	}
+	if err := cfg.ResolveRelativePaths(filepath.Dir(path)); err != nil {
+		return Config{}, err
 	}
 
 	if err := cfg.SetDefaults(); err != nil {
@@ -319,6 +363,24 @@ func (c Config) Validate() error {
 			return fmt.Errorf("policy public key path invalid: %w", err)
 		}
 	}
+	for _, route := range c.Upstream.Routes {
+		raw := strings.TrimSpace(route.URL)
+		if raw == "" {
+			return errors.New("upstream.routes.url is required")
+		}
+		parsed, err := neturl.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return errors.New("upstream.routes.url must be an absolute URL")
+		}
+		for _, method := range route.Methods {
+			if strings.TrimSpace(method) == "" {
+				return errors.New("upstream.routes.methods entries must be non-empty")
+			}
+		}
+		if value := strings.TrimSpace(route.PathPrefix); value != "" && !strings.HasPrefix(value, "/") {
+			return errors.New("upstream.routes.path_prefix must start with /")
+		}
+	}
 	return nil
 }
 
@@ -419,7 +481,11 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 		}
 	}
 	if v := getenv("NOMOS_UPSTREAM_ROUTES"); v != "" {
-		cfg.Upstream.Routes = splitList(v)
+		values := splitList(v)
+		cfg.Upstream.Routes = make([]UpstreamRoute, 0, len(values))
+		for _, value := range values {
+			cfg.Upstream.Routes = append(cfg.Upstream.Routes, UpstreamRoute{URL: value})
+		}
 	}
 	if v := getenv("NOMOS_APPROVALS_ENABLED"); v != "" {
 		if parsed, ok := parseBool(v); ok {
@@ -495,4 +561,62 @@ func splitList(value string) []string {
 func parseBool(value string) (bool, bool) {
 	parsed, err := strconv.ParseBool(value)
 	return parsed, err == nil
+}
+
+func (c *Config) ResolveRelativePaths(baseDir string) error {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return nil
+	}
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return err
+	}
+	c.Gateway.TLS.CertFile = resolveRelativePath(absBase, c.Gateway.TLS.CertFile)
+	c.Gateway.TLS.KeyFile = resolveRelativePath(absBase, c.Gateway.TLS.KeyFile)
+	c.Gateway.TLS.ClientCAFile = resolveRelativePath(absBase, c.Gateway.TLS.ClientCAFile)
+	c.Policy.BundlePath = resolveRelativePath(absBase, c.Policy.BundlePath)
+	c.Policy.SignaturePath = resolveRelativePath(absBase, c.Policy.SignaturePath)
+	c.Policy.PublicKeyPath = resolveRelativePath(absBase, c.Policy.PublicKeyPath)
+	c.Executor.WorkspaceRoot = resolveRelativePath(absBase, c.Executor.WorkspaceRoot)
+	c.Approvals.StorePath = resolveRelativePath(absBase, c.Approvals.StorePath)
+	c.Identity.OIDC.PublicKeyPath = resolveRelativePath(absBase, c.Identity.OIDC.PublicKeyPath)
+	c.Audit.Sink = resolveAuditSinkPaths(absBase, c.Audit.Sink)
+	return nil
+}
+
+func resolveRelativePath(baseDir, value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return value
+	}
+	if filepath.IsAbs(trimmed) {
+		return filepath.Clean(trimmed)
+	}
+	return filepath.Clean(filepath.Join(baseDir, trimmed))
+}
+
+func resolveAuditSinkPaths(baseDir, sink string) string {
+	parts := strings.Split(strings.TrimSpace(sink), ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "sqlite://"):
+			path := strings.TrimPrefix(trimmed, "sqlite://")
+			out = append(out, "sqlite://"+resolveRelativePath(baseDir, path))
+		case strings.HasPrefix(trimmed, "sqlite:"):
+			path := strings.TrimPrefix(trimmed, "sqlite:")
+			out = append(out, "sqlite:"+resolveRelativePath(baseDir, path))
+		default:
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return sink
+	}
+	return strings.Join(out, ",")
 }

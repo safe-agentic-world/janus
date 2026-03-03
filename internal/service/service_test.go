@@ -483,6 +483,151 @@ func TestServiceAuditRecordsFinalRedirectResource(t *testing.T) {
 	}
 }
 
+func TestServiceReadHonorsPerRuleOutputCaps(t *testing.T) {
+	dir := t.TempDir()
+	readmePath := filepath.Join(dir, "README.md")
+	content := "line1\nline2\nline3\n"
+	if err := os.WriteFile(readmePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	bundle := policy.Bundle{
+		Version: "v1",
+		Hash:    "test",
+		Rules: []policy.Rule{
+			{
+				ID:         "allow-readme",
+				ActionType: "fs.read",
+				Resource:   "file://workspace/README.md",
+				Decision:   policy.DecisionAllow,
+				Obligations: map[string]any{
+					"output_max_bytes": 5,
+					"output_max_lines": 1,
+				},
+			},
+		},
+	}
+	svc := New(
+		policy.NewEngine(bundle),
+		executor.NewFSReader(dir, 1024, 100),
+		executor.NewFSWriter(dir, 1024),
+		executor.NewPatchApplier(dir, 1024),
+		executor.NewExecRunner(dir, 1024),
+		executor.NewHTTPRunner(1024),
+		&recordSink{},
+		redact.DefaultRedactor(),
+		nil,
+		nil,
+		"local",
+		func() time.Time { return time.Unix(0, 0) },
+	)
+
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "cap-read",
+		ActionType:    "fs.read",
+		Resource:      "file://workspace/README.md",
+		Params:        []byte(`{}`),
+		TraceID:       "trace-cap-read",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Output != "line1" {
+		t.Fatalf("expected capped output %q, got %q", "line1", resp.Output)
+	}
+	if !resp.Truncated {
+		t.Fatal("expected truncation due to output caps")
+	}
+}
+
+func TestServiceHTTPHonorsPerRuleOutputLineCaps(t *testing.T) {
+	dir := t.TempDir()
+	bundle := policy.Bundle{
+		Version: "v1",
+		Hash:    "test",
+		Rules: []policy.Rule{
+			{
+				ID:           "allow-http",
+				ActionType:   "net.http_request",
+				Resource:     "url://example.com/**",
+				Decision:     policy.DecisionAllow,
+				Principals:   []string{"system"},
+				Agents:       []string{"nomos"},
+				Environments: []string{"dev"},
+				Obligations: map[string]any{
+					"net_allowlist":    []any{"example.com"},
+					"output_max_lines": 1,
+				},
+			},
+		},
+	}
+	httpRunner := executor.NewHTTPRunner(1024)
+	httpRunner.SetClient(newTestHTTPClient("alpha\nbeta\ngamma"))
+	svc := New(
+		policy.NewEngine(bundle),
+		executor.NewFSReader(dir, 1024, 100),
+		executor.NewFSWriter(dir, 1024),
+		executor.NewPatchApplier(dir, 1024),
+		executor.NewExecRunner(dir, 1024),
+		httpRunner,
+		&recordSink{},
+		redact.DefaultRedactor(),
+		nil,
+		nil,
+		"local",
+		func() time.Time { return time.Unix(0, 0) },
+	)
+
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "cap-http",
+		ActionType:    "net.http_request",
+		Resource:      "url://example.com/path",
+		Params:        []byte(`{"method":"GET"}`),
+		TraceID:       "trace-cap-http",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Output != "alpha\n" {
+		t.Fatalf("expected capped output %q, got %q", "alpha\n", resp.Output)
+	}
+	if !resp.Truncated {
+		t.Fatal("expected truncation due to output caps")
+	}
+}
+
+func TestApplyOutputObligationsCapsEachSurface(t *testing.T) {
+	text, truncated := applyOutputObligations("abcdef\nsecond\n", map[string]any{
+		"output_max_bytes": 6,
+		"output_max_lines": 1,
+	}, false)
+	if text != "abcdef" {
+		t.Fatalf("expected capped text %q, got %q", "abcdef", text)
+	}
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+}
+
 func newTestHTTPClient(body string) *http.Client {
 	return &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

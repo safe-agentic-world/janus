@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/json"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/audit"
 )
 
@@ -387,6 +389,87 @@ func TestGatewayCircuitBreakerOpensAfterFailures(t *testing.T) {
 	}
 	if w := makeReq(); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected circuit open 429, got %d", w.Code)
+	}
+}
+
+func TestGatewayUpstreamRouteTypedMatchAllowsConfiguredRequest(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow-http","action_type":"net.http_request","resource":"url://api.example.com/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"obligations":{"net_allowlist":["api.example.com"]}}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	cfg := Config{
+		Gateway: GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
+		Audit:   AuditConfig{Sink: "stdout"},
+		Identity: IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "dev",
+			APIKeys: map[string]string{
+				"key1": "system",
+			},
+			AgentSecrets: map[string]string{
+				"nomos": "agent-secret",
+			},
+		},
+		Policy:   PolicyConfig{BundlePath: bundlePath},
+		Upstream: UpstreamConfig{Routes: []UpstreamRoute{{URL: "https://api.example.com/v1", Methods: []string{"GET"}, PathPrefix: "/v1"}}},
+	}
+	gw, err := NewWithRecorder(cfg, &recordSink{}, func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	act := actionAction("act-upstream-ok", "net.http_request", "url://api.example.com/v1/status", `{"method":"GET"}`)
+	if err := gw.validateUpstreamRoute(act); err != nil {
+		t.Fatalf("expected upstream route match, got %v", err)
+	}
+}
+
+func TestGatewayUpstreamRouteMismatchFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow-http","action_type":"net.http_request","resource":"url://api.example.com/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"obligations":{"net_allowlist":["api.example.com"]}}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	cfg := Config{
+		Gateway: GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
+		Audit:   AuditConfig{Sink: "stdout"},
+		Identity: IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "dev",
+			APIKeys: map[string]string{
+				"key1": "system",
+			},
+			AgentSecrets: map[string]string{
+				"nomos": "agent-secret",
+			},
+		},
+		Policy:   PolicyConfig{BundlePath: bundlePath},
+		Upstream: UpstreamConfig{Routes: []UpstreamRoute{{URL: "https://api.example.com/v1", Methods: []string{"POST"}, PathPrefix: "/v1"}}},
+	}
+	gw, err := NewWithRecorder(cfg, &recordSink{}, func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	act := actionAction("act-upstream-deny", "net.http_request", "url://api.example.com/v2/status", `{"method":"GET"}`)
+	if err := gw.validateUpstreamRoute(act); err == nil || !strings.Contains(err.Error(), "upstream route not configured") {
+		t.Fatalf("expected upstream mismatch error, got %v", err)
+	}
+}
+
+func actionAction(actionID, actionType, resource, params string) action.Action {
+	return action.Action{
+		SchemaVersion: "v1",
+		ActionID:      actionID,
+		ActionType:    actionType,
+		Resource:      resource,
+		Params:        []byte(params),
+		Principal:     "system",
+		Agent:         "nomos",
+		Environment:   "dev",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+		TraceID:       "trace-" + actionID,
 	}
 }
 

@@ -309,3 +309,145 @@ func TestLoadConfigM13HardeningFields(t *testing.T) {
 		t.Fatalf("expected valid config, got %v", err)
 	}
 }
+
+func TestLoadConfigResolvesPathsRelativeToConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "conf")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	workspaceDir := filepath.Join(configDir, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	bundlePath := filepath.Join(configDir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(configDir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":  map[string]any{"policy_bundle_path": ".\\bundle.json"},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+			"workspace_root":  ".\\workspace",
+		},
+		"audit":    map[string]any{"sink": "sqlite:./audit.db"},
+		"mcp":      map[string]any{"enabled": false},
+		"upstream": map[string]any{"routes": []any{}},
+		"approvals": map[string]any{
+			"enabled":    true,
+			"store_path": ".\\approvals.db",
+		},
+		"identity": map[string]any{
+			"principal":   "system",
+			"agent":       "nomos",
+			"environment": "dev",
+			"api_keys": map[string]any{
+				"key1": "system",
+			},
+			"agent_secrets": map[string]any{
+				"nomos": "secret",
+			},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Policy.BundlePath != bundlePath {
+		t.Fatalf("expected config-relative bundle path, got %s", cfg.Policy.BundlePath)
+	}
+	if cfg.Executor.WorkspaceRoot != workspaceDir {
+		t.Fatalf("expected config-relative workspace root, got %s", cfg.Executor.WorkspaceRoot)
+	}
+	if cfg.Approvals.StorePath != filepath.Join(configDir, "approvals.db") {
+		t.Fatalf("expected config-relative approvals store, got %s", cfg.Approvals.StorePath)
+	}
+	if cfg.Audit.Sink != "sqlite:"+filepath.Join(configDir, "audit.db") {
+		t.Fatalf("expected config-relative sqlite sink, got %s", cfg.Audit.Sink)
+	}
+}
+
+func TestLoadConfigSupportsTypedAndLegacyUpstreamRoutes(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+
+	typedPath := filepath.Join(dir, "typed.json")
+	typedJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":  map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+		},
+		"audit": map[string]any{"sink": "stdout"},
+		"mcp":   map[string]any{"enabled": false},
+		"upstream": map[string]any{"routes": []any{
+			map[string]any{"url": "https://api.example.com/base", "methods": []any{"GET", "POST"}, "path_prefix": "/base"},
+		}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":   "system",
+			"agent":       "nomos",
+			"environment": "dev",
+			"api_keys":    map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{
+				"nomos": "secret",
+			},
+		},
+	})
+	if err := os.WriteFile(typedPath, typedJSON, 0o600); err != nil {
+		t.Fatalf("write typed config: %v", err)
+	}
+	cfg, err := LoadConfig(typedPath, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load typed config: %v", err)
+	}
+	if len(cfg.Upstream.Routes) != 1 || cfg.Upstream.Routes[0].URL != "https://api.example.com/base" {
+		t.Fatalf("unexpected typed routes: %+v", cfg.Upstream.Routes)
+	}
+	if len(cfg.Upstream.Routes[0].Methods) != 2 || cfg.Upstream.Routes[0].PathPrefix != "/base" {
+		t.Fatalf("expected typed route fields, got %+v", cfg.Upstream.Routes[0])
+	}
+
+	legacyPath := filepath.Join(dir, "legacy.json")
+	legacyJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":  map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+		},
+		"audit": map[string]any{"sink": "stdout"},
+		"mcp":   map[string]any{"enabled": false},
+		"upstream": map[string]any{"routes": []any{
+			"https://legacy.example.com",
+		}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":   "system",
+			"agent":       "nomos",
+			"environment": "dev",
+			"api_keys":    map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{
+				"nomos": "secret",
+			},
+		},
+	})
+	if err := os.WriteFile(legacyPath, legacyJSON, 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	cfg, err = LoadConfig(legacyPath, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+	if len(cfg.Upstream.Routes) != 1 || cfg.Upstream.Routes[0].URL != "https://legacy.example.com" {
+		t.Fatalf("unexpected legacy routes: %+v", cfg.Upstream.Routes)
+	}
+}

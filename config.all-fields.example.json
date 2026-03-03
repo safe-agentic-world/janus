@@ -20,7 +20,7 @@
     "deployment_mode": "unmanaged"
   },
   "policy": {
-    "policy_bundle_path": "C:\\Users\\prudh\\repos\\safe-agentic-world\\nomos\\policies\\safe-dev.json",
+    "policy_bundle_path": ".\\policies\\all-fields.example.yaml",
     "verify_signatures": false,
     "signature_path": "",
     "public_key_path": "",
@@ -28,8 +28,10 @@
   },
   "executor": {
     "sandbox_enabled": true,
-    "sandbox_profile": "local",
-    "workspace_root": "."
+    "workspace_root": ".",
+    "max_output_bytes": 65536,
+    "max_output_lines": 200,
+    "sandbox_profile": "local"
   },
   "credentials": {
     "enabled": false,
@@ -49,15 +51,24 @@
     "enabled": true
   },
   "upstream": {
-    "routes": []
+    "routes": [
+      {
+        "url": "https://api.example.com/v1",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "path_prefix": "/v1"
+      }
+    ]
   },
   "approvals": {
     "enabled": false,
     "store_path": ".\\nomos-approvals.db",
     "ttl_seconds": 900,
-    "webhook_token": "",
-    "slack_token": "",
-    "teams_token": ""
+    "webhook_token": "replace-me",
+    "slack_token": "replace-me",
+    "teams_token": "replace-me"
   },
   "identity": {
     "principal": "system",
@@ -65,6 +76,9 @@
     "environment": "dev",
     "api_keys": {
       "dev-api-key": "system"
+    },
+    "service_secrets": {
+      "service-hmac-key-id": "replace-me"
     },
     "agent_secrets": {
       "nomos": "dev-agent-secret"
@@ -75,5 +89,11 @@
       "audience": "",
       "public_key_path": ""
     }
+  },
+  "redaction": {
+    "patterns": [
+      "(?i)authorization:\\s*bearer\\s+[A-Za-z0-9._-]+",
+      "AKIA[0-9A-Z]{16}"
+    ]
   }
 }

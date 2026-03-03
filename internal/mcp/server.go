@@ -174,7 +174,7 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 				}
 				continue
 			}
-			resp := s.handleLegacyLine(line)
+			resp := s.handleLinePayload(line)
 			if writeErr := writeJSONLine(writer, resp); writeErr != nil {
 				s.logger.Error("mcp stdio line write failure: " + writeErr.Error())
 				return writeErr
@@ -200,6 +200,13 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 	}
 }
 
+func (s *Server) handleLinePayload(line []byte) any {
+	if isRPCPayload(line) {
+		return s.handleRPCPayload(line)
+	}
+	return s.handleLegacyLine(line)
+}
+
 func (s *Server) handleLegacyLine(line []byte) Response {
 	var req Request
 	dec := json.NewDecoder(bytes.NewReader(line))
@@ -210,6 +217,15 @@ func (s *Server) handleLegacyLine(line []byte) Response {
 	}
 	s.logger.Debug("handling MCP legacy request")
 	return s.handleRequest(req)
+}
+
+func isRPCPayload(payload []byte) bool {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return false
+	}
+	_, ok := envelope["jsonrpc"]
+	return ok
 }
 
 func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
@@ -369,7 +385,7 @@ func writeFramedPayload(writer *bufio.Writer, payload *rpcResponse) error {
 	return writer.Flush()
 }
 
-func writeJSONLine(writer *bufio.Writer, payload Response) error {
+func writeJSONLine(writer *bufio.Writer, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
