@@ -343,6 +343,9 @@ jobs:
           [[ ${doctor_bad_format_status} -eq 2 ]]
           [[ "${doctor_bad_format_output}" == *"invalid --format: use text or json"* ]]
 
+      - name: MCP capability and not-found smoke
+        run: go test ./internal/mcp -run "TestCapabilitiesSurfaceAssuranceLevelAndNotice|TestHandleRequestMapsMissingFilesToNotFound"
+
   normalization-corpus-matrix:
     name: Normalization Corpus Matrix (${{ matrix.os }})
     if: github.event_name != 'push' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
