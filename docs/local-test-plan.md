@@ -305,17 +305,35 @@ Expected:
 
 ## MCP With Claude Code
 
-The commands below use the currently installed Claude Code CLI. Use absolute paths so the MCP registration works from any directory.
+The commands below use the current Claude Code MCP syntax from the Claude Code MCP docs:
+
+- local stdio syntax: `claude mcp add --transport stdio [options] <name> -- <command> [args...]`
+- use `--scope project` if you want the server definition written to the project `.mcp.json`
+
+Important Windows note:
+
+- on native Windows, the `cmd /c` wrapper is required for local MCP servers launched through `npx`
+- Nomos does not need that wrapper here because you are launching `nomos.exe` directly, not `npx`
+
+Use absolute paths so the MCP registration works from any directory.
 
 ### Scenario 16: Register Nomos as a Claude Code MCP server
 
 ```powershell
-claude mcp add -s project nomos-local -- $NomosExe mcp -c $ConfigCodex -p $SafeDevYaml
+claude mcp add --transport stdio --scope project nomos-local -- $NomosExe mcp -c $ConfigCodex -p $SafeDevYaml
 ```
 
 Expected:
 
 - server is added without error
+
+If you want to verify the Windows `npx` rule separately, this is the correct pattern for native Windows:
+
+```powershell
+claude mcp add --transport stdio sample-npx-server -- cmd /c npx -y @some/package
+```
+
+Do not use that wrapper for the Nomos binary itself.
 
 ### Scenario 17: Verify the MCP registration
 
