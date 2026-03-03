@@ -298,11 +298,11 @@ jobs:
           [[ ${traversal_status} -ne 0 ]]
           [[ "${traversal_output}" == *"NORMALIZATION_ERROR:"* ]]
 
-          "${BIN_PATH}" doctor -c ./config.codex.json > "${TEST_DIR}/doctor.txt"
+          "${BIN_PATH}" doctor -c ./testdata/ci/config.smoke.json > "${TEST_DIR}/doctor.txt"
           cat "${TEST_DIR}/doctor.txt"
           grep -q "Result: READY" "${TEST_DIR}/doctor.txt"
 
-          "${BIN_PATH}" doctor -c ./config.codex.json --format json > "${TEST_DIR}/doctor.json"
+          "${BIN_PATH}" doctor -c ./testdata/ci/config.smoke.json --format json > "${TEST_DIR}/doctor.json"
           cat "${TEST_DIR}/doctor.json"
 
           python3 - <<'PY' "${TEST_DIR}/doctor.json"
@@ -316,7 +316,7 @@ jobs:
           assert payload["policy_bundle_hash"], payload
           PY
 
-          python3 - <<'PY' ./config.codex.json "${TEST_DIR}/config-doctor-missing-bundle.json"
+          python3 - <<'PY' ./testdata/ci/config.smoke.json "${TEST_DIR}/config-doctor-missing-bundle.json"
           import json
           import pathlib
           import sys
@@ -331,7 +331,7 @@ jobs:
           set +e
           doctor_not_ready_output="$("${BIN_PATH}" doctor -c "${TEST_DIR}/config-doctor-missing-bundle.json" 2>&1)"
           doctor_not_ready_status=$?
-          doctor_bad_format_output="$("${BIN_PATH}" doctor -c ./config.codex.json --format yaml 2>&1)"
+          doctor_bad_format_output="$("${BIN_PATH}" doctor -c ./testdata/ci/config.smoke.json --format yaml 2>&1)"
           doctor_bad_format_status=$?
           set -e
 

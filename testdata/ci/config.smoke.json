@@ -1,0 +1,99 @@
+{
+  "gateway": {
+    "listen": ":8080",
+    "transport": "http",
+    "concurrency_limit": 32,
+    "rate_limit_per_minute": 120,
+    "circuit_breaker_failures": 5,
+    "circuit_breaker_cooldown_seconds": 60,
+    "tls": {
+      "enabled": false,
+      "cert_file": "",
+      "key_file": "",
+      "client_ca_file": "",
+      "require_mtls": false
+    }
+  },
+  "runtime": {
+    "stateless_mode": false,
+    "strong_guarantee": false,
+    "deployment_mode": "unmanaged"
+  },
+  "policy": {
+    "policy_bundle_path": "../../policies/all-fields.example.yaml",
+    "verify_signatures": false,
+    "signature_path": "",
+    "public_key_path": "",
+    "explain_suggestions": true
+  },
+  "executor": {
+    "sandbox_enabled": true,
+    "workspace_root": "../..",
+    "max_output_bytes": 65536,
+    "max_output_lines": 200,
+    "sandbox_profile": "local"
+  },
+  "credentials": {
+    "enabled": false,
+    "secrets": [
+      {
+        "id": "github_token",
+        "env_key": "GITHUB_TOKEN",
+        "value": "replace-me",
+        "ttl_seconds": 300
+      }
+    ]
+  },
+  "audit": {
+    "sink": "stdout"
+  },
+  "mcp": {
+    "enabled": true
+  },
+  "upstream": {
+    "routes": [
+      {
+        "url": "https://api.example.com/v1",
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "path_prefix": "/v1"
+      }
+    ]
+  },
+  "approvals": {
+    "enabled": false,
+    "store_path": "../../.tmp/ci-approvals.db",
+    "ttl_seconds": 900,
+    "webhook_token": "replace-me",
+    "slack_token": "replace-me",
+    "teams_token": "replace-me"
+  },
+  "identity": {
+    "principal": "system",
+    "agent": "nomos",
+    "environment": "dev",
+    "api_keys": {
+      "dev-api-key": "system"
+    },
+    "service_secrets": {
+      "service-hmac-key-id": "replace-me"
+    },
+    "agent_secrets": {
+      "nomos": "dev-agent-secret"
+    },
+    "oidc": {
+      "enabled": false,
+      "issuer": "",
+      "audience": "",
+      "public_key_path": ""
+    }
+  },
+  "redaction": {
+    "patterns": [
+      "(?i)authorization:\\s*bearer\\s+[A-Za-z0-9._-]+",
+      "AKIA[0-9A-Z]{16}"
+    ]
+  }
+}
