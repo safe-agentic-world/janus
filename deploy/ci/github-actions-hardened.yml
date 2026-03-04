@@ -28,6 +28,68 @@ jobs:
 
       - name: Strong-guarantee preflight
         run: |
-          echo "Reference workflow only."
-          echo "Run 'nomos doctor' with an environment-specific strong-guarantee config before agent execution."
-          echo "That config must satisfy the strong-guarantee hardening checks (container sandbox, mTLS, OIDC, durable audit, deployment-bound environment)."
+          mkdir -p ./.tmp/strong
+          cat > ./.tmp/strong/bundle.json <<'EOF'
+          {"version":"v1","rules":[{"id":"allow-readme","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["prod"]}]}
+          EOF
+          cat > ./.tmp/strong/oidc.pub.pem <<'EOF'
+          -----BEGIN PUBLIC KEY-----
+          placeholder
+          -----END PUBLIC KEY-----
+          EOF
+          printf "placeholder" > ./.tmp/strong/tls.crt
+          printf "placeholder" > ./.tmp/strong/tls.key
+          printf "placeholder" > ./.tmp/strong/client-ca.pem
+          cat > ./.tmp/strong/config.json <<'EOF'
+          {
+            "gateway": {
+              "listen": ":8080",
+              "transport": "http",
+              "tls": {
+                "enabled": true,
+                "cert_file": "tls.crt",
+                "key_file": "tls.key",
+                "client_ca_file": "client-ca.pem",
+                "require_mtls": true
+              }
+            },
+            "runtime": {
+              "stateless_mode": false,
+              "strong_guarantee": true,
+              "deployment_mode": "ci"
+            },
+            "policy": {
+              "policy_bundle_path": "bundle.json"
+            },
+            "executor": {
+              "sandbox_enabled": true,
+              "sandbox_profile": "container",
+              "workspace_root": "../.."
+            },
+            "audit": {
+              "sink": "sqlite:./audit.db"
+            },
+            "mcp": {
+              "enabled": true
+            },
+            "approvals": {
+              "enabled": false
+            },
+            "identity": {
+              "principal": "system",
+              "agent": "nomos",
+              "environment": "prod",
+              "api_keys": {},
+              "agent_secrets": {
+                "nomos": "placeholder-agent-secret"
+              },
+              "oidc": {
+                "enabled": true,
+                "issuer": "https://issuer.example",
+                "audience": "nomos",
+                "public_key_path": "oidc.pub.pem"
+              }
+            }
+          }
+          EOF
+          ./bin/nomos doctor -c ./.tmp/strong/config.json --format json

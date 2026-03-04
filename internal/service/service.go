@@ -16,10 +16,12 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/sandbox"
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
 type Service struct {
 	policy         *policy.Engine
+	externalPolicy ExternalPolicyEvaluator
 	fsReader       *executor.FSReader
 	fsWriter       *executor.FSWriter
 	patcher        *executor.PatchApplier
@@ -31,6 +33,7 @@ type Service struct {
 	credentials    CredentialBroker
 	sandboxProfile string
 	assuranceLevel string
+	telemetry      *telemetry.Emitter
 	now            func() time.Time
 }
 
@@ -42,6 +45,10 @@ type ApprovalStore interface {
 type CredentialBroker interface {
 	Checkout(secretID, principal, agent, environment, traceID string) (credentials.Lease, error)
 	MaterializeEnv(leaseIDs []string, envAllowlist []string, principal, agent, environment, traceID string) (map[string]string, []string, error)
+}
+
+type ExternalPolicyEvaluator interface {
+	Evaluate(normalize.NormalizedAction) (policy.Decision, error)
 }
 
 func New(policyEngine *policy.Engine, fsReader *executor.FSReader, fsWriter *executor.FSWriter, patcher *executor.PatchApplier, execRunner *executor.ExecRunner, httpRunner *executor.HTTPRunner, recorder audit.Recorder, redactor *redact.Redactor, approvals ApprovalStore, credentialBroker CredentialBroker, sandboxProfile string, now func() time.Time) *Service {
@@ -76,6 +83,20 @@ func (s *Service) SetAssuranceLevel(level string) {
 	s.assuranceLevel = level
 }
 
+func (s *Service) SetTelemetry(emitter *telemetry.Emitter) {
+	if s == nil {
+		return
+	}
+	s.telemetry = emitter
+}
+
+func (s *Service) SetExternalPolicy(evaluator ExternalPolicyEvaluator) {
+	if s == nil {
+		return
+	}
+	s.externalPolicy = evaluator
+}
+
 func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	if s.policy == nil || s.recorder == nil || s.redactor == nil {
 		return action.Response{}, errors.New("service not initialized")
@@ -101,18 +122,60 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	defer func() {
 		s.emitCompletedAudit(auditCtx, started)
 	}()
+	s.emitTelemetryEvent("request.lifecycle", actionInput.TraceID, "", map[string]any{
+		"action_id":   actionInput.ActionID,
+		"action_type": actionInput.ActionType,
+		"resource":    actionInput.Resource,
+		"environment": actionInput.Environment,
+		"principal":   actionInput.Principal,
+		"agent":       actionInput.Agent,
+		"phase":       "start",
+		"correlation": actionInput.TraceID,
+		"assurance":   s.assuranceLevel,
+	})
 
 	s.emitTraceEvent("trace.start", actionInput.TraceID, actionInput.ActionID)
 	normalized, err := normalize.Action(actionInput)
 	if err != nil {
 		auditCtx.resultClass = resultNormError
 		auditCtx.retryable = false
+		s.emitTelemetryMetric("nomos.decisions", actionInput.TraceID, "counter", 1, map[string]string{"result": resultNormError})
+		s.emitTelemetryEvent("request.lifecycle", actionInput.TraceID, resultNormError, map[string]any{
+			"action_id": actionInput.ActionID,
+			"phase":     "end",
+		})
 		s.emitTraceEvent("trace.end", actionInput.TraceID, actionInput.ActionID)
 		return action.Response{}, err
 	}
 	auditCtx.normalized = &normalized
 
 	decision := s.policy.Evaluate(normalized)
+	if s.externalPolicy != nil {
+		externalDecision, err := s.externalPolicy.Evaluate(normalized)
+		if err != nil {
+			decision = policy.Decision{
+				Decision:         policy.DecisionDeny,
+				ReasonCode:       "deny_by_external_policy_error",
+				MatchedRuleIDs:   []string{},
+				Obligations:      map[string]any{},
+				PolicyBundleHash: "opa:error",
+			}
+		} else {
+			decision = externalDecision
+			if decision.MatchedRuleIDs == nil {
+				decision.MatchedRuleIDs = []string{}
+			}
+			if decision.Obligations == nil {
+				decision.Obligations = map[string]any{}
+			}
+		}
+	}
+	s.emitTelemetryEvent("policy.evaluation", normalized.TraceID, decision.Decision, map[string]any{
+		"action_id":          normalized.ActionID,
+		"action_type":        normalized.ActionType,
+		"matched_rule_ids":   decision.MatchedRuleIDs,
+		"policy_bundle_hash": decision.PolicyBundleHash,
+	})
 	auditCtx.decision = decision
 	auditCtx.riskLevel, auditCtx.riskFlags = riskVisibility(normalized)
 	auditCtx.sandboxMode, auditCtx.networkMode = visibilityModes(decision.Obligations, s.sandboxProfile, normalized.ActionType)
@@ -239,6 +302,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 			}
 			auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 			auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
+			s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
 			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
 			return response, nil
 		}
@@ -247,14 +311,20 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	if response.Decision != policy.DecisionAllow {
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
+		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
 		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
 		return response, nil
 	}
 
 	if normalized.ActionType == "fs.read" {
+		s.emitTelemetryEvent("executor.run", normalized.TraceID, "", map[string]any{
+			"action_id":   normalized.ActionID,
+			"action_type": normalized.ActionType,
+		})
 		readResult, err := s.fsReader.Read(normalized.Resource)
 		if err != nil {
 			auditCtx.resultClass, auditCtx.retryable = classifyError(err)
+			s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
 			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
 			return response, err
 		}
@@ -267,10 +337,15 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		}
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
+		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
 		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
 		return response, nil
 	}
 
+	s.emitTelemetryEvent("executor.run", normalized.TraceID, "", map[string]any{
+		"action_id":   normalized.ActionID,
+		"action_type": normalized.ActionType,
+	})
 	resp, metadata, err := s.handleAllowedAction(normalized, actionInput, decision.Obligations, response)
 	if err != nil {
 		auditCtx.resultClass, auditCtx.retryable = classifyError(err)
@@ -284,6 +359,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 			auditCtx.executorMetadata = metadata
 		}
 	}
+	s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, resp.Decision)
 	s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
 	return resp, err
 }
@@ -494,4 +570,57 @@ func trimToLines(value string, maxLines int) (string, bool) {
 		return "", false
 	}
 	return value, false
+}
+
+func (s *Service) emitTelemetryEvent(name, traceID, status string, attrs map[string]any) {
+	if s == nil || s.telemetry == nil || !s.telemetry.Enabled() {
+		return
+	}
+	s.telemetry.Event(telemetry.Event{
+		SignalType:  "trace",
+		EventName:   name,
+		TraceID:     traceID,
+		Correlation: traceID,
+		Status:      status,
+		Attributes:  attrs,
+	})
+}
+
+func (s *Service) emitTelemetryMetric(name, traceID, kind string, value int64, attrs map[string]string) {
+	if s == nil || s.telemetry == nil || !s.telemetry.Enabled() {
+		return
+	}
+	s.telemetry.Metric(telemetry.Metric{
+		SignalType: "metric",
+		Name:       name,
+		Kind:       kind,
+		Value:      value,
+		TraceID:    traceID,
+		Attributes: attrs,
+	})
+}
+
+func (s *Service) emitDecisionTelemetry(traceID, resultClass, decision string) {
+	decisionLabel := decision
+	if strings.TrimSpace(decisionLabel) == "" {
+		decisionLabel = "UNKNOWN"
+	}
+	s.emitTelemetryMetric("nomos.decisions", traceID, "counter", 1, map[string]string{
+		"decision": decisionLabel,
+		"result":   resultClass,
+	})
+	s.emitTelemetryEvent("request.lifecycle", traceID, resultClass, map[string]any{
+		"phase":    "end",
+		"decision": decisionLabel,
+		"result":   resultClass,
+	})
+	if resultClass == resultApprovalNeeded {
+		s.emitTelemetryMetric("nomos.approvals", traceID, "counter", 1, map[string]string{"result": resultClass})
+	}
+	if resultClass == resultInternalError || resultClass == resultUpstreamError || resultClass == resultExecTimeout {
+		s.emitTelemetryMetric("nomos.failures", traceID, "counter", 1, map[string]string{"result": resultClass})
+	}
+	if resultClass == resultInternalError || resultClass == resultUpstreamError || resultClass == resultExecTimeout || resultClass == resultApprovalNeeded {
+		s.emitTelemetryMetric("nomos.retries", traceID, "counter", 1, map[string]string{"result": resultClass})
+	}
 }

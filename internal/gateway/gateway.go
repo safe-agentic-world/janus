@@ -23,9 +23,11 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/executor"
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
+	"github.com/safe-agentic-world/nomos/internal/opabridge"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/service"
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
@@ -38,6 +40,7 @@ type Gateway struct {
 	service        *service.Service
 	approvals      *approval.Store
 	auth           *identity.Authenticator
+	telemetry      *telemetry.Emitter
 	actionTokens   chan struct{}
 	rateLimiter    *principalLimiter
 	breaker        *principalBreaker
@@ -47,6 +50,13 @@ type Gateway struct {
 
 func New(cfg Config) (*Gateway, error) {
 	redactor, err := redact.NewRedactor(cfg.Redaction.Patterns)
+	if err != nil {
+		return nil, err
+	}
+	telemetryExporter, err := telemetry.NewExporter(telemetry.Config{
+		Enabled: cfg.Telemetry.Enabled,
+		Sink:    cfg.Telemetry.Sink,
+	}, redactor)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +106,19 @@ func New(cfg Config) (*Gateway, error) {
 	execRunner := executor.NewExecRunner(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	httpRunner := executor.NewHTTPRunner(cfg.Executor.MaxOutputBytes)
 	svc := service.New(engine, exec, writerExec, patcher, execRunner, httpRunner, writer, redactor, approvalStore, credentialBroker, cfg.Executor.SandboxProfile, time.Now)
+	if cfg.Policy.OPA.Enabled {
+		backend, err := opabridge.NewCommandBackend(opabridge.CommandConfig{
+			BinaryPath: cfg.Policy.OPA.BinaryPath,
+			PolicyPath: cfg.Policy.OPA.PolicyPath,
+			Query:      cfg.Policy.OPA.Query,
+			Timeout:    time.Duration(cfg.Policy.OPA.TimeoutMS) * time.Millisecond,
+		})
+		if err != nil {
+			return nil, err
+		}
+		svc.SetExternalPolicy(backend)
+	}
+	svc.SetTelemetry(telemetry.NewEmitter(telemetryExporter))
 	assuranceLevel := assurance.Derive(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee)
 	svc.SetAssuranceLevel(assuranceLevel)
 	authenticator, err := identity.NewAuthenticator(identity.AuthConfig{
@@ -107,6 +130,8 @@ func New(cfg Config) (*Gateway, error) {
 		OIDCIssuer:        cfg.Identity.OIDC.Issuer,
 		OIDCAudience:      cfg.Identity.OIDC.Audience,
 		OIDCPublicKeyPath: cfg.Identity.OIDC.PublicKeyPath,
+		SPIFFEEnabled:     cfg.Identity.SPIFFE.Enabled,
+		SPIFFETrustDomain: cfg.Identity.SPIFFE.TrustDomain,
 	})
 	if err != nil {
 		return nil, err
@@ -118,6 +143,7 @@ func New(cfg Config) (*Gateway, error) {
 		service:        svc,
 		approvals:      approvalStore,
 		auth:           authenticator,
+		telemetry:      telemetry.NewEmitter(telemetryExporter),
 		actionTokens:   make(chan struct{}, limit),
 		rateLimiter:    newPrincipalLimiter(rateLimit, time.Now),
 		breaker:        newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, time.Now),
@@ -174,12 +200,32 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	if err != nil {
 		return nil, err
 	}
+	telemetryExporter, err := telemetry.NewExporter(telemetry.Config{
+		Enabled: cfg.Telemetry.Enabled,
+		Sink:    cfg.Telemetry.Sink,
+	}, redactor)
+	if err != nil {
+		return nil, err
+	}
 	exec := executor.NewFSReader(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines)
 	writerExec := executor.NewFSWriter(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	patcher := executor.NewPatchApplier(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	execRunner := executor.NewExecRunner(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	httpRunner := executor.NewHTTPRunner(cfg.Executor.MaxOutputBytes)
 	svc := service.New(engine, exec, writerExec, patcher, execRunner, httpRunner, recorder, redactor, approvalStore, credentialBroker, cfg.Executor.SandboxProfile, now)
+	if cfg.Policy.OPA.Enabled {
+		backend, err := opabridge.NewCommandBackend(opabridge.CommandConfig{
+			BinaryPath: cfg.Policy.OPA.BinaryPath,
+			PolicyPath: cfg.Policy.OPA.PolicyPath,
+			Query:      cfg.Policy.OPA.Query,
+			Timeout:    time.Duration(cfg.Policy.OPA.TimeoutMS) * time.Millisecond,
+		})
+		if err != nil {
+			return nil, err
+		}
+		svc.SetExternalPolicy(backend)
+	}
+	svc.SetTelemetry(telemetry.NewEmitter(telemetryExporter))
 	assuranceLevel := assurance.Derive(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee)
 	svc.SetAssuranceLevel(assuranceLevel)
 	authenticator, err := identity.NewAuthenticator(identity.AuthConfig{
@@ -191,6 +237,8 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		OIDCIssuer:        cfg.Identity.OIDC.Issuer,
 		OIDCAudience:      cfg.Identity.OIDC.Audience,
 		OIDCPublicKeyPath: cfg.Identity.OIDC.PublicKeyPath,
+		SPIFFEEnabled:     cfg.Identity.SPIFFE.Enabled,
+		SPIFFETrustDomain: cfg.Identity.SPIFFE.TrustDomain,
 	})
 	if err != nil {
 		return nil, err
@@ -202,6 +250,7 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		service:        svc,
 		approvals:      approvalStore,
 		auth:           authenticator,
+		telemetry:      telemetry.NewEmitter(telemetryExporter),
 		actionTokens:   make(chan struct{}, limit),
 		rateLimiter:    newPrincipalLimiter(rateLimit, now),
 		breaker:        newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, now),
@@ -293,6 +342,8 @@ func (g *Gateway) handleAction(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	traceContext := telemetry.ParseTraceContext(r.Header)
+	telemetry.PropagateTraceContext(w, traceContext)
 	if !g.tryAcquireActionSlot() {
 		g.respondError(w, http.StatusTooManyRequests, "rate_limited", "concurrency limit reached")
 		return
@@ -338,6 +389,22 @@ func (g *Gateway) handleAction(w http.ResponseWriter, r *http.Request) {
 	if err := g.validateUpstreamRoute(act); err != nil {
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
+	}
+	if g.telemetry != nil && g.telemetry.Enabled() {
+		g.telemetry.Event(telemetry.Event{
+			SignalType:  "trace",
+			EventName:   "gateway.request",
+			TraceID:     act.TraceID,
+			Correlation: act.TraceID,
+			Traceparent: traceContext.Traceparent,
+			Tracestate:  traceContext.Tracestate,
+			Status:      "accepted",
+			Attributes: map[string]any{
+				"action_id":   act.ActionID,
+				"action_type": act.ActionType,
+				"transport":   "http",
+			},
+		})
 	}
 
 	resp, err := g.service.Process(act)

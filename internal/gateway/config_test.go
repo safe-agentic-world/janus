@@ -451,3 +451,64 @@ func TestLoadConfigSupportsTypedAndLegacyUpstreamRoutes(t *testing.T) {
 		t.Fatalf("unexpected legacy routes: %+v", cfg.Upstream.Routes)
 	}
 }
+
+func TestLoadConfigSupportsTelemetryAndSPIFFE(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	opaPolicyPath := filepath.Join(dir, "policy.rego")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	if err := os.WriteFile(opaPolicyPath, []byte(`package nomos`), 0o600); err != nil {
+		t.Fatalf("write opa policy: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy": map[string]any{
+			"policy_bundle_path": bundlePath,
+			"opa": map[string]any{
+				"enabled":     true,
+				"binary_path": "pwsh",
+				"policy_path": opaPolicyPath,
+				"query":       "data.nomos.decision",
+				"timeout_ms":  500,
+			},
+		},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+		},
+		"audit":     map[string]any{"sink": "stdout"},
+		"telemetry": map[string]any{"enabled": true, "sink": "otlp:http://127.0.0.1:4318"},
+		"mcp":       map[string]any{"enabled": false},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+			"spiffe": map[string]any{
+				"enabled":      true,
+				"trust_domain": "example.org",
+			},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.Telemetry.Enabled || cfg.Telemetry.Sink != "otlp:http://127.0.0.1:4318" {
+		t.Fatalf("unexpected telemetry config: %+v", cfg.Telemetry)
+	}
+	if !cfg.Identity.SPIFFE.Enabled || cfg.Identity.SPIFFE.TrustDomain != "example.org" {
+		t.Fatalf("unexpected SPIFFE config: %+v", cfg.Identity.SPIFFE)
+	}
+	if !cfg.Policy.OPA.Enabled || cfg.Policy.OPA.BinaryPath != "pwsh" || cfg.Policy.OPA.PolicyPath != opaPolicyPath || cfg.Policy.OPA.Query != "data.nomos.decision" || cfg.Policy.OPA.TimeoutMS != 500 {
+		t.Fatalf("unexpected OPA config: %+v", cfg.Policy.OPA)
+	}
+}

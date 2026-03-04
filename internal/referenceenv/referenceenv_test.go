@@ -23,7 +23,10 @@ func (recordSink) WriteEvent(audit.Event) error { return nil }
 
 func TestStrongGuaranteeManifestBlocksDirectNetworkEgress(t *testing.T) {
 	manifest := loadStrongManifest(t)
-	agentPolicy := findManifestDoc(t, manifest, "kind: NetworkPolicy", "name: sample-agent-egress")
+	agentPolicy, ok := findManifestDoc(manifest, "kind: NetworkPolicy", "name: sample-agent-egress")
+	if !ok {
+		t.Fatal("missing sample-agent egress network policy")
+	}
 	requireContains(t, agentPolicy, "app: sample-agent")
 	requireContains(t, agentPolicy, "app: nomos")
 	requireContains(t, agentPolicy, "port: 8080")
@@ -32,21 +35,58 @@ func TestStrongGuaranteeManifestBlocksDirectNetworkEgress(t *testing.T) {
 
 func TestStrongGuaranteeManifestBlocksDirectCredentialAccess(t *testing.T) {
 	manifest := loadStrongManifest(t)
-	agentDeployment := findManifestDoc(t, manifest, "kind: Deployment", "name: sample-agent")
+	agentDeployment, ok := findManifestDoc(manifest, "kind: Deployment", "name: sample-agent")
+	if !ok {
+		t.Fatal("missing sample-agent deployment")
+	}
 	requireContains(t, agentDeployment, "serviceAccountName: sample-agent")
 	requireContains(t, agentDeployment, "automountServiceAccountToken: false")
 	requireNotContains(t, agentDeployment, "env:")
 	requireNotContains(t, agentDeployment, "envFrom:")
 	requireNotContains(t, agentDeployment, "secretKeyRef:")
+	requireNotContains(t, agentDeployment, "secret:")
+	requireNotContains(t, agentDeployment, "projected:")
 }
 
 func TestStrongGuaranteeManifestBlocksFilesystemEscape(t *testing.T) {
 	manifest := loadStrongManifest(t)
-	agentDeployment := findManifestDoc(t, manifest, "kind: Deployment", "name: sample-agent")
+	agentDeployment, ok := findManifestDoc(manifest, "kind: Deployment", "name: sample-agent")
+	if !ok {
+		t.Fatal("missing sample-agent deployment")
+	}
+	requireContains(t, agentDeployment, "runAsNonRoot: true")
 	requireContains(t, agentDeployment, "readOnlyRootFilesystem: true")
 	requireContains(t, agentDeployment, "allowPrivilegeEscalation: false")
 	requireNotContains(t, agentDeployment, "hostPath:")
 	requireNotContains(t, agentDeployment, "volumeMounts:")
+}
+
+func TestStrongGuaranteeManifestValidationHarness(t *testing.T) {
+	manifest := loadStrongManifest(t)
+	report := ValidateStrongGuaranteeManifest(manifest)
+	if !report.AllPassed() {
+		var failed []string
+		for _, check := range report.Checks {
+			if !check.OK {
+				failed = append(failed, check.ID)
+			}
+		}
+		t.Fatalf("expected strong-guarantee manifest checks to pass, failed=%v", failed)
+	}
+}
+
+func TestStrongGuaranteeCIWorkflowValidationHarness(t *testing.T) {
+	workflow := loadStrongWorkflow(t)
+	report := ValidateStrongGuaranteeCIWorkflow(workflow)
+	if !report.AllPassed() {
+		var failed []string
+		for _, check := range report.Checks {
+			if !check.OK {
+				failed = append(failed, check.ID)
+			}
+		}
+		t.Fatalf("expected strong-guarantee CI workflow checks to pass, failed=%v", failed)
+	}
 }
 
 func TestOnlyNomosMediatedAllowedActionSucceeds(t *testing.T) {
@@ -140,22 +180,13 @@ func loadStrongManifest(t *testing.T) string {
 	return string(data)
 }
 
-func findManifestDoc(t *testing.T, manifest string, required ...string) string {
+func loadStrongWorkflow(t *testing.T) string {
 	t.Helper()
-	for _, doc := range strings.Split(manifest, "---") {
-		matches := true
-		for _, pattern := range required {
-			if !strings.Contains(doc, pattern) {
-				matches = false
-				break
-			}
-		}
-		if matches {
-			return doc
-		}
+	data, err := os.ReadFile(filepath.Clean(filepath.Join("..", "..", "deploy", "ci", "github-actions-hardened.yml")))
+	if err != nil {
+		t.Fatalf("read strong workflow: %v", err)
 	}
-	t.Fatalf("missing manifest doc with patterns: %v", required)
-	return ""
+	return string(data)
 }
 
 func requireContains(t *testing.T, text, pattern string) {

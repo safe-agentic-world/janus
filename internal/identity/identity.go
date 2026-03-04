@@ -15,4 +15,6 @@ type AuthConfig struct {
 	OIDCIssuer        string
 	OIDCAudience      string
 	OIDCPublicKeyPath string
+	SPIFFEEnabled     bool
+	SPIFFETrustDomain string
 }

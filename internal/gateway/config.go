@@ -20,6 +20,7 @@ type Config struct {
 	Executor    ExecutorConfig    `json:"executor"`
 	Credentials CredentialsConfig `json:"credentials"`
 	Audit       AuditConfig       `json:"audit"`
+	Telemetry   TelemetryConfig   `json:"telemetry"`
 	MCP         MCPConfig         `json:"mcp"`
 	Upstream    UpstreamConfig    `json:"upstream"`
 	Approvals   ApprovalsConfig   `json:"approvals"`
@@ -52,11 +53,20 @@ type RuntimeConfig struct {
 }
 
 type PolicyConfig struct {
-	BundlePath         string `json:"policy_bundle_path"`
-	VerifySignatures   bool   `json:"verify_signatures"`
-	SignaturePath      string `json:"signature_path"`
-	PublicKeyPath      string `json:"public_key_path"`
-	ExplainSuggestions *bool  `json:"explain_suggestions,omitempty"`
+	BundlePath         string    `json:"policy_bundle_path"`
+	VerifySignatures   bool      `json:"verify_signatures"`
+	SignaturePath      string    `json:"signature_path"`
+	PublicKeyPath      string    `json:"public_key_path"`
+	ExplainSuggestions *bool     `json:"explain_suggestions,omitempty"`
+	OPA                OPAConfig `json:"opa"`
+}
+
+type OPAConfig struct {
+	Enabled    bool   `json:"enabled"`
+	BinaryPath string `json:"binary_path"`
+	PolicyPath string `json:"policy_path"`
+	Query      string `json:"query"`
+	TimeoutMS  int    `json:"timeout_ms"`
 }
 
 type ExecutorConfig struct {
@@ -81,6 +91,11 @@ type CredentialSecret struct {
 
 type AuditConfig struct {
 	Sink string `json:"sink"`
+}
+
+type TelemetryConfig struct {
+	Enabled bool   `json:"enabled"`
+	Sink    string `json:"sink"`
 }
 
 type RedactionConfig struct {
@@ -151,6 +166,7 @@ type IdentityConfig struct {
 	ServiceSecrets map[string]string `json:"service_secrets"`
 	AgentSecrets   map[string]string `json:"agent_secrets"`
 	OIDC           OIDCConfig        `json:"oidc"`
+	SPIFFE         SPIFFEConfig      `json:"spiffe"`
 }
 
 type OIDCConfig struct {
@@ -158,6 +174,11 @@ type OIDCConfig struct {
 	Issuer        string `json:"issuer"`
 	Audience      string `json:"audience"`
 	PublicKeyPath string `json:"public_key_path"`
+}
+
+type SPIFFEConfig struct {
+	Enabled     bool   `json:"enabled"`
+	TrustDomain string `json:"trust_domain"`
 }
 
 func LoadConfig(path string, getenv func(string) string, policyBundleOverride string) (Config, error) {
@@ -215,6 +236,9 @@ func (c *Config) SetDefaults() error {
 	if c.Audit.Sink == "" {
 		c.Audit.Sink = "stdout"
 	}
+	if c.Telemetry.Enabled && c.Telemetry.Sink == "" {
+		c.Telemetry.Sink = "stdout"
+	}
 	if c.Executor.WorkspaceRoot == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -231,6 +255,9 @@ func (c *Config) SetDefaults() error {
 	if c.Policy.ExplainSuggestions == nil {
 		enabled := true
 		c.Policy.ExplainSuggestions = &enabled
+	}
+	if c.Policy.OPA.Enabled && c.Policy.OPA.TimeoutMS == 0 {
+		c.Policy.OPA.TimeoutMS = 2000
 	}
 	if strings.TrimSpace(c.Runtime.DeploymentMode) == "" {
 		c.Runtime.DeploymentMode = "unmanaged"
@@ -293,8 +320,8 @@ func (c Config) Validate() error {
 	if c.Identity.Environment == "" {
 		errs = append(errs, "identity.environment is required")
 	}
-	if len(c.Identity.APIKeys) == 0 && len(c.Identity.ServiceSecrets) == 0 && !c.Identity.OIDC.Enabled {
-		errs = append(errs, "identity.api_keys or identity.service_secrets or identity.oidc.enabled is required")
+	if len(c.Identity.APIKeys) == 0 && len(c.Identity.ServiceSecrets) == 0 && !c.Identity.OIDC.Enabled && !c.Identity.SPIFFE.Enabled {
+		errs = append(errs, "identity.api_keys or identity.service_secrets or identity.oidc.enabled or identity.spiffe.enabled is required")
 	}
 	if len(c.Identity.AgentSecrets) == 0 {
 		errs = append(errs, "identity.agent_secrets is required")
@@ -309,6 +336,9 @@ func (c Config) Validate() error {
 		if _, err := os.Stat(c.Identity.OIDC.PublicKeyPath); err != nil {
 			return fmt.Errorf("oidc public key path invalid: %w", err)
 		}
+	}
+	if c.Identity.SPIFFE.Enabled && strings.TrimSpace(c.Identity.SPIFFE.TrustDomain) == "" {
+		return errors.New("identity.spiffe.trust_domain is required when spiffe.enabled is true")
 	}
 	if c.Runtime.StatelessMode {
 		if c.Approvals.Enabled {
@@ -338,6 +368,14 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if c.Telemetry.Enabled {
+		sink := strings.TrimSpace(c.Telemetry.Sink)
+		switch {
+		case sink == "stdout", sink == "stderr", strings.HasPrefix(sink, "otlp:"):
+		default:
+			return errors.New("telemetry.sink must be stdout, stderr, or otlp:<base_url>")
+		}
+	}
 	if c.Approvals.Enabled {
 		if c.Approvals.StorePath == "" {
 			return errors.New("approvals.store_path is required when approvals are enabled")
@@ -361,6 +399,23 @@ func (c Config) Validate() error {
 		}
 		if _, err := os.Stat(c.Policy.PublicKeyPath); err != nil {
 			return fmt.Errorf("policy public key path invalid: %w", err)
+		}
+	}
+	if c.Policy.OPA.Enabled {
+		if strings.TrimSpace(c.Policy.OPA.BinaryPath) == "" {
+			return errors.New("policy.opa.binary_path is required when policy.opa.enabled is true")
+		}
+		if strings.TrimSpace(c.Policy.OPA.PolicyPath) == "" {
+			return errors.New("policy.opa.policy_path is required when policy.opa.enabled is true")
+		}
+		if strings.TrimSpace(c.Policy.OPA.Query) == "" {
+			return errors.New("policy.opa.query is required when policy.opa.enabled is true")
+		}
+		if c.Policy.OPA.TimeoutMS <= 0 {
+			return errors.New("policy.opa.timeout_ms must be > 0 when policy.opa.enabled is true")
+		}
+		if _, err := os.Stat(c.Policy.OPA.PolicyPath); err != nil {
+			return fmt.Errorf("policy.opa.policy_path invalid: %w", err)
 		}
 	}
 	for _, route := range c.Upstream.Routes {
@@ -443,6 +498,25 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 			cfg.Policy.ExplainSuggestions = &parsed
 		}
 	}
+	if v := getenv("NOMOS_POLICY_OPA_ENABLED"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Policy.OPA.Enabled = parsed
+		}
+	}
+	if v := getenv("NOMOS_POLICY_OPA_BINARY_PATH"); v != "" {
+		cfg.Policy.OPA.BinaryPath = v
+	}
+	if v := getenv("NOMOS_POLICY_OPA_POLICY_PATH"); v != "" {
+		cfg.Policy.OPA.PolicyPath = v
+	}
+	if v := getenv("NOMOS_POLICY_OPA_QUERY"); v != "" {
+		cfg.Policy.OPA.Query = v
+	}
+	if v := getenv("NOMOS_POLICY_OPA_TIMEOUT_MS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Policy.OPA.TimeoutMS = parsed
+		}
+	}
 	if v := getenv("NOMOS_EXECUTOR_SANDBOX_ENABLED"); v != "" {
 		if parsed, ok := parseBool(v); ok {
 			cfg.Executor.SandboxEnabled = parsed
@@ -471,6 +545,14 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 	}
 	if v := getenv("NOMOS_AUDIT_SINK"); v != "" {
 		cfg.Audit.Sink = v
+	}
+	if v := getenv("NOMOS_TELEMETRY_ENABLED"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Telemetry.Enabled = parsed
+		}
+	}
+	if v := getenv("NOMOS_TELEMETRY_SINK"); v != "" {
+		cfg.Telemetry.Sink = v
 	}
 	if v := getenv("NOMOS_REDACTION_PATTERNS"); v != "" {
 		cfg.Redaction.Patterns = splitList(v)
@@ -544,6 +626,14 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 	if v := getenv("NOMOS_IDENTITY_OIDC_PUBLIC_KEY_PATH"); v != "" {
 		cfg.Identity.OIDC.PublicKeyPath = v
 	}
+	if v := getenv("NOMOS_IDENTITY_SPIFFE_ENABLED"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Identity.SPIFFE.Enabled = parsed
+		}
+	}
+	if v := getenv("NOMOS_IDENTITY_SPIFFE_TRUST_DOMAIN"); v != "" {
+		cfg.Identity.SPIFFE.TrustDomain = v
+	}
 }
 
 func splitList(value string) []string {
@@ -578,6 +668,7 @@ func (c *Config) ResolveRelativePaths(baseDir string) error {
 	c.Policy.BundlePath = resolveRelativePath(absBase, c.Policy.BundlePath)
 	c.Policy.SignaturePath = resolveRelativePath(absBase, c.Policy.SignaturePath)
 	c.Policy.PublicKeyPath = resolveRelativePath(absBase, c.Policy.PublicKeyPath)
+	c.Policy.OPA.PolicyPath = resolveRelativePath(absBase, c.Policy.OPA.PolicyPath)
 	c.Executor.WorkspaceRoot = resolveRelativePath(absBase, c.Executor.WorkspaceRoot)
 	c.Approvals.StorePath = resolveRelativePath(absBase, c.Approvals.StorePath)
 	c.Identity.OIDC.PublicKeyPath = resolveRelativePath(absBase, c.Identity.OIDC.PublicKeyPath)

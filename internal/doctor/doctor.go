@@ -161,11 +161,18 @@ func Run(options Options) (Report, error) {
 		containerSandbox := cfg.Executor.SandboxEnabled && strings.EqualFold(strings.TrimSpace(cfg.Executor.SandboxProfile), "container")
 		mark("strong.sandbox_container", containerSandbox, "container sandbox profile enforced", "set executor.sandbox_enabled=true and executor.sandbox_profile=container for strong-guarantee deployments")
 
+		controlledRuntime := isControlledStrongGuaranteeMode(cfg.Runtime.DeploymentMode)
+		mark("strong.controlled_runtime_mode", controlledRuntime, "controlled runtime deployment mode configured", "set runtime.deployment_mode to ci or k8s for strong-guarantee deployments")
+
+		networkBoundary := controlledRuntime
+		mark("strong.network_boundary_controlled", networkBoundary, "controlled runtime network boundary declared", "strong-guarantee deployments require an operator-enforced outer network boundary in ci or k8s")
+
 		mTLS := cfg.Gateway.TLS.Enabled && cfg.Gateway.TLS.RequireMTLS
 		mark("strong.gateway_mtls", mTLS, "gateway mTLS enforced", "enable gateway.tls.enabled=true and gateway.tls.require_mtls=true for strong-guarantee deployments")
 
 		workloadIdentity := cfg.Identity.OIDC.Enabled
 		mark("strong.workload_identity", workloadIdentity, "workload identity configured", "enable identity.oidc for strong-guarantee deployments so identity is asserted by the environment")
+		mark("strong.no_shared_api_keys", len(cfg.Identity.APIKeys) == 0, "shared API keys disabled", "remove identity.api_keys for strong-guarantee deployments and rely on workload identity or stronger non-shared auth")
 
 		durableAudit := hasDurableAuditSink(cfg.Audit.Sink)
 		mark("strong.audit_durable", durableAudit, "durable audit sink configured", "use sqlite or webhook audit sinks for strong-guarantee deployments instead of stdout-only")
@@ -206,6 +213,15 @@ func isRecognizedEnvironment(env string) bool {
 func isStrongGuaranteeEnvironment(env string) bool {
 	switch strings.ToLower(strings.TrimSpace(env)) {
 	case "ci", "staging", "prod":
+		return true
+	default:
+		return false
+	}
+}
+
+func isControlledStrongGuaranteeMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "ci", "k8s":
 		return true
 	default:
 		return false

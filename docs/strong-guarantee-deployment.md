@@ -2,6 +2,17 @@
 
 This is the golden path for a reproducible strong-guarantee Nomos deployment.
 
+## Prerequisites
+
+You need:
+
+- a Kubernetes cluster that enforces `NetworkPolicy`
+- a TLS secret named `nomos-tls`
+- a Nomos image available as `nomos:local` or an equivalent image override
+- a runtime where the operator controls network, identity, and pod security settings
+
+If the cluster does not enforce `NetworkPolicy`, this deployment does **not** provide a strong guarantee.
+
 ## Kubernetes Golden Path
 
 1. Build the image:
@@ -39,13 +50,53 @@ kubectl get networkpolicy sample-agent-egress
 go run ./cmd/nomos doctor -c ./config.example.json --format json
 ```
 
+The strong-guarantee readiness signal is intentionally conservative. For a deployment to be READY, the config should indicate:
+
+- `runtime.strong_guarantee=true`
+- `runtime.deployment_mode=k8s` (or `ci` in CI environments)
+- `executor.sandbox_profile=container`
+- gateway mTLS enabled
+- workload identity verification enabled
+- shared API keys disabled
+- durable audit sink configured
+
+5. Verify the outer boundary from the sample agent:
+
+Direct egress to arbitrary hosts should fail:
+
+```bash
+kubectl exec deploy/sample-agent -- wget -T 5 -qO- https://example.com || true
+```
+
+Access to the Nomos service should remain possible:
+
+```bash
+kubectl exec deploy/sample-agent -- wget -T 5 -qO- http://nomos:8080/healthz
+```
+
+The sample agent should not have an automounted service account token:
+
+```bash
+kubectl exec deploy/sample-agent -- sh -c 'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token'
+```
+
+The sample agent should run as non-root:
+
+```bash
+kubectl exec deploy/sample-agent -- id -u
+```
+
+The expected result is a non-zero UID.
+
 ## CI Golden Path
 
 Use the reference workflow in `deploy/ci/github-actions-hardened.yml` as the hardened baseline:
 
-- runner job has no direct credential injection into agent steps
 - Nomos is the policy gate for governed actions
-- doctor runs in strong-guarantee mode before agent tasks begin
+- `nomos doctor` runs in strong-guarantee mode before agent tasks begin
+- workload identity should come from the CI platform identity provider rather than long-lived shared keys
+
+The checked-in CI example validates the strong-guarantee config shape and readiness signals. It is still the operator's job to ensure the CI runtime enforces the outer network and credential boundary.
 
 ## Operational Expectations
 
@@ -57,4 +108,12 @@ Use the reference workflow in `deploy/ci/github-actions-hardened.yml` as the har
 
 ## Scope
 
-This provides a reference deployment and readiness checks. It does not yet prove mediation coverage across every environment; that precision is deferred to later assurance-focused work.
+This provides a reference deployment, a reusable validation harness, and conservative readiness checks.
+
+It does not claim:
+
+- a full proof for every Kubernetes distribution
+- enforcement on unmanaged developer machines
+- complete mediation outside operator-controlled runtimes
+
+Treat this document as the source of truth for what the current strong-guarantee reference actually enforces.

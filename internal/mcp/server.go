@@ -95,6 +95,8 @@ type changeSetParams struct {
 	Paths []string `json:"paths"`
 }
 
+const SupportedProtocolVersion = "2024-11-05"
+
 func NewServer(bundlePath string, identity identity.VerifiedIdentity, workspaceRoot string, maxBytes, maxLines int, approvalsEnabled bool, sandboxEnabled bool, sandboxProfile string) (*Server, error) {
 	return NewServerWithRuntimeOptions(bundlePath, identity, workspaceRoot, maxBytes, maxLines, approvalsEnabled, sandboxEnabled, sandboxProfile, RuntimeOptions{})
 }
@@ -251,7 +253,7 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 			JSONRPC: "2.0",
 			ID:      parseRPCID(req.ID),
 			Result: map[string]any{
-				"protocolVersion": "2024-11-05",
+				"protocolVersion": SupportedProtocolVersion,
 				"capabilities": map[string]any{
 					"tools": map[string]any{},
 				},

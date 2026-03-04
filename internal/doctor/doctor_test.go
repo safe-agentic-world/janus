@@ -107,9 +107,44 @@ func TestRunStrongGuaranteeMissingHardeningNotReady(t *testing.T) {
 		t.Fatalf("expected NOT_READY, got %s", report.OverallStatus)
 	}
 	assertCheckFailed(t, report, "strong.sandbox_container")
+	assertCheckFailed(t, report, "strong.controlled_runtime_mode")
+	assertCheckFailed(t, report, "strong.network_boundary_controlled")
 	assertCheckFailed(t, report, "strong.gateway_mtls")
 	assertCheckFailed(t, report, "strong.workload_identity")
+	assertCheckFailed(t, report, "strong.no_shared_api_keys")
 	assertCheckFailed(t, report, "strong.audit_durable")
+}
+
+func TestRunStrongGuaranteeRemoteDevNotReady(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"r1","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["prod"]}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	oidcKeyPath := filepath.Join(dir, "oidc.pub.pem")
+	if err := os.WriteFile(oidcKeyPath, []byte("placeholder"), 0o600); err != nil {
+		t.Fatalf("write oidc key: %v", err)
+	}
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	clientCAPath := filepath.Join(dir, "client-ca.pem")
+	for _, path := range []string{certPath, keyPath, clientCAPath} {
+		if err := os.WriteFile(path, []byte("placeholder"), 0o600); err != nil {
+			t.Fatalf("write tls placeholder %s: %v", path, err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.json")
+	writeStrongConfigForMode(t, configPath, bundlePath, dir, certPath, keyPath, clientCAPath, oidcKeyPath, "remote_dev")
+
+	report, err := Run(Options{ConfigPath: configPath, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatalf("doctor run: %v", err)
+	}
+	if report.OverallStatus != "NOT_READY" {
+		t.Fatalf("expected NOT_READY, got %s", report.OverallStatus)
+	}
+	assertCheckFailed(t, report, "strong.controlled_runtime_mode")
+	assertCheckFailed(t, report, "strong.network_boundary_controlled")
 }
 
 func TestRunStrongGuaranteeReady(t *testing.T) {
@@ -141,6 +176,57 @@ func TestRunStrongGuaranteeReady(t *testing.T) {
 	if report.OverallStatus != "READY" {
 		t.Fatalf("expected READY, got %s", report.OverallStatus)
 	}
+}
+
+func TestRunStrongGuaranteeRejectsSharedAPIKeys(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"r1","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["prod"]}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	oidcKeyPath := filepath.Join(dir, "oidc.pub.pem")
+	if err := os.WriteFile(oidcKeyPath, []byte("placeholder"), 0o600); err != nil {
+		t.Fatalf("write oidc key: %v", err)
+	}
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	clientCAPath := filepath.Join(dir, "client-ca.pem")
+	for _, path := range []string{certPath, keyPath, clientCAPath} {
+		if err := os.WriteFile(path, []byte("placeholder"), 0o600); err != nil {
+			t.Fatalf("write tls placeholder %s: %v", path, err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.json")
+	writeStrongConfig(t, configPath, bundlePath, dir, certPath, keyPath, clientCAPath, oidcKeyPath)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	identityCfg, ok := cfg["identity"].(map[string]any)
+	if !ok {
+		t.Fatal("missing identity config")
+	}
+	identityCfg["api_keys"] = map[string]any{"prod-api-key": "system"}
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	report, err := Run(Options{ConfigPath: configPath, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatalf("doctor run: %v", err)
+	}
+	if report.OverallStatus != "NOT_READY" {
+		t.Fatalf("expected NOT_READY, got %s", report.OverallStatus)
+	}
+	assertCheckFailed(t, report, "strong.no_shared_api_keys")
 }
 
 func TestM17ReferenceArtifactsExist(t *testing.T) {
@@ -204,6 +290,10 @@ func writeConfig(t *testing.T, path, bundlePath string, mcpEnabled bool, workspa
 }
 
 func writeStrongConfig(t *testing.T, path, bundlePath, workspaceRoot, certPath, keyPath, clientCAPath, oidcKeyPath string) {
+	writeStrongConfigForMode(t, path, bundlePath, workspaceRoot, certPath, keyPath, clientCAPath, oidcKeyPath, "k8s")
+}
+
+func writeStrongConfigForMode(t *testing.T, path, bundlePath, workspaceRoot, certPath, keyPath, clientCAPath, oidcKeyPath, deploymentMode string) {
 	t.Helper()
 	cfg := map[string]any{
 		"gateway": map[string]any{
@@ -220,6 +310,7 @@ func writeStrongConfig(t *testing.T, path, bundlePath, workspaceRoot, certPath, 
 		"runtime": map[string]any{
 			"stateless_mode":   false,
 			"strong_guarantee": true,
+			"deployment_mode":  deploymentMode,
 		},
 		"policy": map[string]any{
 			"policy_bundle_path": bundlePath,
@@ -238,7 +329,7 @@ func writeStrongConfig(t *testing.T, path, bundlePath, workspaceRoot, certPath, 
 			"principal":       "system",
 			"agent":           "nomos",
 			"environment":     "prod",
-			"api_keys":        map[string]any{"prod-api-key": "system"},
+			"api_keys":        map[string]any{},
 			"service_secrets": map[string]any{},
 			"agent_secrets":   map[string]any{"nomos": "prod-agent-secret"},
 			"oidc": map[string]any{

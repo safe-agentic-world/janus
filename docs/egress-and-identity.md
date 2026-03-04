@@ -39,3 +39,15 @@ The reference architecture is therefore explicitly a combined control plane:
 
 - environment enforces the outer boundary
 - Nomos enforces the inner deterministic authorization boundary
+
+## Explicit Out-Of-Scope Bypass Conditions
+
+The current strong-guarantee reference does **not** claim protection if:
+
+- the Kubernetes cluster does not actually enforce `NetworkPolicy`
+- the runtime allows privileged pods or host-level escape paths outside the reference constraints
+- the operator injects direct credentials into the agent workload
+- the deployment diverges from the checked-in hardening constraints without equivalent replacements
+- the host or cluster control plane itself is already compromised
+
+In those cases, Nomos should be treated as a deterministic authorization layer running inside a weaker outer boundary, not as a complete strong-guarantee deployment.

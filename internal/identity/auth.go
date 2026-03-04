@@ -55,6 +55,9 @@ func (a *Authenticator) verifyPrincipal(req *http.Request, body []byte) (string,
 	if principal, ok := a.verifyAPIKey(req); ok {
 		return principal, nil
 	}
+	if principal, ok := a.verifySPIFFEIdentity(req); ok {
+		return principal, nil
+	}
 	if principal, ok := a.verifyOIDCToken(req); ok {
 		return principal, nil
 	}
@@ -93,6 +96,22 @@ func (a *Authenticator) verifyServiceSignature(req *http.Request, body []byte) (
 	}
 	expected := hmacSHA256Hex([]byte(secret), body)
 	return serviceID, hmac.Equal([]byte(signature), []byte(expected))
+}
+
+func (a *Authenticator) verifySPIFFEIdentity(req *http.Request) (string, bool) {
+	if !a.config.SPIFFEEnabled || strings.TrimSpace(a.config.SPIFFETrustDomain) == "" || req == nil || req.TLS == nil || len(req.TLS.PeerCertificates) == 0 {
+		return "", false
+	}
+	wantPrefix := "spiffe://" + strings.TrimSpace(a.config.SPIFFETrustDomain) + "/"
+	for _, uri := range req.TLS.PeerCertificates[0].URIs {
+		if uri == nil {
+			continue
+		}
+		if strings.HasPrefix(uri.String(), wantPrefix) {
+			return uri.String(), true
+		}
+	}
+	return "", false
 }
 
 type oidcClaims struct {

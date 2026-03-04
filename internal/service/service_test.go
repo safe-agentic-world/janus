@@ -14,8 +14,10 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/executor"
 	"github.com/safe-agentic-world/nomos/internal/identity"
+	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
 type recordSink struct {
@@ -644,4 +646,246 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type telemetrySink struct {
+	events  []telemetry.Event
+	metrics []telemetry.Metric
+	fail    bool
+}
+
+type externalPolicyStub struct {
+	decision policy.Decision
+	err      error
+}
+
+func (e externalPolicyStub) Evaluate(normalized normalize.NormalizedAction) (policy.Decision, error) {
+	if e.err != nil {
+		return policy.Decision{}, e.err
+	}
+	return e.decision, nil
+}
+
+func (t *telemetrySink) ExportEvent(event telemetry.Event) error {
+	if t.fail {
+		return io.ErrClosedPipe
+	}
+	t.events = append(t.events, event)
+	return nil
+}
+
+func (t *telemetrySink) ExportMetric(metric telemetry.Metric) error {
+	if t.fail {
+		return io.ErrClosedPipe
+	}
+	t.metrics = append(t.metrics, metric)
+	return nil
+}
+
+func TestServiceEmitsTelemetryWithStableTraceCorrelation(t *testing.T) {
+	dir := t.TempDir()
+	readmePath := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	svc := New(
+		policy.NewEngine(policy.Bundle{
+			Version: "v1",
+			Hash:    "test",
+			Rules: []policy.Rule{
+				{ID: "allow-readme", ActionType: "fs.read", Resource: "file://workspace/README.md", Decision: policy.DecisionAllow},
+			},
+		}),
+		executor.NewFSReader(dir, 32, 10),
+		executor.NewFSWriter(dir, 32),
+		executor.NewPatchApplier(dir, 32),
+		executor.NewExecRunner(dir, 32),
+		executor.NewHTTPRunner(32),
+		&recordSink{},
+		redact.DefaultRedactor(),
+		nil,
+		nil,
+		"local",
+		func() time.Time { return time.Unix(0, 0) },
+	)
+	sink := &telemetrySink{}
+	svc.SetTelemetry(telemetry.NewEmitter(sink))
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act-telemetry",
+		ActionType:    "fs.read",
+		Resource:      "file://workspace/README.md",
+		Params:        []byte(`{}`),
+		TraceID:       "trace-telemetry",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}}},
+		identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"},
+	)
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	if _, err := svc.Process(act); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(sink.events) == 0 || len(sink.metrics) == 0 {
+		t.Fatalf("expected telemetry events and metrics, got events=%d metrics=%d", len(sink.events), len(sink.metrics))
+	}
+	for _, event := range sink.events {
+		if event.TraceID != "trace-telemetry" || event.Correlation != "trace-telemetry" {
+			t.Fatalf("expected stable trace correlation, got %+v", event)
+		}
+	}
+}
+
+func TestServiceTelemetryExporterFailureDoesNotChangeDecision(t *testing.T) {
+	dir := t.TempDir()
+	readmePath := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	svc := New(
+		policy.NewEngine(policy.Bundle{
+			Version: "v1",
+			Hash:    "test",
+			Rules: []policy.Rule{
+				{ID: "allow-readme", ActionType: "fs.read", Resource: "file://workspace/README.md", Decision: policy.DecisionAllow},
+			},
+		}),
+		executor.NewFSReader(dir, 32, 10),
+		executor.NewFSWriter(dir, 32),
+		executor.NewPatchApplier(dir, 32),
+		executor.NewExecRunner(dir, 32),
+		executor.NewHTTPRunner(32),
+		&recordSink{},
+		redact.DefaultRedactor(),
+		nil,
+		nil,
+		"local",
+		func() time.Time { return time.Unix(0, 0) },
+	)
+	svc.SetTelemetry(telemetry.NewEmitter(&telemetrySink{fail: true}))
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act-telemetry-fail",
+		ActionType:    "fs.read",
+		Resource:      "file://workspace/README.md",
+		Params:        []byte(`{}`),
+		TraceID:       "trace-telemetry-fail",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}}},
+		identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"},
+	)
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Decision != policy.DecisionAllow {
+		t.Fatalf("expected allow despite telemetry failure, got %+v", resp)
+	}
+}
+
+func TestServiceUsesExternalPolicyBackend(t *testing.T) {
+	dir := t.TempDir()
+	readmePath := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	svc := New(
+		policy.NewEngine(policy.Bundle{
+			Version: "v1",
+			Hash:    "test",
+			Rules:   []policy.Rule{},
+		}),
+		executor.NewFSReader(dir, 32, 10),
+		executor.NewFSWriter(dir, 32),
+		executor.NewPatchApplier(dir, 32),
+		executor.NewExecRunner(dir, 32),
+		executor.NewHTTPRunner(32),
+		&recordSink{},
+		redact.DefaultRedactor(),
+		nil,
+		nil,
+		"local",
+		func() time.Time { return time.Unix(0, 0) },
+	)
+	svc.SetExternalPolicy(externalPolicyStub{
+		decision: policy.Decision{
+			Decision:         policy.DecisionAllow,
+			ReasonCode:       "allow_by_external_policy",
+			MatchedRuleIDs:   []string{},
+			Obligations:      map[string]any{},
+			PolicyBundleHash: "opa:test",
+		},
+	})
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act-external-policy",
+		ActionType:    "fs.read",
+		Resource:      "file://workspace/README.md",
+		Params:        []byte(`{}`),
+		TraceID:       "trace-external-policy",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Decision != policy.DecisionAllow || resp.Reason != "allow_by_external_policy" {
+		t.Fatalf("expected external allow decision, got %+v", resp)
+	}
+}
+
+func TestServiceFailsClosedOnExternalPolicyError(t *testing.T) {
+	dir := t.TempDir()
+	readmePath := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	svc := New(
+		policy.NewEngine(policy.Bundle{
+			Version: "v1",
+			Hash:    "test",
+			Rules: []policy.Rule{
+				{ID: "allow-readme", ActionType: "fs.read", Resource: "file://workspace/README.md", Decision: policy.DecisionAllow},
+			},
+		}),
+		executor.NewFSReader(dir, 32, 10),
+		executor.NewFSWriter(dir, 32),
+		executor.NewPatchApplier(dir, 32),
+		executor.NewExecRunner(dir, 32),
+		executor.NewHTTPRunner(32),
+		&recordSink{},
+		redact.DefaultRedactor(),
+		nil,
+		nil,
+		"local",
+		func() time.Time { return time.Unix(0, 0) },
+	)
+	svc.SetExternalPolicy(externalPolicyStub{err: io.ErrClosedPipe})
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act-external-fail",
+		ActionType:    "fs.read",
+		Resource:      "file://workspace/README.md",
+		Params:        []byte(`{}`),
+		TraceID:       "trace-external-fail",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Decision != policy.DecisionDeny || resp.Reason != "deny_by_external_policy_error" {
+		t.Fatalf("expected fail-closed deny, got %+v", resp)
+	}
+	if resp.Output != "" {
+		t.Fatalf("expected no output on fail-closed deny, got %+v", resp)
+	}
 }

@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -513,6 +516,111 @@ func TestGatewayRequiresMTLSClientCert(t *testing.T) {
 	gw.handleAction(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 when mTLS required, got %d", w.Code)
+	}
+}
+
+func TestGatewayPropagatesAcceptedTraceContext(t *testing.T) {
+	recorder := &recordSink{}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow-readme","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	cfg := Config{
+		Gateway:  GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
+		Audit:    AuditConfig{Sink: "stdout"},
+		Executor: ExecutorConfig{WorkspaceRoot: dir},
+		Identity: IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "dev",
+			APIKeys:     map[string]string{"key1": "system"},
+			AgentSecrets: map[string]string{
+				"nomos": "agent-secret",
+			},
+		},
+		Policy: PolicyConfig{BundlePath: bundlePath},
+	}
+	gw, err := NewWithRecorder(cfg, recorder, func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	body := `{"schema_version":"v1","action_id":"act-trace","action_type":"fs.read","resource":"file://workspace/README.md","params":{},"trace_id":"trace-http","context":{"extensions":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/action", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer key1")
+	req.Header.Set("X-Nomos-Agent-Id", "nomos")
+	req.Header.Set("X-Nomos-Agent-Signature", hmacHex("agent-secret", []byte(body)))
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	req.Header.Set("tracestate", "vendor=value")
+	w := httptest.NewRecorder()
+	gw.handleAction(w, req)
+	if got := w.Header().Get("Traceparent"); got == "" {
+		t.Fatal("expected traceparent to propagate")
+	}
+	if got := w.Header().Get("Tracestate"); got != "vendor=value" {
+		t.Fatalf("expected tracestate propagation, got %q", got)
+	}
+}
+
+func TestGatewaySPIFFEIdentityPropagatesIntoAudit(t *testing.T) {
+	recorder := &recordSink{}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow-readme","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["spiffe://example.org/workload/nomos"],"agents":["nomos"],"environments":["prod"]}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	cfg := Config{
+		Gateway:  GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
+		Audit:    AuditConfig{Sink: "stdout"},
+		Executor: ExecutorConfig{WorkspaceRoot: dir},
+		Identity: IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "prod",
+			AgentSecrets: map[string]string{
+				"nomos": "agent-secret",
+			},
+			SPIFFE: SPIFFEConfig{
+				Enabled:     true,
+				TrustDomain: "example.org",
+			},
+		},
+		Policy: PolicyConfig{BundlePath: bundlePath},
+	}
+	gw, err := NewWithRecorder(cfg, recorder, func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	body := `{"schema_version":"v1","action_id":"act-spiffe","action_type":"fs.read","resource":"file://workspace/README.md","params":{},"trace_id":"trace-spiffe","context":{"extensions":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/action", strings.NewReader(body))
+	req.Header.Set("X-Nomos-Agent-Id", "nomos")
+	req.Header.Set("X-Nomos-Agent-Signature", hmacHex("agent-secret", []byte(body)))
+	spiffeID, _ := url.Parse("spiffe://example.org/workload/nomos")
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{{URIs: []*url.URL{spiffeID}}},
+	}
+	w := httptest.NewRecorder()
+	gw.handleAction(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	found := false
+	for _, event := range recorder.events {
+		if event.EventType == "action.decision" || event.EventType == "action.completed" {
+			found = true
+			if event.Principal != "spiffe://example.org/workload/nomos" {
+				t.Fatalf("expected SPIFFE principal in audit, got %q", event.Principal)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected decision/completed audit events")
 	}
 }
 
