@@ -1,0 +1,11 @@
+{
+  "schema_version": "v1",
+  "action_id": "quickstart-request-deny-env",
+  "action_type": "fs.read",
+  "resource": "file://workspace/.env",
+  "params": {},
+  "context": {
+    "extensions": {}
+  },
+  "trace_id": "quickstart-request-deny-env"
+}

@@ -1,0 +1,14 @@
+services:
+  nomos:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile
+    ports:
+      - "8080:8080"
+    command:
+      - "nomos"
+      - "serve"
+      - "-c"
+      - "/demo/examples/quickstart/config.quickstart.json"
+      - "-p"
+      - "/demo/policies/safe-dev-hardened.yaml"

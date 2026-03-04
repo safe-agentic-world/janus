@@ -60,4 +60,3 @@ For controlled runtimes:
 ## Scope
 
 The current implementation validates SPIFFE IDs from mTLS peer certificates. It does not embed a full SPIRE control-plane integration in the Nomos binary.
-

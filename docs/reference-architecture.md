@@ -1,6 +1,6 @@
 # Controlled Runtime Reference Architecture
 
-This document defines the reference architecture for a strong-guarantee Nomos deployment.
+This document defines the reference architecture for a strong-guarantee deployment of Nomos.
 
 ## Threat Assumptions
 
@@ -76,7 +76,7 @@ These are enforced by Nomos once a request reaches the gateway:
 
 ### Current Proof Boundary
 
-The current strong-guarantee proof in this repository is intentionally conservative:
+The current strong-guarantee validation surface in this repository is intentionally conservative:
 
 - deployment manifests express the required runtime constraints
 - `nomos doctor` validates strong-guarantee readiness signals
@@ -90,7 +90,7 @@ The `nomos doctor` strong-guarantee mode validates conservative proxy signals fo
 
 - container sandbox profile
 - gateway mTLS
-- OIDC workload identity
+- workload identity verification (OIDC or SPIFFE, depending on deployment)
 - durable audit sink
 - deployment-bound environment (`ci`, `staging`, or `prod`)
 

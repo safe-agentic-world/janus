@@ -1,0 +1,16 @@
+{{ if not (or .Values.config.useStarterBundle .Values.config.policyBundlePath) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-warning-policy
+data:
+  warning: "policy bundle configuration is required when config.useStarterBundle is false"
+{{ end }}
+{{ if and (not .Values.identity.useDemoCredentials) (not (and .Values.identity.apiKey .Values.identity.agentSecret)) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-warning-identity
+data:
+  warning: "identity.apiKey and identity.agentSecret are required when identity.useDemoCredentials is false"
+{{ end }}

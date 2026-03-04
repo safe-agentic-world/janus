@@ -102,7 +102,7 @@ Deployment:
 * Nomos runs with workload identity
 * K8s network policy enforces deny-by-default
 
-Nomos does not currently ship native `k8s.*` action types in v1. In this deployment shape, it mediates the control-plane boundary through current v1 primitives such as:
+Nomos does not ship native `k8s.*` action types in v1. In this deployment shape, it mediates the control-plane boundary through current v1 primitives such as:
 
 * `net.http_request` to an internal control-plane API
 * strict network allowlists

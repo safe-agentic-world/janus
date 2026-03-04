@@ -27,7 +27,7 @@ Each case in `testdata/bypass/cases.jsonl` specifies:
 
 The corpus also includes explicit expectations for:
 
-- controlled runtime reference mode
+- controlled-runtime reference mode
 - best-effort / unmanaged mode
 
 ## Expected Outcomes

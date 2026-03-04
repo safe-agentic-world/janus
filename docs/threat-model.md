@@ -9,6 +9,8 @@ Current hardening scope covers:
 - policy bundle signature verification
 - audit redaction and tamper-evidence chain integrity
 
+For a control-by-control security review mapped to the OWASP Agentic Top 10, see `docs/owasp-agentic-mapping.md`.
+
 ## Adversaries
 
 1. Compromised or malicious agent process attempting unauthorized side effects.
@@ -39,7 +41,7 @@ Current hardening scope covers:
 
 ## Residual Risks
 
-- OIDC key rotation/discovery automation is not yet implemented (static configured public key).
+- OIDC key rotation/discovery automation is operator-managed rather than built into the runtime (Nomos uses a statically configured public key).
 - In-memory rate-limit and breaker state is process-local; distributed coordination is out of scope.
 - mTLS protects transport path but does not replace application-level authorization.
 - Signature verification protects bundle integrity only if operator key management is strong.

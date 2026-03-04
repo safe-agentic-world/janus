@@ -1,6 +1,6 @@
 # Strong-Guarantee Deployment
 
-This is the golden path for a reproducible strong-guarantee Nomos deployment.
+This is the golden path for a reproducible strong-guarantee deployment of Nomos.
 
 ## Prerequisites
 

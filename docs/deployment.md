@@ -2,7 +2,7 @@
 
 This document describes the base deployment posture.
 
-For stronger, later deployment guidance, also see:
+For higher-assurance deployment guidance, also see:
 
 - `docs/strong-guarantee-deployment.md`
 - `docs/reference-architecture.md`
@@ -57,7 +57,7 @@ docker build -t nomos:local .
 Run:
 
 ```powershell
-docker run --rm -p 8080:8080 -v ${PWD}:/workspace nomos:local serve --config /workspace/config.example.json --policy-bundle /workspace/policies/your-policy-bundle.json
+docker run --rm -p 8080:8080 -v ${PWD}:/workspace nomos:local serve -c /workspace/config.example.json -p /workspace/policies/your-policy-bundle.json
 ```
 
 ## Graceful Shutdown

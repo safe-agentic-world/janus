@@ -1,0 +1,32 @@
+image:
+  repository: ghcr.io/safe-agentic-world/nomos
+  tag: stable
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+audit:
+  sink: stdout
+
+config:
+  useStarterBundle: false
+  policyBundlePath: /etc/nomos/custom/policy.yaml
+
+identity:
+  useDemoCredentials: false
+  principal: system
+  agent: nomos
+  environment: prod
+  apiKey: cluster-managed-api-key
+  agentSecret: cluster-managed-agent-secret
+  oidc:
+    enabled: false
+    issuer: ""
+    audience: ""
+    publicKeyPath: ""
+
+serviceAccount:
+  create: true
+  name: nomos

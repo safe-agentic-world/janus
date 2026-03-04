@@ -1,0 +1,67 @@
+{{ if and (or .Values.identity.useDemoCredentials (and .Values.identity.apiKey .Values.identity.agentSecret)) (or .Values.config.useStarterBundle .Values.config.policyBundlePath) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  config.json: |
+    {
+      "gateway": {
+        "listen": ":8080",
+        "transport": "http"
+      },
+      "runtime": {
+        "stateless_mode": false,
+        "strong_guarantee": false,
+        "deployment_mode": "k8s"
+      },
+      "policy": {
+        "policy_bundle_path": "{{ if .Values.config.useStarterBundle }}/etc/nomos/policy.yaml{{ else }}{{ .Values.config.policyBundlePath }}{{ end }}"
+      },
+      "executor": {
+        "sandbox_enabled": true,
+        "sandbox_profile": "container",
+        "workspace_root": "/workspace"
+      },
+      "audit": {
+        "sink": "{{ .Values.audit.sink }}"
+      },
+      "mcp": {
+        "enabled": false
+      },
+      "upstream": {
+        "routes": []
+      },
+      "approvals": {
+        "enabled": false
+      },
+      "identity": {
+        "principal": "{{ .Values.identity.principal }}",
+        "agent": "{{ .Values.identity.agent }}",
+        "environment": "{{ .Values.identity.environment }}",
+        "api_keys": {
+          "{{ if .Values.identity.useDemoCredentials }}{{ .Values.identity.apiKey }}{{ else }}{{ .Values.identity.apiKey }}{{ end }}": "{{ .Values.identity.principal }}"
+        },
+        "agent_secrets": {
+          "{{ .Values.identity.agent }}": "{{ if .Values.identity.useDemoCredentials }}{{ .Values.identity.agentSecret }}{{ else }}{{ .Values.identity.agentSecret }}{{ end }}"
+        },
+        "oidc": {
+          "enabled": {{ if .Values.identity.oidc.enabled }}true{{ else }}false{{ end }},
+          "issuer": "{{ .Values.identity.oidc.issuer }}",
+          "audience": "{{ .Values.identity.oidc.audience }}",
+          "public_key_path": "{{ .Values.identity.oidc.publicKeyPath }}"
+        }
+      }
+    }
+  policy.yaml: |
+    version: v1
+    rules:
+      - id: deny-root-env
+        action_type: fs.read
+        resource: file://workspace/.env
+        decision: DENY
+      - id: allow-root-markdown
+        action_type: fs.read
+        resource: file://workspace/*.md
+        decision: ALLOW
+{{ end }}

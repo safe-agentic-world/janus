@@ -1,0 +1,14 @@
+{
+  "schema_version": "v1",
+  "action_id": "quickstart-deny-env",
+  "action_type": "fs.read",
+  "resource": "file://workspace/.env",
+  "params": {},
+  "principal": "system",
+  "agent": "nomos",
+  "environment": "dev",
+  "context": {
+    "extensions": {}
+  },
+  "trace_id": "quickstart-deny-env"
+}

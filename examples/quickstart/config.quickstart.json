@@ -1,0 +1,74 @@
+{
+  "gateway": {
+    "listen": ":8080",
+    "transport": "http",
+    "concurrency_limit": 32,
+    "rate_limit_per_minute": 120,
+    "circuit_breaker_failures": 5,
+    "circuit_breaker_cooldown_seconds": 60,
+    "tls": {
+      "enabled": false,
+      "cert_file": "",
+      "key_file": "",
+      "client_ca_file": "",
+      "require_mtls": false
+    }
+  },
+  "runtime": {
+    "stateless_mode": false,
+    "strong_guarantee": false,
+    "deployment_mode": "unmanaged"
+  },
+  "policy": {
+    "policy_bundle_path": "../../policies/safe-dev-hardened.yaml",
+    "verify_signatures": false,
+    "signature_path": "",
+    "public_key_path": "",
+    "explain_suggestions": true
+  },
+  "executor": {
+    "sandbox_enabled": true,
+    "sandbox_profile": "local",
+    "workspace_root": "./workspace",
+    "max_output_bytes": 65536,
+    "max_output_lines": 200
+  },
+  "credentials": {
+    "enabled": false,
+    "secrets": []
+  },
+  "audit": {
+    "sink": "stdout"
+  },
+  "mcp": {
+    "enabled": true
+  },
+  "upstream": {
+    "routes": []
+  },
+  "approvals": {
+    "enabled": false,
+    "store_path": "./nomos-approvals.db",
+    "ttl_seconds": 900,
+    "webhook_token": "",
+    "slack_token": "",
+    "teams_token": ""
+  },
+  "identity": {
+    "principal": "system",
+    "agent": "nomos",
+    "environment": "dev",
+    "api_keys": {
+      "dev-api-key": "system"
+    },
+    "agent_secrets": {
+      "nomos": "dev-agent-secret"
+    },
+    "oidc": {
+      "enabled": false,
+      "issuer": "",
+      "audience": "",
+      "public_key_path": ""
+    }
+  }
+}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nomos
+description: Minimal Helm install path for Nomos quickstart deployments.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

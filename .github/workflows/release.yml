@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Resolve release tag
         id: meta
@@ -89,6 +90,39 @@ jobs:
             fi
             (cd dist && sha256sum "nomos-${GOOS_TARGET}-${GOARCH_TARGET}.${PACKAGE_FORMAT}") >> dist/nomos-checksums.txt
             rm -rf "${STAGE_DIR}"
+          done
+
+      - name: Install supply-chain tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install github.com/anchore/syft/cmd/syft@v1.24.0
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+
+      - name: Generate SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$(go env GOPATH)/bin/syft" packages dir:dist -o spdx-json > dist/nomos-sbom.spdx.json
+
+      - name: Generate provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c "exec(\"import glob, hashlib, json, os\\nfiles = []\\nfor path in sorted(glob.glob('dist/nomos-*')):\\n    name = os.path.basename(path)\\n    if name.endswith('.sig') or name.endswith('.pem'):\\n        continue\\n    digest = hashlib.sha256()\\n    with open(path, 'rb') as handle:\\n        digest.update(handle.read())\\n    files.append({'name': name, 'digest': {'sha256': digest.hexdigest()}})\\nstatement = {'_type': 'https://in-toto.io/Statement/v0.1', 'predicateType': 'https://slsa.dev/provenance/v1', 'subject': files, 'predicate': {'buildDefinition': {'buildType': 'https://github.com/safe-agentic-world/nomos/.github/workflows/release.yml', 'externalParameters': {'tag': '${{ steps.meta.outputs.tag }}'}, 'internalParameters': {'go_version': '1.24.13'}, 'resolvedDependencies': [{'uri': 'git+https://github.com/${{ github.repository }}@${{ github.sha }}'}]}, 'runDetails': {'builder': {'id': 'https://github.com/${{ github.repository }}/.github/workflows/release.yml'}, 'metadata': {'invocationId': '${{ github.run_id }}', 'sourceRepositoryDigest': '${{ github.sha }}'}}}}\\nwith open('dist/nomos-provenance.intoto.jsonl', 'w', encoding='utf-8') as handle:\\n    handle.write(json.dumps(statement, sort_keys=True, separators=(',', ':')) + '\\\\n')\")"
+
+      - name: Sign release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          COSIGN_BIN="$(go env GOPATH)/bin/cosign"
+          for file in \
+            dist/nomos-*.tar.gz \
+            dist/nomos-*.zip \
+            dist/nomos-checksums.txt \
+            dist/nomos-sbom.spdx.json \
+            dist/nomos-provenance.intoto.jsonl; do
+            "${COSIGN_BIN}" sign-blob --yes --output-signature "${file}.sig" --output-certificate "${file}.pem" "${file}"
           done
 
       - name: Publish GitHub release

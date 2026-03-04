@@ -86,7 +86,7 @@ Nomos supports per-stream hash chaining:
 - `prev_event_hash` stores `event_hash_{i-1}` for linkage.
 - `event_hash` stores `event_hash_i`.
 - The first event in a stream has empty `prev_event_hash`.
-- Signing/keying strategy remains future work.
+- Audit-stream signing is separate from release artifact signing and is not part of the current event-chain verification model.
 
 ## Example
 

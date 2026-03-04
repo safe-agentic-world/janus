@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "nomos": {
+      "command": ".\\bin\\nomos.exe",
+      "args": [
+        "mcp",
+        "-c",
+        ".\\examples\\quickstart\\config.quickstart.json",
+        "-p",
+        ".\\policies\\safe-dev-hardened.yaml"
+      ]
+    }
+  }
+}

@@ -95,8 +95,8 @@ go build -o .\bin\nomos.exe .\cmd\nomos
 
 ```powershell
 .\bin\nomos.exe mcp `
-  --config .\config.example.json `
-  --policy-bundle .\policies\minimal.json
+  -c .\config.example.json `
+  -p .\policies\minimal.json
 ```
 
 ### 3) Register in Codex
@@ -104,8 +104,8 @@ go build -o .\bin\nomos.exe .\cmd\nomos
 ```powershell
 codex mcp add nomos -- `
   .\bin\nomos.exe mcp `
-  --config .\config.example.json `
-  --policy-bundle .\policies\minimal.json
+  -c .\config.example.json `
+  -p .\policies\minimal.json
 ```
 
 ### 4) Prove policy is real
@@ -138,7 +138,7 @@ You should see:
 ## Current Feature Set
 
 - Strict validation with unknown-field rejection (except `context.extensions`)
-- Identity verification (API key, service signature, OIDC, agent signature)
+- Identity verification (API key, service HMAC, OIDC, SPIFFE, and agent HMAC)
 - Deterministic policy engine (`deny wins`) + `policy test` / `policy explain`
 - Executors: `fs.read`, `fs.write`, `repo.apply_patch`, `process.exec`, `net.http_request`
 - Approval workflow (sqlite + TTL + webhook/Slack/Teams endpoints)
@@ -146,7 +146,7 @@ You should see:
 - Safety visibility metadata (risk level, sandbox/network mode, lease IDs, bundle hash)
 - Gateway protections (concurrency/rate/circuit limits, optional TLS/mTLS)
 - Strong-guarantee deployment checks and reference manifests for CI/K8s
-- Deterministic assurance labeling (`STRONG`, `GUARDED`, `BEST_EFFORT`, `NONE`) in audit and `policy explain`
+- Deterministic assurance labeling (`STRONG`, `GUARDED`, `BEST_EFFORT`, `NONE`) in audit, `policy explain`, and `nomos.capabilities`
 - Golden normalization corpus, redirect policy controls, and bypass-suite coverage
 - Corpus-backed redaction guarantees plus no-leak harness coverage
 - Actionable `policy explain` denial context (`why_denied`, `minimal_allowing_change`, `obligations_preview`)
@@ -162,7 +162,7 @@ go test ./...
 .\bin\nomos.exe version
 .\bin\nomos.exe policy test --action .\action.json --bundle .\policies\your-policy-bundle.json
 .\bin\nomos.exe policy explain --action .\action.json --bundle .\policies\your-policy-bundle.json
-.\bin\nomos.exe serve --config .\config.example.json --policy-bundle .\policies\your-policy-bundle.json
+.\bin\nomos.exe serve -c .\config.example.json -p .\policies\your-policy-bundle.json
 ```
 
 Release metadata build example:
@@ -187,6 +187,7 @@ HTTP endpoints in `serve` mode:
 
 ## Integrations
 
+- Quickstart path: `docs/quickstart.md`
 - Codex + OpenClaw setup: `docs/integration-kit.md`
 - MCP capability model and workflow notes: `docs/integration-kit.md`
 - Unmanaged laptop limitations and safer workflows: `docs/integration-kit.md`
@@ -198,6 +199,7 @@ HTTP endpoints in `serve` mode:
 ## Security And Design Docs
 
 - Threat model: `docs/threat-model.md`
+- OWASP Agentic Top 10 mapping: `docs/owasp-agentic-mapping.md`
 - Security checklist: `docs/security-checklist.md`
 - Policy language: `docs/policy-language.md`
 - Canonical JSON and hashing: `docs/canonical-json.md`
@@ -207,6 +209,7 @@ HTTP endpoints in `serve` mode:
 - Redaction guarantees and source coverage: `docs/redaction-guarantees.md`, `docs/redaction-sources.md`
 - Normalization vectors and redirect rules: `docs/normalization-test-vectors.md`, `docs/http-redirects.md`
 - Bypass coverage model: `docs/bypass-playbook.md`
+- Release verification and supply-chain trust: `docs/release-verification.md`, `docs/supply-chain-security.md`
 
 ---
 
@@ -214,7 +217,7 @@ HTTP endpoints in `serve` mode:
 
 - Base deployment guide: `docs/deployment.md`
 - CI/K8s readiness and release automation: `docs/ci-k8s.md`
-- Strong-guarantee reference deployment: `docs/strong-guarantee-deployment.md`, `docs/reference-architecture.md`, `docs/egress-and-identity.md`
+- Strong-guarantee deployment reference: `docs/strong-guarantee-deployment.md`, `docs/reference-architecture.md`, `docs/egress-and-identity.md`
 - Container image: `Dockerfile`
 - K8s manifests: `deploy/k8s/`
 

@@ -1,0 +1,14 @@
+{{ if and (or .Values.identity.useDemoCredentials (and .Values.identity.apiKey .Values.identity.agentSecret)) (or .Values.config.useStarterBundle .Values.config.policyBundlePath) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+{{ end }}
