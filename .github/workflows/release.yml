@@ -136,7 +136,8 @@ jobs:
         if: ${{ github.event_name == 'repository_dispatch' }}
         env:
           PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
-          PACKAGES_REPO: safe-agentic-world/packages-nomos
+          HOMEBREW_REPO: safe-agentic-world/homebrew-nomos
+          SCOOP_REPO: safe-agentic-world/scoop-nomos
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           CHECKSUM_FILE: ${{ github.workspace }}/dist/nomos-checksums.txt

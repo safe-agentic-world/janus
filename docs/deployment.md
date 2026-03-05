@@ -154,4 +154,4 @@ Design notes:
 - resource requests/limits set
 - multiple replicas for horizontal scaling
 - graceful termination via deployment `terminationGracePeriodSeconds`
-- release path is workflow-managed: successful `main` CI can tag, publish a GitHub Release, and update Homebrew/Scoop manifests
+- release path is workflow-managed: successful `main` CI can tag, publish a GitHub Release, and update Homebrew (`safe-agentic-world/homebrew-nomos`) and Scoop (`safe-agentic-world/scoop-nomos`) manifests

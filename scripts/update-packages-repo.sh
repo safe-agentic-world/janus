@@ -19,7 +19,8 @@ if [[ ! -f "${CHECKSUM_FILE}" ]]; then
   exit 1
 fi
 
-PACKAGES_REPO="${PACKAGES_REPO:-safe-agentic-world/packages-nomos}"
+HOMEBREW_REPO="${HOMEBREW_REPO:-safe-agentic-world/homebrew-nomos}"
+SCOOP_REPO="${SCOOP_REPO:-safe-agentic-world/scoop-nomos}"
 AUTHOR_NAME="${GIT_AUTHOR_NAME:-nomos-release-bot}"
 AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-nomos-release-bot@users.noreply.github.com}"
 VERSION="${RELEASE_TAG#v}"
@@ -45,11 +46,36 @@ done
 workdir="$(mktemp -d)"
 trap 'rm -rf "${workdir}"' EXIT
 
-repo_url="https://x-access-token:${PACKAGES_REPO_TOKEN}@github.com/${PACKAGES_REPO}.git"
-git clone --depth 1 "${repo_url}" "${workdir}/packages-repo"
+clone_repo() {
+  local repo="$1"
+  local target_dir="$2"
+  local repo_url
+  repo_url="https://x-access-token:${PACKAGES_REPO_TOKEN}@github.com/${repo}.git"
+  git clone --depth 1 "${repo_url}" "${target_dir}"
+}
 
-cd "${workdir}/packages-repo"
-mkdir -p Formula bucket
+commit_and_push_repo() {
+  local repo_dir="$1"
+  local commit_subject="$2"
+
+  cd "${repo_dir}"
+  git config user.name "${AUTHOR_NAME}"
+  git config user.email "${AUTHOR_EMAIL}"
+
+  if git diff --cached --quiet; then
+    echo "repository already up to date: ${repo_dir}"
+    return
+  fi
+
+  git commit -m "${commit_subject}"
+  git push origin HEAD:main
+}
+
+clone_repo "${HOMEBREW_REPO}" "${workdir}/homebrew-repo"
+clone_repo "${SCOOP_REPO}" "${workdir}/scoop-repo"
+
+cd "${workdir}/homebrew-repo"
+mkdir -p Formula
 
 cat > Formula/nomos.rb <<EOF
 class Nomos < Formula
@@ -77,6 +103,12 @@ class Nomos < Formula
   end
 end
 EOF
+
+git add Formula/nomos.rb
+commit_and_push_repo "${workdir}/homebrew-repo" "nomos ${RELEASE_TAG}"
+
+cd "${workdir}/scoop-repo"
+mkdir -p bucket
 
 cat > bucket/nomos.json <<EOF
 {
@@ -111,14 +143,5 @@ cat > bucket/nomos.json <<EOF
 }
 EOF
 
-git config user.name "${AUTHOR_NAME}"
-git config user.email "${AUTHOR_EMAIL}"
-git add Formula/nomos.rb bucket/nomos.json
-
-if git diff --cached --quiet; then
-  echo "packages repo already up to date"
-  exit 0
-fi
-
-git commit -m "nomos ${RELEASE_TAG}"
-git push origin HEAD:main
+git add bucket/nomos.json
+commit_and_push_repo "${workdir}/scoop-repo" "nomos ${RELEASE_TAG}"
