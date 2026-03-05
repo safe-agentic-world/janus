@@ -34,15 +34,15 @@ jobs:
           - go
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@v6.0.2
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@3b054500189c7b3ca9be7cd4f035ca58c00776cd # v3
+        uses: github/codeql-action/init@v4.32.6
         with:
           languages: ${{ matrix.language }}
 
       - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        uses: actions/setup-go@v6.3.0
         with:
           go-version: "1.24.13"
           cache: true
@@ -51,4 +51,4 @@ jobs:
         run: go build ./...
 
       - name: Analyze
-        uses: github/codeql-action/analyze@3b054500189c7b3ca9be7cd4f035ca58c00776cd # v3
+        uses: github/codeql-action/analyze@v4.32.6
