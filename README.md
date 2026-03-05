@@ -72,14 +72,13 @@ curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/insta
 ### Homebrew (macOS and Linux)
 
 ```bash
-brew tap safe-agentic-world/packages-nomos
-brew install nomos
+brew install safe-agentic-world/nomos/nomos
 ```
 
 ### Scoop (Windows)
 
 ```powershell
-scoop bucket add packages-nomos https://github.com/safe-agentic-world/packages-nomos
+scoop bucket add nomos https://github.com/safe-agentic-world/scoop-nomos
 scoop install nomos
 ```
 
