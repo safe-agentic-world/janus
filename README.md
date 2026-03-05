@@ -2,6 +2,8 @@
 
 # Nomos
 
+##
+
 **Nomos helps you run AI agents safely without giving them full system trust.**
 
 It sits between your agent and real side effects (files, shell, network, credentials), then:
