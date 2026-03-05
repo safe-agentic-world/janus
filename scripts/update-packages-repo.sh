@@ -101,10 +101,10 @@ cat > bucket/nomos.json <<EOF
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/${SOURCE_REPOSITORY}/releases/download/v\\$version/nomos-windows-amd64.zip"
+        "url": "https://github.com/${SOURCE_REPOSITORY}/releases/download/v\$version/nomos-windows-amd64.zip"
       },
       "arm64": {
-        "url": "https://github.com/${SOURCE_REPOSITORY}/releases/download/v\\$version/nomos-windows-arm64.zip"
+        "url": "https://github.com/${SOURCE_REPOSITORY}/releases/download/v\$version/nomos-windows-arm64.zip"
       }
     }
   }
@@ -121,4 +121,4 @@ if git diff --cached --quiet; then
 fi
 
 git commit -m "nomos ${RELEASE_TAG}"
-git push origin HEAD
+git push origin HEAD:main
