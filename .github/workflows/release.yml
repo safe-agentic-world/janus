@@ -132,8 +132,22 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
+      - name: Check package publish token
+        id: package_token
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${PACKAGES_REPO_TOKEN}" ]]; then
+            echo "has_token=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_token=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Update Homebrew and Scoop manifests
-        if: ${{ github.event_name == 'repository_dispatch' && secrets.PACKAGES_REPO_TOKEN != '' }}
+        if: ${{ github.event_name == 'repository_dispatch' && steps.package_token.outputs.has_token == 'true' }}
         env:
           PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
           PACKAGES_REPO: safe-agentic-world/packages-nomos
