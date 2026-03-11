@@ -4,7 +4,7 @@ This document defines practical local testing and a release-quality gate for Nom
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Repository checked out locally
 - `nomos` built at least once for CLI checks
 

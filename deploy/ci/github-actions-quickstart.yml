@@ -15,7 +15,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.13"
+          go-version: "1.25.8"
 
       - name: Build Nomos
         run: go build -o ./bin/nomos ./cmd/nomos

@@ -4,7 +4,7 @@ This is the canonical first run for Nomos. It uses only checked-in files and sho
 
 ## Prerequisites
 
-- Go 1.24+ on `PATH`
+- Go 1.25+ on `PATH`
 - a clean checkout of this repository
 
 No Docker, Kubernetes, or external services are required for the first success path.

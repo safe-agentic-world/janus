@@ -1,4 +1,4 @@
-FROM golang:1.24.13-alpine AS builder
+FROM golang:1.25.8-alpine AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 WORKDIR /src
