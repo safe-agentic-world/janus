@@ -2,62 +2,196 @@
 
 ## Purpose
 
-This plan is a full local validation pass for Nomos on Windows with PowerShell, covering:
+This is the canonical end-to-end local validation plan for Nomos on Windows with PowerShell.
 
-- local build and unit tests
-- CLI behavior
-- policy engine behavior
-- `doctor` readiness checks
-- MCP integration with Claude Code
-- HTTP gateway behavior
-- approvals
-- credentials and redaction
-- security and failure cases
+It is designed for an operator who is new to MCP and agent tooling and wants one holistic path that proves:
 
-This plan is written against the current repository state on disk. It uses the existing sample configs and policies where possible, and temporary copies where feature toggles are required.
+- the CLI works
+- policy decisions are deterministic
+- `doctor` reports the right readiness state
+- Claude Code can use Nomos over MCP
+- allowed actions succeed
+- denied actions fail closed
+- approvals, credentials, redaction, and gateway auth work as intended
+
+This plan uses checked-in files wherever possible and calls out when a temporary local file is created.
 
 ## Scope
 
-This plan covers every implemented product surface in the current codebase:
+This plan covers:
 
-- CLI commands: `version`, `serve`, `mcp`, `policy test`, `policy explain`, `doctor`
+- CLI commands: `version`, `policy test`, `policy explain`, `doctor`, `serve`, `mcp`
+- policy bundles: JSON and YAML
 - transports: MCP stdio and HTTP
 - action types: `fs.read`, `fs.write`, `repo.apply_patch`, `process.exec`, `net.http_request`, `secrets.checkout`
-- policy bundle formats: JSON and YAML
-- auth modes: API key + agent HMAC by default, plus optional service HMAC, OIDC, and SPIFFE-backed workload identity in controlled runtimes
-- approvals: pending, approve, deny, replay with approval ID
-- audit sinks: stdout/stderr, optional sqlite
-- enforcement edges: deny-by-default, path traversal, sandbox requirement, allowlists, redirect policy, output caps, redaction
+- auth modes: default bearer API key plus agent HMAC, with optional advanced checks
+- approvals and replay
+- credential lease flow and no-leak behavior
+- local best-effort mediation with Claude Code as the agent
+
+## Claude Code Note
+
+This plan follows the current Claude Code MCP workflow where MCP servers are added with `claude mcp add ...`.
+
+If your local Claude Code build differs, check the current Claude Code MCP docs first and adapt only the registration command. The Nomos-side commands in this document remain the same.
 
 ## Preconditions
 
 - Windows PowerShell
-- Go installed and on `PATH`
+- `nomos` installed from GitHub Releases and available on `PATH`
 - Claude Code installed and on `PATH`
-- You are in the repo root: `C:\Users\prudh\repos\safe-agentic-world\nomos`
+- Python 3 available for the OpenAI-compatible example
+- You are in the repo root:
 
-## One-Time Setup
+```powershell
+C:\Users\prudh\repos\safe-agentic-world\nomos
+```
 
-Run these first in PowerShell from the repo root:
+## Test Philosophy
+
+Run the scenarios in order.
+
+The first half proves the product without relying on agent tooling. The second half proves the same boundary through Claude Code, then through the HTTP gateway, then through approvals and credentials.
+
+If a scenario fails:
+
+1. stop
+2. capture the exact command, output, and file involved
+3. do not skip ahead until the failure is understood
+
+## Important Shell Note
+
+Several later scenarios use PowerShell variables such as `$TmpDir`, `$ConfigAll`, and `$CredsBundle`.
+
+Those variables exist only in the PowerShell session where you ran the `One-Time Setup` block.
+
+If you open a new terminal before running a later phase, run the `One-Time Setup` block again first.
+
+For the early CLI and Claude Code phases, this document now uses literal checked-in paths where possible so they work even if you did not keep the original shell session.
+
+## 30-Minute Smoke Test
+
+Use this when you want one fast, high-signal local proof before running the full plan.
+
+### Smoke Test Goals
+
+This smoke test proves:
+
+- the installed CLI works
+- the policy engine produces one deterministic allow and one deterministic deny
+- `doctor` is ready
+- Claude Code can call Nomos over MCP
+- a safe read succeeds through Nomos
+- a sensitive read is denied through Nomos
+
+### Smoke Test Steps
+
+1. Verify the installed CLI:
 
 ```powershell
 $Repo = (Resolve-Path .).Path
-$BinDir = Join-Path $Repo "bin"
+nomos version
+```
+
+2. Run deterministic CLI proof:
+
+```powershell
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\policies\safe.yaml
+nomos policy test --action .\examples\quickstart\actions\deny-env.json --bundle .\policies\safe.yaml
+```
+
+3. Register Nomos in Claude Code:
+
+```powershell
+claude mcp add --transport stdio --scope local nomos-local -- "nomos" mcp -c "C:\Users\prudh\repos\safe-agentic-world\nomos\config.codex.json" -p "C:\Users\prudh\repos\safe-agentic-world\nomos\policies\safe.yaml"
+```
+
+4. Verify the registration:
+
+```powershell
+claude mcp list
+claude mcp get nomos-local
+```
+
+5. Start Claude Code:
+
+```powershell
+claude
+```
+
+6. In Claude Code, run these prompts in order:
+
+```text
+Use nomos.capabilities and show me the raw JSON result.
+```
+
+```text
+Use nomos.fs_read to read file://workspace/README.md and show only the first 5 lines.
+```
+
+```text
+Use nomos.fs_read to read file://workspace/.env
+```
+
+7. Remove the MCP server when done:
+
+```powershell
+claude mcp remove nomos-local
+```
+
+### Smoke Test Pass Criteria
+
+The smoke test passes when:
+
+- `doctor` returns `READY`
+- the allow action returns `ALLOW`
+- the deny action returns `DENY`
+- Claude Code shows a Nomos capability envelope
+- `README.md` is readable via `nomos.fs_read`
+- `.env` is denied via `nomos.fs_read`
+
+## One-Time Setup
+
+Run this once in PowerShell from the repo root:
+
+```powershell
+$Repo = (Resolve-Path .).Path
 $TmpDir = Join-Path $Repo ".tmp\manual-tests"
-$NomosExe = Join-Path $BinDir "nomos.exe"
+$ConfigQuickstart = Join-Path $Repo "examples\quickstart\config.quickstart.json"
 $ConfigCodex = Join-Path $Repo "config.codex.json"
 $ConfigAll = Join-Path $Repo "config.all-fields.example.json"
 $SafeYaml = Join-Path $Repo "policies\safe.yaml"
 $SafeJson = Join-Path $Repo "policies\safe.json"
 $AllFieldsYaml = Join-Path $Repo "policies\all-fields.example.yaml"
-$AllFieldsJson = Join-Path $Repo "policies\all-fields.example.json"
-New-Item -ItemType Directory -Force $BinDir | Out-Null
 New-Item -ItemType Directory -Force $TmpDir | Out-Null
 ```
 
-## Build And Baseline
+## Phase 1: Install And Baseline
 
-### Scenario 1: Run the automated test suite
+### Scenario 1: Verify the installed Nomos version
+
+```powershell
+nomos version
+```
+
+Expected:
+
+- output contains `version=`
+- output contains `go=`
+
+### Scenario 2: Check root help
+
+```powershell
+nomos
+```
+
+Expected:
+
+- exits non-zero
+- lists `serve`, `mcp`, `policy`, and `doctor`
+
+### Scenario 3: Optional repo validation
 
 ```powershell
 go test ./...
@@ -66,129 +200,68 @@ go test ./...
 Expected:
 
 - all packages pass
-- no failing tests
 
-### Scenario 2: Build Nomos locally
+## Phase 2: Deterministic CLI Proof
+
+### Scenario 4: Run doctor against the quickstart config
 
 ```powershell
-go build -o $NomosExe .\cmd\nomos
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
 Expected:
 
-- `bin\nomos.exe` exists
+- exit code `0`
+- JSON contains `"overall_status":"READY"`
 
-### Scenario 3: Check build metadata
+### Scenario 5: Verify one deterministic allow
 
 ```powershell
-& $NomosExe version
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\policies\safe.yaml
 ```
 
 Expected:
 
-- output contains `version=...`
-- output contains `go=...`
-
-### Scenario 4: Check root help
-
-```powershell
-& $NomosExe
-```
-
-Expected:
-
-- exits non-zero
-- prints command list including `serve`, `mcp`, `policy`, `doctor`
-
-## CLI And Policy Engine
-
-### Scenario 5: `policy test` with JSON bundle, allowed action
-
-Create an allowed action file:
-
-```powershell
-$ActionAllow = Join-Path $TmpDir "action-allow-readme.json"
-@'
-{
-  "schema_version": "v1",
-  "action_id": "manual_policy_allow_1",
-  "action_type": "fs.read",
-  "resource": "file://workspace/README.md",
-  "params": {},
-  "principal": "system",
-  "agent": "nomos",
-  "environment": "dev",
-  "context": { "extensions": {} },
-  "trace_id": "manual_policy_allow_trace_1"
-}
-'@ | Set-Content -Encoding UTF8 $ActionAllow
-
-& $NomosExe policy test --action $ActionAllow --bundle $SafeJson
-```
-
-Expected:
-
-- JSON output
 - `decision` is `ALLOW`
-- `policy_bundle_hash` is present
 
-### Scenario 6: `policy test` with JSON bundle, denied action
+### Scenario 6: Verify one deterministic deny
 
 ```powershell
-$ActionDeny = Join-Path $TmpDir "action-deny-other-file.json"
-@'
-{
-  "schema_version": "v1",
-  "action_id": "manual_policy_deny_1",
-  "action_type": "fs.read",
-  "resource": "file://workspace/CHANGELOG.md",
-  "params": {},
-  "principal": "system",
-  "agent": "nomos",
-  "environment": "dev",
-  "context": { "extensions": {} },
-  "trace_id": "manual_policy_deny_trace_1"
-}
-'@ | Set-Content -Encoding UTF8 $ActionDeny
-
-& $NomosExe policy test --action $ActionDeny --bundle $SafeJson
+nomos policy test --action .\examples\quickstart\actions\deny-env.json --bundle .\policies\safe.yaml
 ```
 
 Expected:
 
 - `decision` is `DENY`
-- `reason_code` reflects default deny or rule deny
 
-### Scenario 7: `policy test` with YAML bundle
+### Scenario 7: Verify YAML and JSON bundle parity
 
 ```powershell
-& $NomosExe policy test --action $ActionAllow --bundle $SafeYaml
-& $NomosExe policy test --action $ActionAllow --bundle $SafeJson
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\policies\safe.yaml
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\policies\safe.json
 ```
 
 Expected:
 
-- both commands succeed
-- both decisions are `ALLOW`
-- both return the same `policy_bundle_hash`
+- both runs return `ALLOW`
+- both runs return the same `policy_bundle_hash`
 
-### Scenario 8: `policy explain` with denied action
+### Scenario 8: Explain a deny
 
 ```powershell
-& $NomosExe policy explain --action $ActionDeny --bundle $SafeJson
+nomos policy explain --action .\examples\quickstart\actions\deny-env.json --bundle .\policies\safe.yaml
 ```
 
 Expected:
 
-- JSON output
-- includes `assurance_level`
-- includes `why_denied`
-- includes `remediation_hint`
+- output contains `why_denied`
+- output contains `assurance_level`
+- output contains a remediation hint
 
 ### Scenario 9: Missing bundle fails closed
 
 ```powershell
-& $NomosExe policy test --action $ActionAllow --bundle (Join-Path $TmpDir "missing.json")
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\.tmp\manual-tests\missing.yaml
 ```
 
 Expected:
@@ -196,41 +269,18 @@ Expected:
 - exits non-zero
 - reports `VALIDATION_ERROR`
 
-### Scenario 10: Invalid action shape is rejected
+### Scenario 10: Traversal is rejected before execution
 
-```powershell
-$BadAction = Join-Path $TmpDir "action-invalid.json"
-@'
-{
-  "schema_version": "v1",
-  "action_id": "bad",
-  "action_type": "fs.read",
-  "resource": "file://workspace/README.md",
-  "params": [],
-  "principal": "system",
-  "agent": "nomos",
-  "environment": "dev",
-  "context": { "extensions": {} },
-  "trace_id": "bad_trace"
-}
-'@ | Set-Content -Encoding UTF8 $BadAction
+If you are in a new PowerShell session, run `One-Time Setup` first so `$TmpDir` exists.
 
-& $NomosExe policy test --action $BadAction --bundle $SafeYaml
-```
-
-Expected:
-
-- exits non-zero
-- reports `VALIDATION_ERROR`
-
-### Scenario 11: Path traversal normalization is rejected
+Create a temporary action:
 
 ```powershell
 $TraversalAction = Join-Path $TmpDir "action-traversal.json"
 @'
 {
   "schema_version": "v1",
-  "action_id": "traversal_1",
+  "action_id": "manual_traversal_1",
   "action_type": "fs.read",
   "resource": "file://workspace/../.env",
   "params": {},
@@ -238,11 +288,10 @@ $TraversalAction = Join-Path $TmpDir "action-traversal.json"
   "agent": "nomos",
   "environment": "dev",
   "context": { "extensions": {} },
-  "trace_id": "traversal_trace_1"
+  "trace_id": "manual_traversal_trace_1"
 }
 '@ | Set-Content -Encoding UTF8 $TraversalAction
-
-& $NomosExe policy test --action $TraversalAction --bundle $SafeYaml
+nomos policy test --action $TraversalAction --bundle $SafeYaml
 ```
 
 Expected:
@@ -250,96 +299,63 @@ Expected:
 - exits non-zero
 - reports `NORMALIZATION_ERROR`
 
-## Doctor
+## Phase 3: OpenAI-Compatible HTTP Example
 
-### Scenario 12: `doctor` ready state
+### Scenario 11: Start Nomos in HTTP mode
+
+In terminal 1:
 
 ```powershell
-& $NomosExe doctor -c $ConfigCodex
+nomos serve -c .\examples\quickstart\config.quickstart.json -p .\policies\safe.yaml
 ```
 
 Expected:
 
-- exits `0`
-- shows `Result: READY`
+- startup log shows `gateway listening on :8080 (http)`
+- the usable local URL is `http://127.0.0.1:8080`
 
-### Scenario 13: `doctor` JSON mode
+### Scenario 12: Run the checked-in Python example
+
+In terminal 2:
 
 ```powershell
-& $NomosExe doctor -c $ConfigCodex --format json
+python .\examples\openai-compatible\nomos_http_loop.py
 ```
 
 Expected:
 
-- JSON output
-- includes `overall_status`
-- includes `checks`
-- includes `policy_bundle_hash`
+- first request returns `ALLOW`
+- second request returns `DENY`
 
-### Scenario 14: `doctor` not-ready on missing bundle
+Stop the server in terminal 1 with `Ctrl+C` before moving on.
 
-Create a temporary broken config:
+## Phase 4: Claude Code As The Agent Over MCP
+
+This is the main manual proof for agent mediation.
+
+### Scenario 13: Run doctor for the Claude Code config
 
 ```powershell
-$DoctorBadConfig = Join-Path $TmpDir "config-doctor-missing-bundle.json"
-(Get-Content -Raw $ConfigCodex).Replace("policies\\safe.yaml", "policies\\missing.yaml") | Set-Content -Encoding UTF8 $DoctorBadConfig
-& $NomosExe doctor -c $DoctorBadConfig
+nomos doctor -c .\config.codex.json --format json
 ```
 
 Expected:
 
-- exits `1`
-- shows `NOT_READY`
-- failing checks mention bundle path / parsing
+- `READY`
 
-### Scenario 15: Invalid format returns internal/usage error
+### Scenario 14: Register Nomos as a Claude Code MCP server
+
+Use absolute paths:
 
 ```powershell
-& $NomosExe doctor -c $ConfigCodex --format invalid
+claude mcp add --transport stdio --scope local nomos-local -- "nomos" mcp -c "C:\Users\prudh\repos\safe-agentic-world\nomos\config.codex.json" -p "C:\Users\prudh\repos\safe-agentic-world\nomos\policies\safe.yaml"
 ```
 
 Expected:
 
-- exits `2`
-- prints invalid format message
+- the command succeeds without error
 
-## MCP With Claude Code
-
-The commands below use the current Claude Code MCP syntax from the Claude Code MCP docs.
-
-Important:
-
-- if you open a new PowerShell session, variables like `$NomosExe`, `$ConfigCodex`, and `$SafeYaml` from the earlier setup section will not exist unless you define them again
-- for the Claude MCP registration step, prefer a self-contained command with explicit paths so you do not accidentally register a broken server command
-
-Important Windows note:
-
-- on native Windows, the `cmd /c` wrapper is required for local MCP servers launched through `npx`
-- Nomos does not need that wrapper here because you are launching `nomos.exe` directly, not `npx`
-
-Use absolute paths so the MCP registration works from any directory.
-
-### Scenario 16: Register Nomos as a Claude Code MCP server
-
-```powershell
-claude mcp add --transport stdio --scope project nomos-local -- "C:\Users\prudh\repos\safe-agentic-world\nomos\bin\nomos.exe" mcp -c "C:\Users\prudh\repos\safe-agentic-world\nomos\config.codex.json" -p "C:\Users\prudh\repos\safe-agentic-world\nomos\policies\safe.yaml"
-```
-
-Expected:
-
-- server is added without error
-
-If you want to verify the Windows `npx` rule separately, this is the correct pattern for native Windows:
-
-```powershell
-claude mcp add --transport stdio sample-npx-server -- cmd /c npx -y @some/package
-```
-
-Do not use that wrapper for the Nomos binary itself.
-
-If you want to use variables instead, make sure they are defined in the same PowerShell session before running `claude mcp add`.
-
-### Scenario 17: Verify the MCP registration
+### Scenario 15: Verify the MCP registration
 
 ```powershell
 claude mcp list
@@ -349,58 +365,63 @@ claude mcp get nomos-local
 Expected:
 
 - `nomos-local` is listed
-- config shows a stdio command invoking Nomos
+- the command points to `nomos.exe mcp -c ... -p ...`
 
-### Scenario 18: Start Claude Code and inspect capability envelope
-
-Start Claude Code in the repo:
+### Scenario 16: Start Claude Code in the repo
 
 ```powershell
 claude
 ```
 
-In the Claude Code session, run:
+Expected:
+
+- Claude Code starts in the current workspace
+- Nomos starts automatically as the configured MCP server
+
+### Scenario 17: Inspect the capability envelope
+
+In Claude Code, send this prompt:
 
 ```text
-Use nomos.capabilities and show me the JSON result.
+Use nomos.capabilities and show me the raw JSON result.
 ```
 
 Expected:
 
-- enabled tools should include `nomos.fs_read`, `nomos.fs_write`, and `nomos.apply_patch`
-- `nomos.exec` and `nomos.http_request` should not be enabled under `safe`
-- response should include `assurance_level`
-- in unmanaged local testing, response should also include `mediation_notice`
+- `enabled_tools` includes `nomos.fs_read`, `nomos.fs_write`, and `nomos.apply_patch`
+- under `safe`, `nomos.exec` and `nomos.http_request` should not be enabled
+- response includes `assurance_level`
+- on a local unmanaged machine, response should include a mediation notice
 
-### Scenario 19: MCP read allowed
+### Scenario 18: Allowed read through Nomos
 
-In Claude Code:
-
-```text
-Use nomos.fs_read to read file://workspace/README.md and show only the first few lines.
-```
-
-Expected:
-
-- allowed
-- content returned
-- output is capped if large
-
-### Scenario 20: MCP read of a different workspace file allowed under `safe`
-
-In Claude Code:
+Prompt:
 
 ```text
-Use nomos.fs_read to read file://workspace/CHANGELOG.md and summarize the first section.
+Use nomos.fs_read to read file://workspace/README.md and show only the first 5 lines.
 ```
 
 Expected:
 
 - allowed
+- content is returned
 
-### Scenario 21: MCP traversal attempt denied
+### Scenario 19: Denied secret file read through Nomos
 
-In Claude Code:
+Prompt:
+
+```text
+Use nomos.fs_read to read file://workspace/.env
+```
+
+Expected:
+
+- denied
+- no `.env` contents leak
+
+### Scenario 20: Traversal attempt through Nomos
+
+Prompt:
 
 ```text
 Use nomos.fs_read to read file://workspace/../.env
@@ -408,12 +429,12 @@ Use nomos.fs_read to read file://workspace/../.env
 
 Expected:
 
-- denied with `normalization_error`
-- no file content leaks
+- denied with a normalization-style error
+- no file contents leak
 
-### Scenario 22: MCP write allowed
+### Scenario 21: Allowed write through Nomos
 
-In Claude Code:
+Prompt:
 
 ```text
 Use nomos.fs_write to write "manual test" into file://workspace/.tmp/manual-tests/mcp-write.txt
@@ -422,30 +443,30 @@ Use nomos.fs_write to write "manual test" into file://workspace/.tmp/manual-test
 Expected:
 
 - allowed
-- file is created
+- file is created under `.tmp/manual-tests`
 
-### Scenario 23: MCP patch allowed
+### Scenario 22: Allowed deterministic patch through Nomos
 
-In Claude Code:
-
-```text
-Use nomos.apply_patch to replace the contents of .tmp/manual-tests/mcp-patch.txt with "patched by nomos"
-```
-
-Before running that prompt, create the file:
+Before the prompt, create a file:
 
 ```powershell
 "before patch" | Set-Content -Encoding UTF8 (Join-Path $TmpDir "mcp-patch.txt")
 ```
 
+Then in Claude Code:
+
+```text
+Use nomos.apply_patch to replace the contents of .tmp/manual-tests/mcp-patch.txt with "patched by nomos"
+```
+
 Expected:
 
 - allowed
-- file contents are replaced
+- file content is replaced
 
-### Scenario 24: MCP exec denied under `safe`
+### Scenario 23: Exec denied under `safe`
 
-In Claude Code:
+Prompt:
 
 ```text
 Use nomos.exec to run ["git","status"] in the workspace.
@@ -455,9 +476,9 @@ Expected:
 
 - denied by policy
 
-### Scenario 25: MCP HTTP denied under `safe`
+### Scenario 24: HTTP denied under `safe`
 
-In Claude Code:
+Prompt:
 
 ```text
 Use nomos.http_request to fetch https://example.com
@@ -467,9 +488,9 @@ Expected:
 
 - denied by policy
 
-### Scenario 26: Current `repo.validate_change_set` behavior
+### Scenario 25: Publish-boundary style check
 
-In Claude Code:
+Prompt:
 
 ```text
 Use repo.validate_change_set for these paths: ["README.md",".tmp/manual-tests/mcp-write.txt"]
@@ -477,12 +498,26 @@ Use repo.validate_change_set for these paths: ["README.md",".tmp/manual-tests/mc
 
 Expected:
 
-- record the actual result returned by the current build
-- under the current `safe` policy, this may conservatively block paths because `ValidateChangeSet` evaluates `repo.apply_patch` against `file://workspace/...`
+- command returns a structured allow/block result
+- if any path is blocked, record the exact blocked list
 
-This scenario is a behavioral verification, not a policy expectation test.
+### Scenario 26: Practical mediation check
 
-### Scenario 27: Remove the MCP server when done
+Prompt:
+
+```text
+Do not use built-in file tools. Use only Nomos tools. Read README.md, create .tmp/manual-tests/agent-note.txt, then tell me which Nomos tools you used.
+```
+
+Expected:
+
+- Claude Code uses `nomos.fs_read` and `nomos.fs_write`
+- the file is created
+- no direct non-Nomos tool use is needed for the task
+
+### Scenario 27: Remove the MCP server when you are done
+
+Exit Claude Code, then run:
 
 ```powershell
 claude mcp remove nomos-local
@@ -492,73 +527,62 @@ Expected:
 
 - `nomos-local` is removed
 
-## Standalone MCP Process
+## Phase 5: Standalone MCP Process Check
+
+This validates Nomos MCP behavior directly, without Claude Code in the loop.
 
 ### Scenario 28: Start Nomos MCP directly
 
 ```powershell
-& $NomosExe mcp -c $ConfigCodex -p $SafeYaml
+nomos mcp -c .\config.codex.json -p .\policies\safe.yaml
 ```
 
 Expected:
 
 - process starts
-- startup banner/logs go to stderr
-- stdout remains protocol output only once a client connects
+- startup banner goes to stderr
+- stdout remains reserved for MCP protocol bytes
 
 Stop it with `Ctrl+C`.
 
 ### Scenario 29: Quiet mode
 
 ```powershell
-& $NomosExe mcp -c $ConfigCodex -p $SafeYaml --quiet
+nomos mcp -c .\config.codex.json -p .\policies\safe.yaml --quiet
 ```
 
 Expected:
 
 - no startup banner
-- only errors are emitted to stderr
+- only errors are written to stderr
 
-## HTTP Gateway
+## Phase 6: Direct HTTP Gateway Validation
 
-### Scenario 30: Start the gateway
+### Scenario 30: Start the HTTP gateway
+
+In terminal 1:
 
 ```powershell
-& $NomosExe serve -c $ConfigCodex -p $SafeYaml
+nomos serve -c .\config.codex.json -p .\policies\safe.yaml
 ```
 
-Expected:
+### Scenario 31: Check health and version endpoints
 
-- gateway starts on `:8080`
-
-Leave it running in one terminal for the HTTP scenarios below.
-
-### Scenario 31: Health endpoint
+In terminal 2:
 
 ```powershell
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/healthz
-```
-
-Expected:
-
-- status `200`
-- body `ok`
-
-### Scenario 32: Version endpoint
-
-```powershell
 Invoke-RestMethod http://127.0.0.1:8080/version
 ```
 
 Expected:
 
-- JSON object with version fields
+- `/healthz` returns `200`
+- `/version` returns JSON
 
-### Scenario 33: Prepare a helper to sign agent requests
+### Scenario 32: Create a helper to sign agent requests
 
-Nomos requires principal auth and agent auth. With `config.codex.json`, principal auth is bearer API key and agent auth is HMAC over the raw request body.
-
-Run this helper once:
+Run this once in terminal 2:
 
 ```powershell
 function New-NomosAgentSignature {
@@ -576,7 +600,7 @@ function New-NomosAgentSignature {
 }
 ```
 
-### Scenario 34: HTTP `fs.read` allowed
+### Scenario 33: Allowed HTTP `fs.read`
 
 ```powershell
 $Body = @'
@@ -607,9 +631,9 @@ Invoke-RestMethod `
 Expected:
 
 - `decision` is `ALLOW`
-- content is returned in `output`
+- content is returned
 
-### Scenario 35: HTTP `fs.write` allowed
+### Scenario 34: Allowed HTTP `fs.write`
 
 ```powershell
 $Body = @'
@@ -642,39 +666,7 @@ Expected:
 - `decision` is `ALLOW`
 - `bytes_written` is present
 
-### Scenario 36: HTTP `process.exec` denied by policy
-
-```powershell
-$Body = @'
-{
-  "schema_version": "v1",
-  "action_id": "http_exec_1",
-  "action_type": "process.exec",
-  "resource": "file://workspace/",
-  "params": { "argv": ["git", "status"] },
-  "trace_id": "http_exec_trace_1",
-  "context": { "extensions": {} }
-}
-'@
-$Sig = New-NomosAgentSignature -Body $Body -Secret "dev-agent-secret"
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8080/action `
-  -ContentType "application/json" `
-  -Headers @{
-    Authorization = "Bearer dev-api-key"
-    "X-Nomos-Agent-Id" = "nomos"
-    "X-Nomos-Agent-Signature" = $Sig
-  } `
-  -Body $Body
-```
-
-Expected:
-
-- `decision` is `DENY`
-
-### Scenario 37: Missing auth is rejected
+### Scenario 35: Missing auth is rejected
 
 ```powershell
 Invoke-WebRequest `
@@ -686,11 +678,11 @@ Invoke-WebRequest `
 
 Expected:
 
-- status `401`
+- HTTP `401`
 
-### Scenario 38: Bad agent signature is rejected
+### Scenario 36: Bad agent signature is rejected
 
-Repeat Scenario 34 but set:
+Repeat Scenario 34, but set:
 
 ```powershell
 $Sig = "deadbeef"
@@ -698,30 +690,11 @@ $Sig = "deadbeef"
 
 Expected:
 
-- status `401`
+- HTTP `401`
 
-### Scenario 39: Validation error on malformed request
+### Scenario 37: `/run` behaves like `/action`
 
-```powershell
-Invoke-WebRequest `
-  -Method Post `
-  -Uri http://127.0.0.1:8080/action `
-  -ContentType "application/json" `
-  -Headers @{
-    Authorization = "Bearer dev-api-key"
-    "X-Nomos-Agent-Id" = "nomos"
-    "X-Nomos-Agent-Signature" = (New-NomosAgentSignature -Body '{"bad":true}' -Secret "dev-agent-secret")
-  } `
-  -Body '{"bad":true}'
-```
-
-Expected:
-
-- status `400`
-
-### Scenario 40: `/run` uses the same action path
-
-Repeat Scenario 34 but post to:
+Repeat Scenario 34 and post to:
 
 ```powershell
 http://127.0.0.1:8080/run
@@ -729,13 +702,13 @@ http://127.0.0.1:8080/run
 
 Expected:
 
-- same behavior as `/action`
+- same result as `/action`
 
-## Approvals
+Stop the gateway with `Ctrl+C` before moving on.
 
-Use a temporary config with approvals enabled and the existing `all-fields.example.yaml` bundle.
+## Phase 7: Approval Flow
 
-### Scenario 41: Create an approvals-enabled config
+### Scenario 38: Create an approvals-enabled config
 
 ```powershell
 $ApprovalsConfig = Join-Path $TmpDir "config-approvals.json"
@@ -743,30 +716,28 @@ $json = Get-Content -Raw $ConfigAll | ConvertFrom-Json
 $json.approvals.enabled = $true
 $json.approvals.store_path = ".\.tmp\manual-tests\nomos-approvals.db"
 $json.audit.sink = "stdout"
-$json | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $ApprovalsConfig
+$json | ConvertTo-Json -Depth 12 | Set-Content -Encoding UTF8 $ApprovalsConfig
 ```
 
-### Scenario 42: `doctor` on approvals config
+### Scenario 39: Run doctor on the approvals config
 
 ```powershell
-& $NomosExe doctor -c $ApprovalsConfig
+nomos doctor -c $ApprovalsConfig
 ```
 
 Expected:
 
-- ready if the config is valid
+- `READY`
 
-### Scenario 43: Start approvals-enabled gateway
+### Scenario 40: Start the approvals-enabled gateway
 
 ```powershell
-& $NomosExe serve -c $ApprovalsConfig -p $AllFieldsYaml
+nomos serve -c $ApprovalsConfig -p $AllFieldsYaml
 ```
 
-Expected:
+### Scenario 41: Submit a request that requires approval
 
-- gateway starts on `:8080`
-
-### Scenario 44: HTTP request that requires approval
+In a second terminal:
 
 ```powershell
 $Body = @'
@@ -800,7 +771,7 @@ Expected:
 - `approval_id` is present
 - `approval_fingerprint` is present
 
-### Scenario 45: Approve the pending request
+### Scenario 42: Approve the pending request
 
 ```powershell
 $ApprovalId = $Resp.approval_id
@@ -815,7 +786,7 @@ Expected:
 
 - response reason is `approval_recorded`
 
-### Scenario 46: Replay the action with the approval ID
+### Scenario 43: Replay the same request with the approval ID
 
 ```powershell
 $BodyReplay = @"
@@ -845,13 +816,12 @@ Invoke-RestMethod `
 
 Expected:
 
-- approval is applied
-- final outcome may still fail later with upstream/network error if the remote host is unreachable
-- the important part is that the request is no longer blocked at the approval gate
+- approval gate is satisfied
+- the request is no longer blocked at `REQUIRE_APPROVAL`
 
-### Scenario 47: Deny flow
+### Scenario 44: Deny flow
 
-Repeat Scenario 44 to get a fresh `approval_id`, then:
+Repeat Scenario 42 to get a fresh approval, then:
 
 ```powershell
 Invoke-RestMethod `
@@ -863,13 +833,13 @@ Invoke-RestMethod `
 
 Expected:
 
-- approval is recorded as denied
+- denial is recorded
 
-## Credentials, Redaction, And Secret Handling
+Stop the gateway before moving on.
 
-There is no shipped policy that allows `secrets.checkout`, so use a temporary bundle.
+## Phase 8: Credentials And Redaction
 
-### Scenario 48: Create a temporary credentials bundle and config
+### Scenario 45: Create a temporary credentials policy and config
 
 ```powershell
 $CredsBundle = Join-Path $TmpDir "policy-creds.yaml"
@@ -902,12 +872,16 @@ $json.credentials.secrets = @(
   }
 )
 $json.policy.policy_bundle_path = $CredsBundle
-$json | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $CredsConfig
+$json | ConvertTo-Json -Depth 12 | Set-Content -Encoding UTF8 $CredsConfig
 ```
 
-### Scenario 49: Checkout a secret lease
+### Scenario 46: Start the gateway with the credentials config
 
-Start the gateway with `$CredsConfig`, then send:
+```powershell
+nomos serve -c $CredsConfig -p $CredsBundle
+```
+
+### Scenario 47: Checkout a secret lease
 
 ```powershell
 $Body = @'
@@ -938,9 +912,9 @@ $LeaseResp
 Expected:
 
 - `credential_lease_id` is returned
-- secret value is not returned
+- the secret value is not returned
 
-### Scenario 50: Use the lease in exec, verify output redaction
+### Scenario 48: Use the lease in exec and verify redaction
 
 ```powershell
 $LeaseId = $LeaseResp.credential_lease_id
@@ -977,189 +951,96 @@ Expected:
 
 - exec is allowed
 - output does not contain `manual-secret-token`
-- secret-like value is replaced/redacted
+- output contains a redacted replacement instead
 
-### Scenario 51: Invalid lease binding fails
+### Scenario 49: Invalid lease binding fails
 
-Re-use the lease ID but change `trace_id` to a different value.
+Repeat Scenario 49, but change only `trace_id` to a new value.
 
 Expected:
 
-- execution fails
+- request fails
 - error indicates lease binding mismatch or invalid lease use
 
-## Optional Advanced Auth Scenarios
+Stop the gateway before moving on.
 
-These are implemented, but require extra local setup.
+## Phase 9: Optional Hardened Checks
 
-### Scenario 52: Service HMAC principal authentication
+These are useful, but not required for the basic local proof.
 
-- create a temporary config from `config.all-fields.example.json`
-- set `identity.service_secrets` to a real local value
-- omit bearer API key
-- send `X-Nomos-Service-Id` and `X-Nomos-Service-Signature` over the raw body
+### Scenario 50: OIDC auth path
 
-Expected:
+Set up a local RSA keypair, configure `identity.oidc.enabled = true`, mint a valid RS256 JWT, and verify:
 
-- request authenticates as the service ID
+- invalid token is rejected
+- valid token is accepted
 
-### Scenario 53: OIDC principal authentication
+### Scenario 51: mTLS gateway path
 
-- create a local RSA keypair
-- configure `identity.oidc.enabled = true`
-- point `identity.oidc.public_key_path` at the public key
-- mint a valid RS256 JWT with matching issuer/audience/sub
-- send it as `Authorization: Bearer <jwt>`
+Create local TLS materials, enable:
 
-Expected:
+- `gateway.tls.enabled = true`
+- `gateway.tls.require_mtls = true`
 
-- request authenticates
+Then verify:
 
-### Scenario 54: mTLS gateway requirement
+- request without client cert is rejected
+- request with valid client cert is accepted
 
-- create local server cert, key, CA, and client cert
-- enable `gateway.tls.enabled = true`
-- enable `gateway.tls.require_mtls = true`
-- call the gateway with and without the client certificate
+### Scenario 52: Redirect policy
 
-Expected:
-
-- without client cert: rejected
-- with valid client cert: accepted
-
-## Failure And Security Regression Scenarios
-
-### Scenario 55: Oversized request body is rejected
-
-- send a request larger than `64 KiB`
-
-Expected:
-
-- HTTP `400`
-
-### Scenario 56: Unknown fields are rejected
-
-- add an extra top-level field to the HTTP action request
-
-Expected:
-
-- HTTP `400`
-
-### Scenario 57: Unsupported resource scheme is rejected
-
-- use `resource: "ftp://example.com/file"`
-
-Expected:
-
-- normalization / validation failure
-
-### Scenario 58: Encoded path separators are rejected
-
-- use `file://workspace/%2e%2e%2fsecret.txt`
-
-Expected:
-
-- normalization failure
-
-### Scenario 59: Exec cwd escape is rejected
-
-- send `process.exec` with `"cwd": ".."`
-
-Expected:
-
-- denied or execution failure before command runs
-
-### Scenario 60: Gateway rate-limits and breaker protections
-
-This is easiest with a temporary config:
-
-- set `gateway.rate_limit_per_minute` to `1`
-- send two valid requests quickly
-
-Expected:
-
-- second request returns `429`
-
-Then:
-
-- set `gateway.circuit_breaker_failures` to `1`
-- repeatedly trigger execution errors
-
-Expected:
-
-- later requests return `429` with circuit-open behavior
-
-### Scenario 61: Redirects denied by default
-
-Use a policy allowing `net.http_request` without `http_redirects: true`, then target a URL that returns a redirect.
-
-Expected:
-
-- redirect is denied
-
-### Scenario 62: Redirects allowed only when explicitly enabled
-
-Use a policy allowing `net.http_request` with:
+Use a policy that allows `net.http_request` with:
 
 - `http_redirects: true`
 - `http_redirect_hop_limit: 1`
-- matching `net_allowlist`
+- a matching `net_allowlist`
 
-Expected:
+Then verify:
 
-- one allowed hop succeeds
-- second hop is blocked by hop limit
-
-### Scenario 63: Redaction of auth headers
-
-- include `Authorization`, `Cookie`, or `X-Api-Key` values in HTTP action params or command output
-
-Expected:
-
-- returned output and audit output show `[REDACTED]`
+- redirects are denied by default without the obligation
+- one allowed hop succeeds when the obligation is present
+- the second hop is blocked by hop limit
 
 ## Cleanup
 
-Stop any running `nomos.exe` process with `Ctrl+C`, then:
+Stop any running `nomos.exe` processes with `Ctrl+C`, then remove the Claude Code server if it still exists:
 
 ```powershell
 claude mcp remove nomos-local
 ```
 
-Optional cleanup of manual test artifacts:
+Optional cleanup of temp files:
 
 ```powershell
 Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 ```
 
-## Suggested Execution Order
-
-Run the plan in this order:
-
-1. Build and baseline
-2. CLI and policy engine
-3. Doctor
-4. MCP with Claude Code
-5. Standalone MCP process
-6. HTTP gateway
-7. Approvals
-8. Credentials and redaction
-9. Optional advanced auth
-10. Failure and security regression cases
-
 ## Pass Criteria
 
 Nomos is locally validated when all of the following are true:
 
-- the binary builds and the test suite passes
-- `doctor` reports `READY` for valid configs and `NOT_READY` for broken ones
-- `policy test` and `policy explain` behave deterministically for JSON and YAML bundles
-- Claude Code can invoke Nomos over MCP
-- allowed actions succeed and denied actions fail closed
+- the installed `nomos` CLI works and reports version info
+- optional repo validation via `go test ./...` passes if you run it
+- `doctor` reports `READY` for valid configs
+- `policy test` returns one deterministic `ALLOW` and one deterministic `DENY`
+- `policy explain` gives safe denial context
+- the OpenAI-compatible example works end to end
+- Claude Code can use Nomos over MCP
+- allowed Nomos actions succeed in Claude Code
+- denied Nomos actions fail closed in Claude Code
+- direct HTTP gateway requests require auth and enforce policy
 - approvals create, decide, and replay correctly
-- leases are issued and secrets do not leak in output
-- gateway auth checks reject unsigned or malformed requests
-- traversal, unsupported schemes, and redirect edge cases fail closed
+- credential leases never return raw secret values
+- secret-bearing exec output is redacted before return
 
-Optional hardened local policy check:
-- repeat the Claude Code MCP scenarios with `policies\safe.yaml` to confirm `.env`, `.pem`, `.key`, and `.py` reads are denied while Markdown reads remain allowed
+## If You Want One Minimal Proof Only
+
+If you want the shortest high-signal proof, run only:
+
+1. Phase 1
+2. Phase 2
+3. Phase 4 Scenarios 14 through 26
+4. Phase 7 Scenarios 38 through 43
+5. Phase 8 Scenarios 45 through 48
+
+That gives you the quickest full story: CLI proof, agent mediation proof, approval proof, and secret redaction proof.
