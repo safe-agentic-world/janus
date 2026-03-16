@@ -398,16 +398,15 @@ Nomos is adjacent to several categories, but it is not the same thing as any one
 | Sandbox | process or host isolation | policy, approvals, redaction, and audit around actions |
 | Secret manager | store and issue secrets | executor-bound credential use and audit context |
 
-## Community
+## Community And Contribution
 
 - If Nomos is solving a problem you care about, a [star](https://github.com/safe-agentic-world/nomos) helps others find it.
-- Open an issue for gaps, deployment questions, or integration requests
-- Looking for a place to start? Browse [`good first issue`](https://github.com/safe-agentic-world/nomos/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
-- Read [CONTRIBUTING.md](./CONTRIBUTING.md) if you want to contribute code or docs
+- Open an issue for gaps, deployment questions, or integration requests.
+- Looking for a place to start? Browse [`good first issue`](https://github.com/safe-agentic-world/nomos/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+- Read [CONTRIBUTING.md](./CONTRIBUTING.md) if you want to contribute code or docs.
 
-## Contributing And Governance
+Project governance:
 
-- [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [SECURITY.md](./SECURITY.md)
 - [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 - [CHANGELOG.md](./CHANGELOG.md)
