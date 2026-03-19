@@ -1,0 +1,68 @@
+{
+  "gateway": {
+    "listen": ":8080",
+    "transport": "http"
+  },
+  "runtime": {
+    "stateless_mode": false,
+    "strong_guarantee": false,
+    "deployment_mode": "unmanaged"
+  },
+  "policy": {
+    "policy_bundle_paths": [
+      "../policies/base.yaml",
+      "../policies/repo.yaml",
+      "../policies/dev.yaml"
+    ],
+    "policy_bundle_roles": [
+      "baseline",
+      "repo",
+      "env"
+    ],
+    "verify_signatures": false,
+    "signature_paths": [],
+    "public_key_path": "",
+    "explain_suggestions": true
+  },
+  "executor": {
+    "sandbox_enabled": true,
+    "sandbox_profile": "local",
+    "workspace_root": ""
+  },
+  "credentials": {
+    "enabled": false,
+    "secrets": []
+  },
+  "audit": {
+    "sink": "stdout"
+  },
+  "mcp": {
+    "enabled": true
+  },
+  "upstream": {
+    "routes": []
+  },
+  "approvals": {
+    "enabled": false
+  },
+  "identity": {
+    "principal": "system",
+    "agent": "nomos",
+    "environment": "dev",
+    "api_keys": {
+      "dev-api-key": "system"
+    },
+    "agent_secrets": {
+      "nomos": "dev-agent-secret"
+    },
+    "oidc": {
+      "enabled": false,
+      "issuer": "",
+      "audience": "",
+      "public_key_path": ""
+    }
+  },
+  "redaction": {
+    "patterns": []
+  }
+}

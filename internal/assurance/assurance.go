@@ -9,6 +9,12 @@ const (
 	LevelNone       = "NONE"
 )
 
+type Evidence struct {
+	RuntimeIsolationVerified bool
+	WorkloadIdentityVerified bool
+	DurableAuditVerified     bool
+}
+
 func NormalizeDeploymentMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "ci":
@@ -25,11 +31,22 @@ func NormalizeDeploymentMode(mode string) string {
 }
 
 func Derive(deploymentMode string, strongGuarantee bool) string {
+	return DeriveWithEvidence(deploymentMode, strongGuarantee, Evidence{
+		RuntimeIsolationVerified: strongGuarantee,
+		WorkloadIdentityVerified: strongGuarantee,
+		DurableAuditVerified:     strongGuarantee,
+	})
+}
+
+func DeriveWithEvidence(deploymentMode string, strongGuarantee bool, evidence Evidence) string {
 	mode := NormalizeDeploymentMode(deploymentMode)
 	switch mode {
 	case "ci", "k8s":
 		if strongGuarantee {
-			return LevelStrong
+			if evidence.RuntimeIsolationVerified && evidence.WorkloadIdentityVerified && evidence.DurableAuditVerified {
+				return LevelStrong
+			}
+			return LevelGuarded
 		}
 		return LevelGuarded
 	case "remote_dev", "unmanaged":

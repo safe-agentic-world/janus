@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/safe-agentic-world/nomos/internal/executor"
+	"github.com/safe-agentic-world/nomos/internal/policy"
 )
 
 type writeParams struct {
@@ -113,18 +114,72 @@ func parseURLFromResource(resource string) (string, string, error) {
 	return parsed.Host, parsed.String(), nil
 }
 
-func execAllowed(obligations map[string]any, rawParams []byte) bool {
-	allowlist, ok := obligations["exec_allowlist"]
+func execAuthorized(obligations map[string]any, rawParams []byte, compatibilityMode string) (bool, string) {
+	if ok, enforced := execConstraintsAllow(obligations, rawParams); enforced {
+		if ok {
+			return true, "exec_constraints"
+		}
+		return false, "exec_constraints"
+	}
+	if policy.NormalizeExecCompatibilityMode(compatibilityMode) == policy.ExecCompatibilityStrict {
+		if _, ok := obligations["exec_allowlist"]; ok {
+			return false, "legacy_disabled"
+		}
+	}
+	if ok, enforced := execAllowlistAllows(obligations, rawParams); enforced {
+		if ok {
+			return true, "exec_allowlist"
+		}
+		return false, "exec_allowlist"
+	}
+	return true, "policy_only"
+}
+
+func execConstraintsAllow(obligations map[string]any, rawParams []byte) (bool, bool) {
+	constraints, ok := obligations["exec_constraints"]
 	if !ok {
-		return false
+		return false, false
 	}
 	params, err := decodeExecParams(rawParams)
 	if err != nil {
-		return false
+		return false, true
+	}
+	payload, ok := constraints.(map[string]any)
+	if !ok {
+		return false, true
+	}
+	rawPatterns, ok := payload["argv_patterns"]
+	if !ok {
+		return false, true
+	}
+	patterns, ok := rawPatterns.([]any)
+	if !ok {
+		return false, true
+	}
+	for _, entry := range patterns {
+		pattern, ok := entry.([]any)
+		if !ok {
+			continue
+		}
+		if matchArgvPrefixOrGlob(params.Argv, pattern) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+func execAllowlistAllows(obligations map[string]any, rawParams []byte) (bool, bool) {
+	allowlist, ok := obligations["exec_allowlist"]
+	if !ok {
+		return false, false
+	}
+	params, err := decodeExecParams(rawParams)
+	if err != nil {
+		return false, true
 	}
 	list, ok := allowlist.([]any)
 	if !ok {
-		return false
+		return false, true
 	}
 	for _, entry := range list {
 		prefix, ok := entry.([]any)
@@ -132,10 +187,10 @@ func execAllowed(obligations map[string]any, rawParams []byte) bool {
 			continue
 		}
 		if matchArgvPrefix(params.Argv, prefix) {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 func matchArgvPrefix(argv []string, prefix []any) bool {
@@ -149,6 +204,39 @@ func matchArgvPrefix(argv []string, prefix []any) bool {
 		}
 	}
 	return true
+}
+
+func matchArgvPrefixOrGlob(argv []string, pattern []any) bool {
+	typed := make([]string, 0, len(pattern))
+	for _, item := range pattern {
+		value, ok := item.(string)
+		if !ok || value == "" {
+			return false
+		}
+		typed = append(typed, value)
+	}
+	return matchArgvSegmentsLocal(typed, argv)
+}
+
+func matchArgvSegmentsLocal(pattern, argv []string) bool {
+	if len(pattern) == 0 {
+		return len(argv) == 0
+	}
+	if pattern[0] == "**" {
+		for i := 0; i <= len(argv); i++ {
+			if matchArgvSegmentsLocal(pattern[1:], argv[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(argv) == 0 {
+		return false
+	}
+	if pattern[0] != "*" && pattern[0] != argv[0] {
+		return false
+	}
+	return matchArgvSegmentsLocal(pattern[1:], argv[1:])
 }
 
 func netAllowed(obligations map[string]any, host string) bool {

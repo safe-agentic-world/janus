@@ -55,6 +55,13 @@ The strong-guarantee readiness signal is intentionally conservative. For a deplo
 - `runtime.strong_guarantee=true`
 - `runtime.deployment_mode=k8s` (or `ci` in CI environments)
 - `executor.sandbox_profile=container`
+- `runtime.evidence.container_backend_ready=true`
+- `runtime.evidence.rootless_or_non_privileged=true`
+- `runtime.evidence.read_only_fs=true`
+- `runtime.evidence.no_new_privileges=true`
+- `runtime.evidence.network_default_deny=true`
+- `runtime.evidence.workload_identity_verified=true`
+- `runtime.evidence.durable_audit_verified=true`
 - gateway mTLS enabled
 - workload identity verification enabled
 - shared API keys disabled
@@ -97,6 +104,8 @@ Use the reference workflow in `deploy/ci/github-actions-hardened.yml` as the har
 - workload identity should come from the CI platform identity provider rather than long-lived shared keys
 
 The checked-in CI example validates the strong-guarantee config shape and readiness signals. It is still the operator's job to ensure the CI runtime enforces the outer network and credential boundary.
+
+The evidence block is explicit by design. It exists so `STRONG` remains an earned claim backed by verifiable runtime conditions, not by config intent alone.
 
 ## Operational Expectations
 

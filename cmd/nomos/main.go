@@ -84,6 +84,9 @@ func runServe(args []string) {
 	if err != nil {
 		cliFatalf("init gateway: %v", err)
 	}
+	if sources := gw.PolicyBundleSources(); len(sources) > 0 {
+		cliInfof("policy bundle sources: %s", strings.Join(sources, ", "))
+	}
 
 	cliSuccessf("gateway listening on %s (%s)", cfg.Gateway.Listen, cfg.Gateway.Transport)
 	if err := gw.Start(); err != nil {
@@ -125,18 +128,21 @@ func runMCP(args []string) {
 	if err != nil {
 		cliFatal(err.Error())
 	}
-	runtimeOptions, err := mcp.ParseRuntimeOptions(mcp.RuntimeOptions{
-		LogLevel:  resolved.LogLevel,
-		Quiet:     resolved.Quiet,
-		LogFormat: logFormat,
-		ErrWriter: os.Stderr,
-	})
-	if err != nil {
-		cliFatalf("invalid mcp runtime options: %v", err)
-	}
 	cfg, err := gateway.LoadConfig(resolved.ConfigPath, os.Getenv, resolved.PolicyBundle)
 	if err != nil {
 		cliFatalf("load config: %v", err)
+	}
+	runtimeOptions, err := mcp.ParseRuntimeOptions(mcp.RuntimeOptions{
+		LogLevel:              resolved.LogLevel,
+		Quiet:                 resolved.Quiet,
+		LogFormat:             logFormat,
+		ErrWriter:             os.Stderr,
+		ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
+		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
+	})
+	if err != nil {
+		cliFatalf("invalid mcp runtime options: %v", err)
 	}
 	if mcpSinkRewritesStdout(cfg.Audit.Sink) {
 		cliWarn("rewriting audit sink stdout -> stderr for MCP protocol safety")
@@ -153,12 +159,15 @@ func runMCP(args []string) {
 	if strings.EqualFold(resolved.LogLevelSource, "env") && strings.EqualFold(resolved.LogLevel, "debug") {
 		cliInfo("log-level resolved from env NOMOS_LOG_LEVEL")
 	}
+	if len(cfg.Policy.EffectiveBundlePaths()) > 1 {
+		cliInfof("policy bundle paths: %s", strings.Join(cfg.Policy.EffectiveBundlePaths(), ", "))
+	}
 	id := identity.VerifiedIdentity{
 		Principal:   cfg.Identity.Principal,
 		Agent:       cfg.Identity.Agent,
 		Environment: cfg.Identity.Environment,
 	}
-	assuranceLevel := assurance.Derive(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee)
+	assuranceLevel := assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence())
 	cliSuccessf("MCP stdio server ready (assurance=%s)", assuranceLevel)
 	if err := mcp.RunStdioForBundlesWithRuntimeOptionsAndRecorder(cfg.Policy.EffectiveBundlePaths(), id, cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines, cfg.Approvals.Enabled, cfg.Executor.SandboxEnabled, cfg.Executor.SandboxProfile, runtimeOptions, recorder, assuranceLevel); err != nil {
 		cliFatalf("mcp server error: %v", err)
@@ -344,8 +353,9 @@ func executePolicyExplain(args []string, stdout io.Writer, getenv func(string) s
 }
 
 type explainSettings struct {
-	AssuranceLevel     string
-	SuggestRemediation bool
+	AssuranceLevel        string
+	SuggestRemediation    bool
+	ExecCompatibilityMode string
 }
 
 func buildPolicyExplainPayload(explanation policy.ExplainDetails, normalized normalize.NormalizedAction, settings explainSettings) map[string]any {
@@ -358,8 +368,17 @@ func buildPolicyExplainPayload(explanation policy.ExplainDetails, normalized nor
 		"assurance_level":     settings.AssuranceLevel,
 		"obligations_preview": explanation.ObligationsPreview,
 	}
+	if normalized.ActionType == "process.exec" {
+		payload["exec_authorization"] = buildExecAuthorizationPayload(explanation, settings)
+	}
+	if len(explanation.Decision.PolicyBundleInputs) > 0 {
+		payload["policy_bundle_inputs"] = explanation.Decision.PolicyBundleInputs
+	}
 	if len(explanation.Decision.PolicyBundleSources) > 1 {
 		payload["policy_bundle_sources"] = explanation.Decision.PolicyBundleSources
+	}
+	if len(explanation.MatchedRuleProvenance) > 0 {
+		payload["matched_rule_provenance"] = explanation.MatchedRuleProvenance
 	}
 	if explanation.Decision.Decision != policy.DecisionAllow {
 		whyDenied := map[string]any{
@@ -398,8 +417,9 @@ func deriveExplainSettings(configPath, bundlePath string, getenv func(string) st
 			return explainSettings{}, err
 		}
 		return explainSettings{
-			AssuranceLevel:     assurance.Derive(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee),
-			SuggestRemediation: cfg.Policy.ExplainSuggestions == nil || *cfg.Policy.ExplainSuggestions,
+			AssuranceLevel:        assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence()),
+			SuggestRemediation:    cfg.Policy.ExplainSuggestions == nil || *cfg.Policy.ExplainSuggestions,
+			ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
 		}, nil
 	}
 	deploymentMode := strings.TrimSpace(getenv("NOMOS_RUNTIME_DEPLOYMENT_MODE"))
@@ -411,9 +431,31 @@ func deriveExplainSettings(configPath, bundlePath string, getenv func(string) st
 		suggestRemediation = parseBoolEnv(value)
 	}
 	return explainSettings{
-		AssuranceLevel:     assurance.Derive(deploymentMode, parseBoolEnv(getenv("NOMOS_RUNTIME_STRONG_GUARANTEE"))),
-		SuggestRemediation: suggestRemediation,
+		AssuranceLevel: assurance.DeriveWithEvidence(deploymentMode, parseBoolEnv(getenv("NOMOS_RUNTIME_STRONG_GUARANTEE")), assurance.Evidence{
+			RuntimeIsolationVerified: parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_CONTAINER_BACKEND_READY")) &&
+				parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_ROOTLESS")) &&
+				parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_READ_ONLY_FS")) &&
+				parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_NO_NEW_PRIVILEGES")) &&
+				parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_NETWORK_DEFAULT_DENY")),
+			WorkloadIdentityVerified: parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_WORKLOAD_IDENTITY_VERIFIED")),
+			DurableAuditVerified:     parseBoolEnv(getenv("NOMOS_RUNTIME_EVIDENCE_DURABLE_AUDIT_VERIFIED")),
+		}),
+		SuggestRemediation:    suggestRemediation,
+		ExecCompatibilityMode: strings.TrimSpace(getenv("NOMOS_POLICY_EXEC_COMPATIBILITY_MODE")),
 	}, nil
+}
+
+func buildExecAuthorizationPayload(explanation policy.ExplainDetails, settings explainSettings) map[string]any {
+	mode := policy.NormalizeExecCompatibilityMode(settings.ExecCompatibilityMode)
+	if mode == "" {
+		mode = policy.ExecCompatibilityLegacyAllowlistFallback
+	}
+	return map[string]any{
+		"condition_class":          explanation.ExecAuthorization.ConditionClass,
+		"runtime_enforcement_hint": explanation.ExecAuthorization.RuntimeEnforcementHint,
+		"compatibility_mode":       mode,
+		"conflict":                 explanation.ExecAuthorization.Conflict,
+	}
 }
 
 func deriveExplainAssurance(configPath, bundlePath string, getenv func(string) string) (string, error) {

@@ -61,6 +61,10 @@ Tool surfacing semantics:
   - tools callable now
   - tools available only with approval
   - tools currently unavailable for the active identity/environment
+- `nomos.capabilities` is advisory only; every action is still evaluated live
+- capability evolution is additive and versioned through `contract_version`
+- clients may watch `capability_set_hash` to detect deterministic contract changes within the current runtime
+- `tool_states[*].constraints` exposes bounded safe summaries only; Nomos does not expose raw policy internals or sensitive resource names by default
 
 For `tools/call`:
 

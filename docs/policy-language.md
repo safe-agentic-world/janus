@@ -133,6 +133,11 @@ Config shape:
       "./examples/policies/repo.yaml",
       "./examples/policies/dev.yaml"
     ],
+    "policy_bundle_roles": [
+      "baseline",
+      "repo",
+      "env"
+    ],
     "verify_signatures": false,
     "signature_paths": [],
     "public_key_path": ""
@@ -144,15 +149,37 @@ Rules:
 
 - use either `policy_bundle_path` or `policy_bundle_paths`, never both
 - bundle order is significant and operator-controlled
+- `policy_bundle_roles` is optional but recommended for layered configs
+- valid `policy_bundle_roles` values are `baseline`, `org`, `repo`, `env`, and `local_override`
 - every configured bundle must load successfully or Nomos fails closed
 - duplicate rule IDs across bundles are rejected
 - the effective merged policy state gets its own deterministic `policy_bundle_hash`
-- for multi-bundle loads, explain and doctor surfaces expose ordered `policy_bundle_sources`
+- for multi-bundle loads, explain, doctor, audit, and startup logs expose ordered bundle provenance
+
+Recommended layered profile:
+
+1. `baseline`
+2. `org`
+3. `repo`
+4. `env`
+5. `local_override`
+
+`local_override` is intentionally narrow:
+
+- it is only allowed when `identity.environment` is `dev` or `local`
+- it is only allowed when `runtime.deployment_mode` is `unmanaged`
+- Nomos fails closed if a `local_override` bundle is configured outside those bounds
 
 If signature verification is enabled for multi-bundle configs:
 
 - `signature_paths` must align one-for-one with `policy_bundle_paths`
 - each bundle is verified independently before merge
+
+Checked-in examples:
+
+- `examples/configs/config.layered.example.json`
+- `examples/configs/config.layered.local-override.example.json`
+- `examples/policies/local-override.yaml`
 
 ## Process Exec Matching
 
@@ -160,12 +187,26 @@ Nomos now supports rule-level argv matching for `process.exec` without introduci
 
 Rule-level `exec_match` is part of authorization matching.
 
-Executor-side `exec_allowlist` remains an obligation that constrains what an allowed `process.exec` action may actually run.
+For rules that use `exec_match`, Nomos derives a typed internal exec constraint surface from the matched policy rules and enforces that surface at execution time as defense-in-depth.
 
-These are complementary:
+This keeps policy as the only authorization source while still letting the executor fail closed if the matched exec shape is not preserved.
 
-- use `exec_match` to express broad allow / narrow deny / approval patterns in policy
-- use `exec_allowlist` to bound actual execution at enforcement time
+Legacy `exec_allowlist` remains supported as a compatibility path for older bundles that do not use `exec_match`.
+
+Rules:
+
+- prefer `exec_match` for all new `process.exec` policy authoring
+- Nomos MUST NOT parse shell command strings for policy matching
+- Nomos MUST match only normalized argv arrays
+- a single rule MUST NOT declare both `exec_match` and `exec_allowlist`
+- if matched allow / approval rules mix `exec_match` and legacy `exec_allowlist` models for the same action evaluation, Nomos fails closed with `deny_by_exec_model_conflict`
+- if `exec_match` is present on matched allow or approval rules, the derived exec constraints are the primary runtime defense check
+- if no `exec_match`-derived constraints exist, legacy `exec_allowlist` may still constrain execution for compatibility
+
+Runtime compatibility mode:
+
+- `policy.exec_compatibility_mode: legacy_allowlist_fallback` keeps legacy `exec_allowlist` bundles working during migration
+- `policy.exec_compatibility_mode: strict` rejects runtime startup if allow / approval exec rules still depend on legacy `exec_allowlist`
 
 Example:
 
@@ -181,8 +222,6 @@ rules:
         - ["git", "**"]
     obligations:
       sandbox_mode: local
-      exec_allowlist:
-        - ["git"]
 
   - id: deny-push-main
     action_type: process.exec
@@ -199,4 +238,19 @@ With deny-wins semantics:
 - `git status` matches `allow-git` and can proceed if the obligations permit it
 - `git push origin main` matches both rules, but the narrower `DENY` wins
 
-This matching model is generic and works for any CLI with normalized argv tokens.
+Legacy compatibility example:
+
+```yaml
+version: v1
+rules:
+  - id: allow-legacy-echo
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    obligations:
+      sandbox_mode: local
+      exec_allowlist:
+        - ["cmd", "/c", "echo"]
+```
+
+This matching model remains generic and works for any CLI with normalized argv tokens.

@@ -82,6 +82,8 @@ func (s *Service) emitCompletedAudit(ctx auditContext, started time.Time) {
 	e.MatchedRuleIDs = ctx.decision.MatchedRuleIDs
 	e.Obligations = ctx.decision.Obligations
 	e.PolicyBundleHash = ctx.decision.PolicyBundleHash
+	e.PolicyBundleSources = append([]string{}, ctx.decision.PolicyBundleSources...)
+	e.PolicyBundleInputs = toAuditPolicyInputs(ctx.decision.PolicyBundleInputs)
 	e.RiskLevel = ctx.riskLevel
 	e.RiskFlags = ctx.riskFlags
 	e.SandboxMode = ctx.sandboxMode
@@ -93,6 +95,22 @@ func (s *Service) emitCompletedAudit(ctx auditContext, started time.Time) {
 	e.ResultRedactedSummary = ctx.resultSummary
 	e.ExecutorMetadata = ctx.executorMetadata
 	_ = s.recorder.WriteEvent(e)
+}
+
+func toAuditPolicyInputs(inputs []policy.BundleSource) []audit.PolicyInput {
+	if len(inputs) == 0 {
+		return nil
+	}
+	out := make([]audit.PolicyInput, 0, len(inputs))
+	for _, input := range inputs {
+		out = append(out, audit.PolicyInput{
+			Path:              input.Path,
+			Hash:              input.Hash,
+			Role:              input.Role,
+			SignatureVerified: input.SignatureVerified,
+		})
+	}
+	return out
 }
 
 func summarizeParams(redactor *redact.Redactor, params []byte) string {

@@ -37,7 +37,16 @@ data:
       "runtime": {
         "stateless_mode": false,
         "strong_guarantee": true,
-        "deployment_mode": "k8s"
+        "deployment_mode": "k8s",
+        "evidence": {
+          "container_backend_ready": true,
+          "rootless_or_non_privileged": true,
+          "read_only_fs": true,
+          "no_new_privileges": true,
+          "network_default_deny": true,
+          "workload_identity_verified": true,
+          "durable_audit_verified": true
+        }
       },
       "policy": {
         "policy_bundle_path": "/config/policy-bundle.json"

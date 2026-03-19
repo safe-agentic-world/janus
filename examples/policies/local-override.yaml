@@ -1,0 +1,6 @@
+version: v1
+rules:
+  - id: local-allow-scripts-read
+    action_type: fs.read
+    resource: file://workspace/scripts/**
+    decision: ALLOW

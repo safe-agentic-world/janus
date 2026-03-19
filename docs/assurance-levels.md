@@ -16,11 +16,12 @@ It defines:
 
 ## Deterministic Derivation
 
-Nomos derives `assurance_level` from runtime config only.
+Nomos derives `assurance_level` from runtime config plus explicit runtime evidence signals.
 
 Current mapping:
 
-- deployment mode `k8s` or `ci` with `strong_guarantee=true` -> `STRONG`
+- deployment mode `k8s` or `ci` with `strong_guarantee=true` and verified runtime isolation, workload identity, and durable audit evidence -> `STRONG`
+- deployment mode `k8s` or `ci` with `strong_guarantee=true` but missing or unverifiable evidence -> `GUARDED`
 - deployment mode `k8s` or `ci` with `strong_guarantee=false` -> `GUARDED`
 - deployment mode `remote_dev` -> `BEST_EFFORT`
 - deployment mode `unmanaged` -> `BEST_EFFORT`
@@ -32,9 +33,17 @@ This derivation is:
 - deterministic
 - independent of agent input
 
+The current evidence inputs are:
+
+- hardened container sandbox evidence
+- workload identity verification evidence
+- durable audit delivery evidence
+
+Nomos fails closed for hardened sandbox selection when container backend evidence is missing, and it degrades assurance when strong-guarantee intent is not backed by evidence.
+
 ## What Can Go Wrong
 
-- `STRONG` still depends on operators actually enforcing the documented runtime controls.
+- `STRONG` is only emitted when the required runtime evidence is present and verified.
 - `GUARDED` does not imply complete bypass resistance.
 - `BEST_EFFORT` means local or adjacent tooling may bypass Nomos entirely.
 - `NONE` should be treated as a configuration gap until deployment mode is made explicit.

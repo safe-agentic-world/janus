@@ -180,10 +180,14 @@ func TestDecorateHelpTextPlainForNonTerminalWriters(t *testing.T) {
 func TestDocumentedArtifactsExist(t *testing.T) {
 	required := []string{
 		filepath.Join("..", "..", "docs", "obligations.md"),
+		filepath.Join("..", "..", "docs", "policy-explain.md"),
 		filepath.Join("..", "..", "examples", "policies", "safe.json"),
 		filepath.Join("..", "..", "examples", "policies", "safe.yaml"),
 		filepath.Join("..", "..", "examples", "policies", "all-fields.example.json"),
 		filepath.Join("..", "..", "examples", "policies", "all-fields.example.yaml"),
+		filepath.Join("..", "..", "examples", "policies", "local-override.yaml"),
+		filepath.Join("..", "..", "examples", "configs", "config.layered.example.json"),
+		filepath.Join("..", "..", "examples", "configs", "config.layered.local-override.example.json"),
 	}
 	for _, path := range required {
 		if _, err := os.Stat(path); err != nil {
@@ -391,6 +395,15 @@ func TestDeriveExplainAssuranceFromConfigAndPayload(t *testing.T) {
 			"stateless_mode":   false,
 			"strong_guarantee": true,
 			"deployment_mode":  "k8s",
+			"evidence": map[string]any{
+				"container_backend_ready":    true,
+				"rootless_or_non_privileged": true,
+				"read_only_fs":               true,
+				"no_new_privileges":          true,
+				"network_default_deny":       true,
+				"workload_identity_verified": true,
+				"durable_audit_verified":     true,
+			},
 		},
 		"policy": map[string]any{"policy_bundle_path": bundlePath},
 		"executor": map[string]any{
@@ -399,7 +412,7 @@ func TestDeriveExplainAssuranceFromConfigAndPayload(t *testing.T) {
 			"workspace_root":  dir,
 		},
 		"credentials": map[string]any{"enabled": false, "secrets": []any{}},
-		"audit":       map[string]any{"sink": "stdout"},
+		"audit":       map[string]any{"sink": "sqlite:" + filepath.Join(dir, "audit.db")},
 		"mcp":         map[string]any{"enabled": true},
 		"upstream":    map[string]any{"routes": []any{}},
 		"approvals":   map[string]any{"enabled": false},
@@ -407,7 +420,7 @@ func TestDeriveExplainAssuranceFromConfigAndPayload(t *testing.T) {
 			"principal":       "system",
 			"agent":           "nomos",
 			"environment":     "prod",
-			"api_keys":        map[string]any{"prod-api-key": "system"},
+			"api_keys":        map[string]any{},
 			"service_secrets": map[string]any{},
 			"agent_secrets":   map[string]any{"nomos": "prod-agent-secret"},
 			"oidc": map[string]any{
@@ -489,6 +502,46 @@ func TestPolicyExplainGoldenStability(t *testing.T) {
 	expected := "{\n  \"assurance_level\": \"GUARDED\",\n  \"decision\": \"DENY\",\n  \"engine_version\": \"" + version.Current().Version + "\",\n  \"matched_rule_ids\": [],\n  \"minimal_allowing_change\": \"This host is not currently allowed; use an allowlisted host, request approval, or update the network allowlist for example.com.\",\n  \"obligations_preview\": {},\n  \"policy_bundle_hash\": \"bundle-hash\",\n  \"reason_code\": \"deny_by_default\",\n  \"why_denied\": {\n    \"deny_rules\": [],\n    \"matched_conditions\": {\n      \"matching_allow_rule\": false\n    },\n    \"reason_code\": \"deny_by_default\",\n    \"remediation_hint\": \"This network destination is not currently allowed.\"\n  }\n}"
 	if string(data) != expected {
 		t.Fatalf("unexpected explain payload\nexpected:\n%s\n\ngot:\n%s", expected, string(data))
+	}
+}
+
+func TestPolicyExplainPayloadIncludesBundleInputsAndMatchedRuleProvenance(t *testing.T) {
+	payload := buildPolicyExplainPayload(policy.ExplainDetails{
+		Decision: policy.Decision{
+			Decision:         policy.DecisionDeny,
+			ReasonCode:       "deny_by_rule",
+			MatchedRuleIDs:   []string{"allow-workspace", "deny-env"},
+			PolicyBundleHash: "merged-bundle-hash",
+			PolicyBundleInputs: []policy.BundleSource{
+				{Path: "base.yaml", Hash: "hash-base", Role: "baseline"},
+				{Path: "env.yaml", Hash: "hash-env", Role: "env", SignatureVerified: true},
+			},
+			PolicyBundleSources: []string{"base.yaml#hash-base", "env.yaml#hash-env"},
+		},
+		MatchedRuleProvenance: []policy.MatchedRuleProvenance{
+			{RuleID: "allow-workspace", Decision: policy.DecisionAllow, BundleSource: "base.yaml#hash-base"},
+			{RuleID: "deny-env", Decision: policy.DecisionDeny, BundleSource: "env.yaml#hash-env"},
+		},
+		DenyRules: []policy.DeniedRuleExplanation{
+			{RuleID: "deny-env", ReasonCode: "deny_by_rule", MatchedConditions: map[string]bool{"resource": true}, BundleSource: "env.yaml#hash-env"},
+		},
+		AllowRuleIDs:       []string{"allow-workspace"},
+		ObligationsPreview: map[string]any{},
+	}, normalize.NormalizedAction{
+		ActionType: "fs.read",
+		Resource:   "file://workspace/.env",
+	}, explainSettings{
+		AssuranceLevel:     assurance.LevelGuarded,
+		SuggestRemediation: true,
+	})
+
+	inputs, ok := payload["policy_bundle_inputs"].([]policy.BundleSource)
+	if !ok || len(inputs) != 2 {
+		t.Fatalf("expected structured policy_bundle_inputs in explain payload, got %#v", payload["policy_bundle_inputs"])
+	}
+	provenance, ok := payload["matched_rule_provenance"].([]policy.MatchedRuleProvenance)
+	if !ok || len(provenance) != 2 {
+		t.Fatalf("expected matched_rule_provenance in explain payload, got %#v", payload["matched_rule_provenance"])
 	}
 }
 

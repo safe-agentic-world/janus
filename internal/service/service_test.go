@@ -17,6 +17,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/sandbox"
 	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
@@ -208,8 +209,9 @@ func TestServiceHTTPAllowlist(t *testing.T) {
 	}
 }
 
-func TestServiceExecRequiresAllowlist(t *testing.T) {
+func TestServiceExecUsesPolicyAsAuthorizationSourceWithoutLegacyAllowlist(t *testing.T) {
 	dir := t.TempDir()
+	argv, _, allowPattern := benignExecFixture()
 	bundle := policy.Bundle{
 		Version: "v1",
 		Rules: []policy.Rule{
@@ -221,6 +223,12 @@ func TestServiceExecRequiresAllowlist(t *testing.T) {
 				Principals:   []string{"system"},
 				Agents:       []string{"nomos"},
 				Environments: []string{"dev"},
+				ExecMatch: &policy.ExecMatch{
+					ArgvPatterns: [][]string{allowPattern},
+				},
+				Obligations: map[string]any{
+					"sandbox_mode": "local",
+				},
 			},
 		},
 		Hash: "test",
@@ -239,7 +247,7 @@ func TestServiceExecRequiresAllowlist(t *testing.T) {
 		ActionID:      "act4",
 		ActionType:    "process.exec",
 		Resource:      "file://workspace/",
-		Params:        []byte(`{"argv":["cmd","/c","echo","hi"],"cwd":"","env_allowlist_keys":[]}`),
+		Params:        mustExecParams(t, argv),
 		TraceID:       "trace4",
 		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
 	}, identity.VerifiedIdentity{
@@ -254,12 +262,148 @@ func TestServiceExecRequiresAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if resp.Decision != policy.DecisionDeny {
-		t.Fatalf("expected deny, got %s", resp.Decision)
+	if resp.Decision != policy.DecisionAllow {
+		t.Fatalf("expected allow, got %s", resp.Decision)
 	}
-	if resp.Reason != "exec_not_allowlisted" {
-		t.Fatalf("expected exec_not_allowlisted, got %s", resp.Reason)
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %+v", resp)
 	}
+	if !strings.Contains(strings.ToLower(resp.Stdout), "go version") {
+		t.Fatalf("expected stdout to contain go version, got %+v", resp)
+	}
+}
+
+func TestServiceExecLegacyAllowlistCompatibilityRemainsSupported(t *testing.T) {
+	dir := t.TempDir()
+	argv, allowPrefix, _ := benignExecFixture()
+	bundle := policy.Bundle{
+		Version: "v1",
+		Rules: []policy.Rule{
+			{
+				ID:           "allow-legacy-exec",
+				ActionType:   "process.exec",
+				Resource:     "file://workspace/**",
+				Decision:     policy.DecisionAllow,
+				Principals:   []string{"system"},
+				Agents:       []string{"nomos"},
+				Environments: []string{"dev"},
+				Obligations: map[string]any{
+					"sandbox_mode":   "local",
+					"exec_allowlist": []any{allowPrefix},
+				},
+			},
+		},
+		Hash: "test",
+	}
+	engine := policy.NewEngine(bundle)
+	reader := executor.NewFSReader(dir, 32, 10)
+	writer := executor.NewFSWriter(dir, 32)
+	patcher := executor.NewPatchApplier(dir, 32)
+	execRunner := executor.NewExecRunner(dir, 32)
+	httpRunner := executor.NewHTTPRunner(32)
+	recorder := &recordSink{}
+	svc := New(engine, reader, writer, patcher, execRunner, httpRunner, recorder, redact.DefaultRedactor(), nil, nil, "local", func() time.Time { return time.Unix(0, 0) })
+
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act4-legacy",
+		ActionType:    "process.exec",
+		Resource:      "file://workspace/",
+		Params:        mustExecParams(t, argv),
+		TraceID:       "trace4-legacy",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Decision != policy.DecisionAllow {
+		t.Fatalf("expected allow, got %+v", resp)
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %+v", resp)
+	}
+}
+
+func TestServiceExecStrictModeRejectsLegacyAllowlistFallback(t *testing.T) {
+	dir := t.TempDir()
+	argv, allowPrefix, _ := benignExecFixture()
+	bundle := policy.Bundle{
+		Version: "v1",
+		Rules: []policy.Rule{
+			{
+				ID:           "allow-legacy-exec",
+				ActionType:   "process.exec",
+				Resource:     "file://workspace/**",
+				Decision:     policy.DecisionAllow,
+				Principals:   []string{"system"},
+				Agents:       []string{"nomos"},
+				Environments: []string{"dev"},
+				Obligations: map[string]any{
+					"sandbox_mode":   "local",
+					"exec_allowlist": []any{allowPrefix},
+				},
+			},
+		},
+		Hash: "test",
+	}
+	engine := policy.NewEngine(bundle)
+	reader := executor.NewFSReader(dir, 32, 10)
+	writer := executor.NewFSWriter(dir, 32)
+	patcher := executor.NewPatchApplier(dir, 32)
+	execRunner := executor.NewExecRunner(dir, 32)
+	httpRunner := executor.NewHTTPRunner(32)
+	recorder := &recordSink{}
+	svc := New(engine, reader, writer, patcher, execRunner, httpRunner, recorder, redact.DefaultRedactor(), nil, nil, "local", func() time.Time { return time.Unix(0, 0) })
+	svc.SetExecCompatibilityMode(policy.ExecCompatibilityStrict)
+
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act4-strict",
+		ActionType:    "process.exec",
+		Resource:      "file://workspace/",
+		Params:        mustExecParams(t, argv),
+		TraceID:       "trace4-strict",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Decision != policy.DecisionDeny || resp.Reason != "exec_legacy_mode_disabled" {
+		t.Fatalf("expected strict-mode legacy denial, got %+v", resp)
+	}
+}
+
+func benignExecFixture() ([]string, []any, []string) {
+	return []string{"go", "version"}, []any{"go", "version"}, []string{"go", "version"}
+}
+
+func mustExecParams(t *testing.T, argv []string) []byte {
+	t.Helper()
+	params, err := json.Marshal(map[string]any{
+		"argv":               argv,
+		"cwd":                "",
+		"env_allowlist_keys": []string{},
+	})
+	if err != nil {
+		t.Fatalf("marshal exec params: %v", err)
+	}
+	return params
 }
 
 func TestServiceExecPolicyCanDenyProtectedBranchPush(t *testing.T) {
@@ -279,8 +423,7 @@ func TestServiceExecPolicyCanDenyProtectedBranchPush(t *testing.T) {
 					ArgvPatterns: [][]string{{"git", "**"}},
 				},
 				Obligations: map[string]any{
-					"sandbox_mode":   "local",
-					"exec_allowlist": []any{[]any{"git"}},
+					"sandbox_mode": "local",
 				},
 			},
 			{
@@ -395,6 +538,80 @@ func TestServiceSandboxRequired(t *testing.T) {
 	}
 	if resp.Reason != "sandbox_required" {
 		t.Fatalf("expected sandbox_required, got %s", resp.Reason)
+	}
+}
+
+func TestServiceContainerSandboxUsesBackendEvidence(t *testing.T) {
+	dir := t.TempDir()
+	bundle := policy.Bundle{
+		Version: "v1",
+		Rules: []policy.Rule{
+			{
+				ID:           "allow-write",
+				ActionType:   "fs.write",
+				Resource:     "file://workspace/**",
+				Decision:     policy.DecisionAllow,
+				Principals:   []string{"system"},
+				Agents:       []string{"nomos"},
+				Environments: []string{"dev"},
+				Obligations: map[string]any{
+					"sandbox_mode": "container",
+				},
+			},
+		},
+		Hash: "test",
+	}
+	engine := policy.NewEngine(bundle)
+	reader := executor.NewFSReader(dir, 32, 10)
+	writer := executor.NewFSWriter(dir, 32)
+	patcher := executor.NewPatchApplier(dir, 32)
+	execRunner := executor.NewExecRunner(dir, 32)
+	httpRunner := executor.NewHTTPRunner(32)
+	recorder := &recordSink{}
+	svc := New(engine, reader, writer, patcher, execRunner, httpRunner, recorder, redact.DefaultRedactor(), nil, nil, "container", func() time.Time { return time.Unix(0, 0) })
+	svc.SetSandboxEvidence(sandbox.Evidence{
+		ContainerBackendReady: true,
+		Rootless:              true,
+		ReadOnlyFS:            true,
+		NoNewPrivileges:       true,
+		NetworkDefaultDeny:    true,
+	}, []string{dir})
+
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act5b",
+		ActionType:    "fs.write",
+		Resource:      "file://workspace/output.txt",
+		Params:        []byte(`{"content":"data"}`),
+		TraceID:       "trace5b",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}}},
+		identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"},
+	)
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	resp, err := svc.Process(act)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Decision != policy.DecisionAllow {
+		t.Fatalf("expected allow, got %+v", resp)
+	}
+	foundCompleted := false
+	for _, event := range recorder.events {
+		if event.EventType != "action.completed" {
+			continue
+		}
+		foundCompleted = true
+		if event.ExecutorMetadata["sandbox_backend"] != "container" {
+			t.Fatalf("expected container backend metadata, got %+v", event.ExecutorMetadata)
+		}
+		if event.ExecutorMetadata["sandbox_network_egress"] != "deny" {
+			t.Fatalf("expected deny-by-default sandbox egress metadata, got %+v", event.ExecutorMetadata)
+		}
+	}
+	if !foundCompleted {
+		t.Fatal("expected action.completed event")
 	}
 }
 

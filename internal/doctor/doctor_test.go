@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/safe-agentic-world/nomos/internal/normalize"
@@ -82,6 +83,9 @@ func TestRunMultiBundleReportsMergedSources(t *testing.T) {
 	if len(report.PolicyBundleSources) != 2 {
 		t.Fatalf("expected 2 policy bundle sources, got %+v", report.PolicyBundleSources)
 	}
+	if len(report.PolicyBundleInputs) != 2 {
+		t.Fatalf("expected 2 policy bundle inputs, got %+v", report.PolicyBundleInputs)
+	}
 }
 
 func TestRunMissingBundleNotReady(t *testing.T) {
@@ -114,6 +118,15 @@ func TestRunMalformedBundleNotReady(t *testing.T) {
 	if report.OverallStatus != "NOT_READY" {
 		t.Fatalf("expected NOT_READY, got %s", report.OverallStatus)
 	}
+	for _, check := range report.Checks {
+		if check.ID == "policy.bundle_parses" {
+			if !strings.Contains(check.Hint, bundlePath) {
+				t.Fatalf("expected malformed bundle hint to include failing bundle path, got %q", check.Hint)
+			}
+			return
+		}
+	}
+	t.Fatal("missing policy.bundle_parses check")
 }
 
 func TestReportJSONDeterministic(t *testing.T) {
@@ -334,6 +347,9 @@ func TestRunStrongGuaranteeReady(t *testing.T) {
 	if report.OverallStatus != "READY" {
 		t.Fatalf("expected READY, got %s", report.OverallStatus)
 	}
+	if report.AssuranceLevel != "STRONG" {
+		t.Fatalf("expected STRONG assurance, got %s", report.AssuranceLevel)
+	}
 }
 
 func TestRunStrongGuaranteeRejectsSharedAPIKeys(t *testing.T) {
@@ -385,6 +401,66 @@ func TestRunStrongGuaranteeRejectsSharedAPIKeys(t *testing.T) {
 		t.Fatalf("expected NOT_READY, got %s", report.OverallStatus)
 	}
 	assertCheckFailed(t, report, "strong.no_shared_api_keys")
+}
+
+func TestRunStrongGuaranteeMissingRuntimeEvidenceDegradesAssurance(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"r1","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["prod"]}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	oidcKeyPath := filepath.Join(dir, "oidc.pub.pem")
+	if err := os.WriteFile(oidcKeyPath, []byte("placeholder"), 0o600); err != nil {
+		t.Fatalf("write oidc key: %v", err)
+	}
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	clientCAPath := filepath.Join(dir, "client-ca.pem")
+	for _, path := range []string{certPath, keyPath, clientCAPath} {
+		if err := os.WriteFile(path, []byte("placeholder"), 0o600); err != nil {
+			t.Fatalf("write tls placeholder %s: %v", path, err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.json")
+	writeStrongConfigWithoutEvidence(t, configPath, bundlePath, dir, certPath, keyPath, clientCAPath, oidcKeyPath)
+
+	report, err := Run(Options{ConfigPath: configPath, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatalf("doctor run: %v", err)
+	}
+	if report.AssuranceLevel != "GUARDED" {
+		t.Fatalf("expected GUARDED assurance when runtime evidence missing, got %s", report.AssuranceLevel)
+	}
+	assertCheckFailed(t, report, "strong.assurance_evidence_backed")
+	assertCheckFailed(t, report, "evidence.runtime.container_backend_ready")
+}
+
+func TestRunStrongGuaranteeSPIFFEIdentityEvidenceCanSatisfyIdentityRequirement(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"r1","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["prod"]}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	clientCAPath := filepath.Join(dir, "client-ca.pem")
+	for _, path := range []string{certPath, keyPath, clientCAPath} {
+		if err := os.WriteFile(path, []byte("placeholder"), 0o600); err != nil {
+			t.Fatalf("write tls placeholder %s: %v", path, err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.json")
+	writeStrongSPIFFEConfig(t, configPath, bundlePath, dir, certPath, keyPath, clientCAPath)
+
+	report, err := Run(Options{ConfigPath: configPath, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatalf("doctor run: %v", err)
+	}
+	if report.AssuranceLevel != "STRONG" {
+		t.Fatalf("expected STRONG assurance with SPIFFE evidence, got %s", report.AssuranceLevel)
+	}
+	assertCheckPassed(t, report, "strong.workload_identity")
+	assertCheckPassed(t, report, "evidence.identity.workload_identity_verified")
 }
 
 func TestM17ReferenceArtifactsExist(t *testing.T) {
@@ -520,6 +596,15 @@ func writeStrongConfigForMode(t *testing.T, path, bundlePath, workspaceRoot, cer
 			"stateless_mode":   false,
 			"strong_guarantee": true,
 			"deployment_mode":  deploymentMode,
+			"evidence": map[string]any{
+				"container_backend_ready":    true,
+				"rootless_or_non_privileged": true,
+				"read_only_fs":               true,
+				"no_new_privileges":          true,
+				"network_default_deny":       true,
+				"workload_identity_verified": true,
+				"durable_audit_verified":     true,
+			},
 		},
 		"policy": map[string]any{
 			"policy_bundle_path": bundlePath,
@@ -546,6 +631,92 @@ func writeStrongConfigForMode(t *testing.T, path, bundlePath, workspaceRoot, cer
 				"issuer":          "https://issuer.example",
 				"audience":        "nomos",
 				"public_key_path": oidcKeyPath,
+			},
+		},
+		"redaction": map[string]any{"patterns": []any{}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeStrongConfigWithoutEvidence(t *testing.T, path, bundlePath, workspaceRoot, certPath, keyPath, clientCAPath, oidcKeyPath string) {
+	t.Helper()
+	writeStrongConfigForMode(t, path, bundlePath, workspaceRoot, certPath, keyPath, clientCAPath, oidcKeyPath, "k8s")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	runtimeCfg := cfg["runtime"].(map[string]any)
+	runtimeCfg["evidence"] = map[string]any{}
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeStrongSPIFFEConfig(t *testing.T, path, bundlePath, workspaceRoot, certPath, keyPath, clientCAPath string) {
+	t.Helper()
+	cfg := map[string]any{
+		"gateway": map[string]any{
+			"listen":    ":8080",
+			"transport": "http",
+			"tls": map[string]any{
+				"enabled":        true,
+				"cert_file":      certPath,
+				"key_file":       keyPath,
+				"client_ca_file": clientCAPath,
+				"require_mtls":   true,
+			},
+		},
+		"runtime": map[string]any{
+			"stateless_mode":   false,
+			"strong_guarantee": true,
+			"deployment_mode":  "k8s",
+			"evidence": map[string]any{
+				"container_backend_ready":    true,
+				"rootless_or_non_privileged": true,
+				"read_only_fs":               true,
+				"no_new_privileges":          true,
+				"network_default_deny":       true,
+				"workload_identity_verified": true,
+				"durable_audit_verified":     true,
+			},
+		},
+		"policy": map[string]any{
+			"policy_bundle_path": bundlePath,
+		},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+			"sandbox_profile": "container",
+			"workspace_root":  workspaceRoot,
+		},
+		"credentials": map[string]any{"enabled": false, "secrets": []any{}},
+		"audit":       map[string]any{"sink": "sqlite:" + filepath.Join(workspaceRoot, "audit.db")},
+		"mcp":         map[string]any{"enabled": true},
+		"upstream":    map[string]any{"routes": []any{}},
+		"approvals":   map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":       "system",
+			"agent":           "nomos",
+			"environment":     "prod",
+			"api_keys":        map[string]any{},
+			"service_secrets": map[string]any{},
+			"agent_secrets":   map[string]any{"nomos": "prod-agent-secret"},
+			"spiffe": map[string]any{
+				"enabled":      true,
+				"trust_domain": "example.org",
 			},
 		},
 		"redaction": map[string]any{"patterns": []any{}},

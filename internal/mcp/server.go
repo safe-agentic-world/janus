@@ -21,16 +21,17 @@ import (
 )
 
 type Server struct {
-	service          *service.Service
-	identity         identity.VerifiedIdentity
-	approvalsEnabled bool
-	sandboxEnabled   bool
-	outputMaxBytes   int
-	outputMaxLines   int
-	policyBundleHash string
-	assuranceLevel   string
-	logger           *runtimeLogger
-	pid              int
+	service             *service.Service
+	identity            identity.VerifiedIdentity
+	approvalsEnabled    bool
+	sandboxEnabled      bool
+	outputMaxBytes      int
+	outputMaxLines      int
+	policyBundleHash    string
+	policyBundleSources []string
+	assuranceLevel      string
+	logger              *runtimeLogger
+	pid                 int
 }
 
 type Request struct {
@@ -113,8 +114,13 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	if identity.Principal == "" || identity.Agent == "" || identity.Environment == "" {
 		return nil, errors.New("identity is required")
 	}
-	bundle, err := policy.LoadBundles(bundlePaths)
+	bundle, err := policy.LoadBundlesWithOptions(bundlePaths, policy.MultiLoadOptions{
+		BundleRoles: runtimeOptions.BundleRoles,
+	})
 	if err != nil {
+		return nil, err
+	}
+	if err := policy.ValidateExecCompatibility(bundle, runtimeOptions.ExecCompatibilityMode); err != nil {
 		return nil, err
 	}
 	logger, err := newRuntimeLogger(runtimeOptions)
@@ -131,17 +137,20 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		recorder = noopRecorder{}
 	}
 	svc := service.New(engine, reader, writerExec, patcher, execRunner, httpRunner, recorder, logger.redactor, nil, nil, sandboxProfile, nil)
+	svc.SetSandboxEvidence(runtimeOptions.SandboxEvidence, []string{workspaceRoot})
+	svc.SetExecCompatibilityMode(runtimeOptions.ExecCompatibilityMode)
 	return &Server{
-		service:          svc,
-		identity:         identity,
-		approvalsEnabled: approvalsEnabled,
-		sandboxEnabled:   sandboxEnabled,
-		outputMaxBytes:   maxBytes,
-		outputMaxLines:   maxLines,
-		policyBundleHash: bundle.Hash,
-		assuranceLevel:   "NONE",
-		logger:           logger,
-		pid:              os.Getpid(),
+		service:             svc,
+		identity:            identity,
+		approvalsEnabled:    approvalsEnabled,
+		sandboxEnabled:      sandboxEnabled,
+		outputMaxBytes:      maxBytes,
+		outputMaxLines:      maxLines,
+		policyBundleHash:    bundle.Hash,
+		policyBundleSources: policy.BundleSourceLabels(bundle),
+		assuranceLevel:      "NONE",
+		logger:              logger,
+		pid:                 os.Getpid(),
 	}, nil
 }
 
@@ -161,7 +170,7 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 	reader := bufio.NewReader(in)
 	writer := bufio.NewWriter(out)
 	defer writer.Flush()
-	s.logger.ReadyBanner(s.identity.Environment, s.policyBundleHash, version.Current().Version, s.pid)
+	s.logger.ReadyBanner(s.identity.Environment, s.policyBundleHash, s.policyBundleSources, version.Current().Version, s.pid)
 	for {
 		peek, err := reader.Peek(1)
 		if err != nil {
@@ -623,6 +632,7 @@ func (s *Server) handleCapabilities(req Request) Response {
 	result.ApprovalsEnabled = s.approvalsEnabled
 	result.AssuranceLevel = s.assuranceLevel
 	result.MediationNotice = capabilityMediationNotice(s.assuranceLevel)
+	result = service.FinalizeCapabilityEnvelope(result, s.identity, s.policyBundleHash)
 	return Response{ID: req.ID, Result: result}
 }
 

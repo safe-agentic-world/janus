@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
+	"github.com/safe-agentic-world/nomos/internal/canonicaljson"
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
@@ -18,15 +19,20 @@ const (
 )
 
 type ToolCapability struct {
-	Name                string `json:"name"`
-	ActionType          string `json:"action_type,omitempty"`
-	State               string `json:"state"`
-	ImmediatelyCallable bool   `json:"immediately_callable"`
-	ApprovalRequired    bool   `json:"approval_required"`
-	Advertised          bool   `json:"advertised"`
+	Name                string                `json:"name"`
+	ActionType          string                `json:"action_type,omitempty"`
+	State               string                `json:"state"`
+	ImmediatelyCallable bool                  `json:"immediately_callable"`
+	ApprovalRequired    bool                  `json:"approval_required"`
+	Advertised          bool                  `json:"advertised"`
+	Constraints         CapabilityConstraints `json:"constraints,omitempty"`
 }
 
 type CapabilityEnvelope struct {
+	ContractVersion       string                    `json:"contract_version,omitempty"`
+	CapabilitySetHash     string                    `json:"capability_set_hash,omitempty"`
+	AdvisoryOnly          bool                      `json:"advisory_only"`
+	AuthorizationNotice   string                    `json:"authorization_notice,omitempty"`
 	EnabledTools          []string                  `json:"enabled_tools"`
 	ImmediateTools        []string                  `json:"immediate_tools,omitempty"`
 	ApprovalGatedTools    []string                  `json:"approval_gated_tools,omitempty"`
@@ -42,6 +48,13 @@ type CapabilityEnvelope struct {
 	ApprovalsEnabled      bool                      `json:"approvals_enabled"`
 	AssuranceLevel        string                    `json:"assurance_level,omitempty"`
 	MediationNotice       string                    `json:"mediation_notice,omitempty"`
+}
+
+type CapabilityConstraints struct {
+	ResourceClasses []string `json:"resource_classes,omitempty"`
+	HostClasses     []string `json:"host_classes,omitempty"`
+	ExecClasses     []string `json:"exec_classes,omitempty"`
+	ApprovalScopes  []string `json:"approval_scopes,omitempty"`
 }
 
 type toolDefinition struct {
@@ -84,6 +97,12 @@ func toolCapabilityState(def toolDefinition, actionCapability policy.ActionCapab
 		ImmediatelyCallable: immediate,
 		ApprovalRequired:    approvalRequired,
 		Advertised:          true,
+		Constraints: CapabilityConstraints{
+			ResourceClasses: append([]string{}, actionCapability.ResourceClasses...),
+			HostClasses:     append([]string{}, actionCapability.HostClasses...),
+			ExecClasses:     append([]string{}, actionCapability.ExecClasses...),
+			ApprovalScopes:  append([]string{}, actionCapability.ApprovalScopes...),
+		},
 	}
 }
 
@@ -110,6 +129,9 @@ func (s *Service) EnabledTools(id identity.VerifiedIdentity) []string {
 
 func CapabilityEnvelopeFromToolStates(capabilities map[string]ToolCapability) CapabilityEnvelope {
 	envelope := CapabilityEnvelope{
+		ContractVersion:       "nomos.capabilities.v2",
+		AdvisoryOnly:          true,
+		AuthorizationNotice:   "Advisory only. Nomos evaluates every action live against policy and runtime controls.",
 		EnabledTools:          []string{},
 		ImmediateTools:        []string{},
 		ApprovalGatedTools:    []string{},
@@ -142,6 +164,46 @@ func CapabilityEnvelopeFromToolStates(capabilities map[string]ToolCapability) Ca
 	sort.Strings(envelope.MixedTools)
 	sort.Strings(envelope.UnavailableTools)
 	sort.Strings(envelope.AdvertisedTools)
+	return envelope
+}
+
+func FinalizeCapabilityEnvelope(envelope CapabilityEnvelope, id identity.VerifiedIdentity, policyBundleHash string) CapabilityEnvelope {
+	if envelope.ContractVersion == "" {
+		envelope.ContractVersion = "nomos.capabilities.v2"
+	}
+	hashInput := map[string]any{
+		"contract_version":        envelope.ContractVersion,
+		"policy_bundle_hash":      policyBundleHash,
+		"identity":                map[string]string{"principal": id.Principal, "agent": id.Agent, "environment": id.Environment},
+		"advisory_only":           envelope.AdvisoryOnly,
+		"authorization_notice":    envelope.AuthorizationNotice,
+		"enabled_tools":           envelope.EnabledTools,
+		"immediate_tools":         envelope.ImmediateTools,
+		"approval_gated_tools":    envelope.ApprovalGatedTools,
+		"mixed_tools":             envelope.MixedTools,
+		"unavailable_tools":       envelope.UnavailableTools,
+		"advertised_tools":        envelope.AdvertisedTools,
+		"tool_states":             envelope.ToolStates,
+		"tool_advertisement_mode": envelope.ToolAdvertisementMode,
+		"sandbox_modes":           envelope.SandboxModes,
+		"network_mode":            envelope.NetworkMode,
+		"output_max_bytes":        envelope.OutputMaxBytes,
+		"output_max_lines":        envelope.OutputMaxLines,
+		"approvals_enabled":       envelope.ApprovalsEnabled,
+		"assurance_level":         envelope.AssuranceLevel,
+		"mediation_notice":        envelope.MediationNotice,
+	}
+	data, err := json.Marshal(hashInput)
+	if err != nil {
+		envelope.CapabilitySetHash = ""
+		return envelope
+	}
+	canonical, err := canonicaljson.Canonicalize(data)
+	if err != nil {
+		envelope.CapabilitySetHash = ""
+		return envelope
+	}
+	envelope.CapabilitySetHash = canonicaljson.HashSHA256(canonical)
 	return envelope
 }
 

@@ -193,6 +193,115 @@ func TestLoadConfigRejectsAmbiguousPolicyBundleConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfigSupportsPolicyBundleRoles(t *testing.T) {
+	dir := t.TempDir()
+	baseBundle := filepath.Join(dir, "base.json")
+	repoBundle := filepath.Join(dir, "repo.json")
+	for _, path := range []string{baseBundle, repoBundle} {
+		if err := os.WriteFile(path, []byte(`{"version":"v1","rules":[{"id":"`+filepath.Base(path)+`","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+			t.Fatalf("write bundle %s: %v", path, err)
+		}
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"runtime": map[string]any{"deployment_mode": "unmanaged"},
+		"policy": map[string]any{
+			"policy_bundle_paths": []any{baseBundle, repoBundle},
+			"policy_bundle_roles": []any{"baseline", "repo"},
+		},
+		"executor":  map[string]any{"sandbox_enabled": true},
+		"audit":     map[string]any{"sink": "stdout"},
+		"mcp":       map[string]any{"enabled": false},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := cfg.Policy.EffectiveBundleRoles(); len(got) != 2 || got[0] != "baseline" || got[1] != "repo" {
+		t.Fatalf("unexpected effective bundle roles: %+v", got)
+	}
+}
+
+func TestLoadConfigRejectsLocalOverrideOutsideApprovedContexts(t *testing.T) {
+	dir := t.TempDir()
+	baseBundle := filepath.Join(dir, "base.json")
+	overrideBundle := filepath.Join(dir, "override.json")
+	for _, path := range []string{baseBundle, overrideBundle} {
+		if err := os.WriteFile(path, []byte(`{"version":"v1","rules":[{"id":"`+filepath.Base(path)+`","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+			t.Fatalf("write bundle %s: %v", path, err)
+		}
+	}
+
+	devAllowedPath := filepath.Join(dir, "config-dev.json")
+	devAllowedJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"runtime": map[string]any{"deployment_mode": "unmanaged"},
+		"policy": map[string]any{
+			"policy_bundle_paths": []any{baseBundle, overrideBundle},
+			"policy_bundle_roles": []any{"baseline", "local_override"},
+		},
+		"executor":  map[string]any{"sandbox_enabled": true},
+		"audit":     map[string]any{"sink": "stdout"},
+		"mcp":       map[string]any{"enabled": false},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(devAllowedPath, devAllowedJSON, 0o600); err != nil {
+		t.Fatalf("write dev config: %v", err)
+	}
+	if _, err := LoadConfig(devAllowedPath, os.Getenv, ""); err != nil {
+		t.Fatalf("expected dev unmanaged local_override config to load, got %v", err)
+	}
+
+	ciRejectedPath := filepath.Join(dir, "config-ci.json")
+	ciRejectedJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"runtime": map[string]any{"deployment_mode": "ci"},
+		"policy": map[string]any{
+			"policy_bundle_paths": []any{baseBundle, overrideBundle},
+			"policy_bundle_roles": []any{"baseline", "local_override"},
+		},
+		"executor":  map[string]any{"sandbox_enabled": true},
+		"audit":     map[string]any{"sink": "stdout"},
+		"mcp":       map[string]any{"enabled": false},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(ciRejectedPath, ciRejectedJSON, 0o600); err != nil {
+		t.Fatalf("write ci config: %v", err)
+	}
+	if _, err := LoadConfig(ciRejectedPath, os.Getenv, ""); err == nil {
+		t.Fatal("expected local_override rejection for non-unmanaged deployment mode")
+	}
+}
+
 func TestLoadConfigApprovalsValidationAndDefaults(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
@@ -584,5 +693,78 @@ func TestLoadConfigSupportsTelemetryAndSPIFFE(t *testing.T) {
 	}
 	if !cfg.Policy.OPA.Enabled || cfg.Policy.OPA.BinaryPath != "pwsh" || cfg.Policy.OPA.PolicyPath != opaPolicyPath || cfg.Policy.OPA.Query != "data.nomos.decision" || cfg.Policy.OPA.TimeoutMS != 500 {
 		t.Fatalf("unexpected OPA config: %+v", cfg.Policy.OPA)
+	}
+}
+
+func TestLoadConfigExecCompatibilityModeDefaultsAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway":   map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":    map[string]any{"policy_bundle_path": bundlePath},
+		"executor":  map[string]any{"sandbox_enabled": true},
+		"audit":     map[string]any{"sink": "stdout"},
+		"mcp":       map[string]any{"enabled": false},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Policy.ExecCompatibilityMode != "legacy_allowlist_fallback" {
+		t.Fatalf("expected default exec compatibility mode, got %s", cfg.Policy.ExecCompatibilityMode)
+	}
+
+	env := func(key string) string {
+		if key == "NOMOS_POLICY_EXEC_COMPATIBILITY_MODE" {
+			return "strict"
+		}
+		return ""
+	}
+	cfg, err = LoadConfig(path, env, "")
+	if err != nil {
+		t.Fatalf("load config with strict env: %v", err)
+	}
+	if cfg.Policy.ExecCompatibilityMode != "strict" {
+		t.Fatalf("expected strict mode, got %s", cfg.Policy.ExecCompatibilityMode)
+	}
+
+	badPath := filepath.Join(dir, "config-bad.json")
+	badJSON := mustMarshal(map[string]any{
+		"gateway":   map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":    map[string]any{"policy_bundle_path": bundlePath, "exec_compatibility_mode": "invalid"},
+		"executor":  map[string]any{"sandbox_enabled": true},
+		"audit":     map[string]any{"sink": "stdout"},
+		"mcp":       map[string]any{"enabled": false},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(badPath, badJSON, 0o600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	if _, err := LoadConfig(badPath, os.Getenv, ""); err == nil {
+		t.Fatal("expected invalid exec compatibility mode error")
 	}
 }

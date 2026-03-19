@@ -109,10 +109,7 @@
         ]
       },
       "obligations": {
-        "sandbox_mode": "local",
-        "exec_allowlist": [
-          ["git"]
-        ]
+        "sandbox_mode": "local"
       }
     }
   ]

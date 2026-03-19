@@ -8,14 +8,19 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/sandbox"
 )
 
 type RuntimeOptions struct {
-	LogLevel  string
-	Quiet     bool
-	LogFormat string
-	ErrWriter io.Writer
+	LogLevel              string
+	Quiet                 bool
+	LogFormat             string
+	ErrWriter             io.Writer
+	ExecCompatibilityMode string
+	BundleRoles           []string
+	SandboxEvidence       sandbox.Evidence
 }
 
 type logLevel int
@@ -45,11 +50,21 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 	if options.ErrWriter == nil {
 		options.ErrWriter = os.Stderr
 	}
+	if options.ExecCompatibilityMode != "" {
+		if normalized := policy.NormalizeExecCompatibilityMode(options.ExecCompatibilityMode); normalized == "" {
+			return RuntimeOptions{}, fmt.Errorf("invalid exec compatibility mode %q: expected legacy_allowlist_fallback|strict", strings.TrimSpace(options.ExecCompatibilityMode))
+		} else {
+			options.ExecCompatibilityMode = normalized
+		}
+	}
 	return RuntimeOptions{
-		LogLevel:  level,
-		Quiet:     options.Quiet,
-		LogFormat: format,
-		ErrWriter: options.ErrWriter,
+		LogLevel:              level,
+		Quiet:                 options.Quiet,
+		LogFormat:             format,
+		ErrWriter:             options.ErrWriter,
+		ExecCompatibilityMode: options.ExecCompatibilityMode,
+		BundleRoles:           options.BundleRoles,
+		SandboxEvidence:       options.SandboxEvidence,
 	}, nil
 }
 
@@ -107,7 +122,7 @@ func (l *runtimeLogger) Debug(message string) {
 	l.write(logLevelDebug, "debug", message)
 }
 
-func (l *runtimeLogger) ReadyBanner(environment, policyBundleHash, engineVersion string, pid int) {
+func (l *runtimeLogger) ReadyBanner(environment, policyBundleHash string, policyBundleSources []string, engineVersion string, pid int) {
 	if l.quiet {
 		return
 	}
@@ -116,7 +131,11 @@ func (l *runtimeLogger) ReadyBanner(environment, policyBundleHash, engineVersion
 	if l.banner {
 		return
 	}
-	line := fmt.Sprintf("[Nomos] MCP server ready (env=%s, policy_bundle_hash=%s, engine=%s, pid=%d)", environment, policyBundleHash, engineVersion, pid)
+	line := fmt.Sprintf("[Nomos] MCP server ready (env=%s, policy_bundle_hash=%s, engine=%s, pid=%d", environment, policyBundleHash, engineVersion, pid)
+	if len(policyBundleSources) > 0 {
+		line += ", policy_bundle_sources=" + strings.Join(policyBundleSources, ";")
+	}
+	line += ")"
 	l.writeLocked(line)
 	l.banner = true
 }

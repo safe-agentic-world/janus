@@ -29,16 +29,26 @@ They are part of the authorization result and MUST remain deterministic for the 
 
 It is a rule-level policy matcher described in [policy-language.md](./policy-language.md) for `process.exec`.
 
-Use the two together like this:
+For new policy authoring:
 
 - `exec_match` decides which exec requests a rule applies to
-- `exec_allowlist` constrains which allowed exec requests the executor may actually run
+- Nomos derives typed exec constraints from matched `exec_match` rules and enforces them at execution time as defense-in-depth
 
-This separation lets operators express:
+Legacy `exec_allowlist` remains supported only as a compatibility path for older bundles that do not yet use `exec_match`.
+
+Rules:
+
+- do not declare both `exec_match` and `exec_allowlist` in the same rule
+- prefer `exec_match` for all new `process.exec` policy rules
+- treat legacy `exec_allowlist` as migration-only compatibility, not the preferred long-term model
+- use `policy.exec_compatibility_mode: strict` when you want runtime startup to reject legacy exec allowlist policies
+- if matched allow / approval exec rules mix legacy and argv-aware models for the same action evaluation, Nomos fails closed
+
+This lets operators express:
 
 - broad allow for a command family
 - narrower deny or approval rules for dangerous subcommands
-- executor-side bounding for any allowed command family
+- executor-side fail-closed validation of the matched exec shape
 
 ## Deterministic Merge Rules
 
@@ -49,6 +59,7 @@ This separation lets operators express:
 - TAGS form a union
 - REDACTION rules form a union
 - OUTPUT caps choose the smallest cap
+- derived exec constraints are the deterministic union of matched rule-level argv patterns for the selected decision class
 - EXEC allowlists are intersected or otherwise reduced to the stricter effective set
 - NET allowlists are intersected or otherwise reduced to the stricter effective set
 

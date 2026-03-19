@@ -20,21 +20,24 @@ import (
 )
 
 type Service struct {
-	policy         *policy.Engine
-	externalPolicy ExternalPolicyEvaluator
-	fsReader       *executor.FSReader
-	fsWriter       *executor.FSWriter
-	patcher        *executor.PatchApplier
-	execRunner     *executor.ExecRunner
-	httpRunner     *executor.HTTPRunner
-	recorder       audit.Recorder
-	redactor       *redact.Redactor
-	approvals      ApprovalStore
-	credentials    CredentialBroker
-	sandboxProfile string
-	assuranceLevel string
-	telemetry      *telemetry.Emitter
-	now            func() time.Time
+	policy                *policy.Engine
+	externalPolicy        ExternalPolicyEvaluator
+	fsReader              *executor.FSReader
+	fsWriter              *executor.FSWriter
+	patcher               *executor.PatchApplier
+	execRunner            *executor.ExecRunner
+	httpRunner            *executor.HTTPRunner
+	recorder              audit.Recorder
+	redactor              *redact.Redactor
+	approvals             ApprovalStore
+	credentials           CredentialBroker
+	sandboxProfile        string
+	sandboxEvidence       sandbox.Evidence
+	sandboxWritablePaths  []string
+	assuranceLevel        string
+	telemetry             *telemetry.Emitter
+	execCompatibilityMode string
+	now                   func() time.Time
 }
 
 type ApprovalStore interface {
@@ -56,19 +59,20 @@ func New(policyEngine *policy.Engine, fsReader *executor.FSReader, fsWriter *exe
 		now = time.Now
 	}
 	return &Service{
-		policy:         policyEngine,
-		fsReader:       fsReader,
-		fsWriter:       fsWriter,
-		patcher:        patcher,
-		execRunner:     execRunner,
-		httpRunner:     httpRunner,
-		recorder:       recorder,
-		redactor:       redactor,
-		approvals:      approvals,
-		credentials:    credentialBroker,
-		sandboxProfile: sandboxProfile,
-		assuranceLevel: "NONE",
-		now:            now,
+		policy:                policyEngine,
+		fsReader:              fsReader,
+		fsWriter:              fsWriter,
+		patcher:               patcher,
+		execRunner:            execRunner,
+		httpRunner:            httpRunner,
+		recorder:              recorder,
+		redactor:              redactor,
+		approvals:             approvals,
+		credentials:           credentialBroker,
+		sandboxProfile:        sandboxProfile,
+		assuranceLevel:        "NONE",
+		execCompatibilityMode: policy.ExecCompatibilityLegacyAllowlistFallback,
+		now:                   now,
 	}
 }
 
@@ -83,6 +87,14 @@ func (s *Service) SetAssuranceLevel(level string) {
 	s.assuranceLevel = level
 }
 
+func (s *Service) SetSandboxEvidence(evidence sandbox.Evidence, writablePaths []string) {
+	if s == nil {
+		return
+	}
+	s.sandboxEvidence = evidence
+	s.sandboxWritablePaths = append([]string{}, writablePaths...)
+}
+
 func (s *Service) SetTelemetry(emitter *telemetry.Emitter) {
 	if s == nil {
 		return
@@ -95,6 +107,17 @@ func (s *Service) SetExternalPolicy(evaluator ExternalPolicyEvaluator) {
 		return
 	}
 	s.externalPolicy = evaluator
+}
+
+func (s *Service) SetExecCompatibilityMode(mode string) {
+	if s == nil {
+		return
+	}
+	normalized := policy.NormalizeExecCompatibilityMode(mode)
+	if normalized == "" {
+		normalized = policy.ExecCompatibilityLegacyAllowlistFallback
+	}
+	s.execCompatibilityMode = normalized
 }
 
 func (s *Service) Process(actionInput action.Action) (action.Response, error) {
@@ -189,31 +212,33 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		return action.Response{}, err
 	}
 	decisionEvent := audit.Event{
-		SchemaVersion:      "v1",
-		Timestamp:          s.now().UTC(),
-		EventType:          "action.decision",
-		TraceID:            normalized.TraceID,
-		ActionID:           normalized.ActionID,
-		ActionType:         normalized.ActionType,
-		Resource:           normalized.Resource,
-		ResourceNormalized: normalized.Resource,
-		ParamsHash:         normalized.ParamsHash,
-		MatchedRuleIDs:     decision.MatchedRuleIDs,
-		Obligations:        decision.Obligations,
-		PolicyBundleHash:   decision.PolicyBundleHash,
-		RiskLevel:          auditCtx.riskLevel,
-		RiskFlags:          auditCtx.riskFlags,
-		SandboxMode:        auditCtx.sandboxMode,
-		NetworkMode:        auditCtx.networkMode,
-		CredentialLeaseIDs: auditCtx.credentialLeaseIDs,
-		AssuranceLevel:     s.assuranceLevel,
-		ActionSummary:      auditCtx.actionSummary,
-		Principal:          normalized.Principal,
-		Agent:              normalized.Agent,
-		Environment:        normalized.Environment,
-		Decision:           decision.Decision,
-		Reason:             decision.ReasonCode,
-		Fingerprint:        fingerprint,
+		SchemaVersion:       "v1",
+		Timestamp:           s.now().UTC(),
+		EventType:           "action.decision",
+		TraceID:             normalized.TraceID,
+		ActionID:            normalized.ActionID,
+		ActionType:          normalized.ActionType,
+		Resource:            normalized.Resource,
+		ResourceNormalized:  normalized.Resource,
+		ParamsHash:          normalized.ParamsHash,
+		MatchedRuleIDs:      decision.MatchedRuleIDs,
+		Obligations:         decision.Obligations,
+		PolicyBundleHash:    decision.PolicyBundleHash,
+		PolicyBundleSources: append([]string{}, decision.PolicyBundleSources...),
+		PolicyBundleInputs:  toAuditPolicyInputs(decision.PolicyBundleInputs),
+		RiskLevel:           auditCtx.riskLevel,
+		RiskFlags:           auditCtx.riskFlags,
+		SandboxMode:         auditCtx.sandboxMode,
+		NetworkMode:         auditCtx.networkMode,
+		CredentialLeaseIDs:  auditCtx.credentialLeaseIDs,
+		AssuranceLevel:      s.assuranceLevel,
+		ActionSummary:       auditCtx.actionSummary,
+		Principal:           normalized.Principal,
+		Agent:               normalized.Agent,
+		Environment:         normalized.Environment,
+		Decision:            decision.Decision,
+		Reason:              decision.ReasonCode,
+		Fingerprint:         fingerprint,
 	}
 	_ = s.recorder.WriteEvent(decisionEvent)
 	response := action.Response{
@@ -375,9 +400,8 @@ func (s *Service) emitTraceEvent(eventType, traceID, actionID string) {
 	_ = s.recorder.WriteEvent(event)
 }
 
-func (s *Service) ensureSandbox(obligations map[string]any) error {
-	_, err := sandbox.SelectProfile(obligations, s.sandboxProfile)
-	return err
+func (s *Service) ensureSandbox(obligations map[string]any) (sandbox.Selection, error) {
+	return sandbox.SelectBackend(obligations, s.sandboxProfile, s.sandboxEvidence, s.sandboxWritablePaths)
 }
 
 func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, actionInput action.Action, obligations map[string]any, response action.Response) (action.Response, map[string]any, error) {
@@ -401,7 +425,8 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 		response.CredentialLeaseID = lease.ID
 		return response, nil, nil
 	case "fs.write":
-		if err := s.ensureSandbox(obligations); err != nil {
+		selection, err := s.ensureSandbox(obligations)
+		if err != nil {
 			response.Decision = policy.DecisionDeny
 			response.Reason = "sandbox_required"
 			return response, nil, nil
@@ -417,9 +442,10 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 			return response, nil, err
 		}
 		response.BytesWritten = writeResult.BytesWritten
-		return response, map[string]any{"bytes_written": response.BytesWritten}, nil
+		return response, map[string]any{"bytes_written": response.BytesWritten, "sandbox_backend": selection.Backend, "sandbox_network_egress": selection.NetworkEgress, "sandbox_writable_paths": selection.WritablePaths}, nil
 	case "repo.apply_patch":
-		if err := s.ensureSandbox(obligations); err != nil {
+		selection, err := s.ensureSandbox(obligations)
+		if err != nil {
 			response.Decision = policy.DecisionDeny
 			response.Reason = "sandbox_required"
 			return response, nil, nil
@@ -435,17 +461,31 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 			return response, nil, err
 		}
 		response.BytesWritten = patchResult.BytesWritten
-		return response, map[string]any{"bytes_written": response.BytesWritten}, nil
+		return response, map[string]any{"bytes_written": response.BytesWritten, "sandbox_backend": selection.Backend, "sandbox_network_egress": selection.NetworkEgress, "sandbox_writable_paths": selection.WritablePaths}, nil
 	case "process.exec":
-		if err := s.ensureSandbox(obligations); err != nil {
+		selection, err := s.ensureSandbox(obligations)
+		if err != nil {
 			response.Decision = policy.DecisionDeny
 			response.Reason = "sandbox_required"
 			return response, nil, nil
 		}
-		if !execAllowed(obligations, actionInput.Params) {
+		execAllowed, enforcementMode := execAuthorized(obligations, actionInput.Params, s.execCompatibilityMode)
+		if !execAllowed {
 			response.Decision = policy.DecisionDeny
-			response.Reason = "exec_not_allowlisted"
-			return response, nil, nil
+			if enforcementMode == "exec_allowlist" {
+				response.Reason = "exec_not_allowlisted"
+			} else if enforcementMode == "legacy_disabled" {
+				response.Reason = "exec_legacy_mode_disabled"
+			} else {
+				response.Reason = "exec_constraint_violation"
+			}
+			return response, map[string]any{
+				"exec_enforcement_mode":   enforcementMode,
+				"exec_compatibility_mode": s.execCompatibilityMode,
+				"sandbox_backend":         selection.Backend,
+				"sandbox_network_egress":  selection.NetworkEgress,
+				"sandbox_writable_paths":  selection.WritablePaths,
+			}, nil
 		}
 		params, err := decodeExecParams(actionInput.Params)
 		if err != nil {
@@ -467,7 +507,7 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 			response.Stdout, response.Truncated = applyOutputObligations(redactSecrets(s.redactor.RedactText(result.Stdout), secretValues), obligations, result.Truncated)
 			response.Stderr, response.Truncated = applyOutputObligations(redactSecrets(s.redactor.RedactText(result.Stderr), secretValues), obligations, response.Truncated)
 			response.ExitCode = result.ExitCode
-			return response, map[string]any{"exit_code": response.ExitCode, "truncated": response.Truncated}, nil
+			return response, map[string]any{"exit_code": response.ExitCode, "truncated": response.Truncated, "exec_enforcement_mode": enforcementMode, "exec_compatibility_mode": s.execCompatibilityMode, "sandbox_backend": selection.Backend, "sandbox_network_egress": selection.NetworkEgress, "sandbox_writable_paths": selection.WritablePaths}, nil
 		}
 		result, err := s.execRunner.Run(params)
 		if err != nil {
@@ -476,7 +516,7 @@ func (s *Service) handleAllowedAction(normalized normalize.NormalizedAction, act
 		response.Stdout, response.Truncated = applyOutputObligations(s.redactor.RedactText(result.Stdout), obligations, result.Truncated)
 		response.Stderr, response.Truncated = applyOutputObligations(s.redactor.RedactText(result.Stderr), obligations, response.Truncated)
 		response.ExitCode = result.ExitCode
-		return response, map[string]any{"exit_code": response.ExitCode, "truncated": response.Truncated}, nil
+		return response, map[string]any{"exit_code": response.ExitCode, "truncated": response.Truncated, "exec_enforcement_mode": enforcementMode, "exec_compatibility_mode": s.execCompatibilityMode, "sandbox_backend": selection.Backend, "sandbox_network_egress": selection.NetworkEgress, "sandbox_writable_paths": selection.WritablePaths}, nil
 	case "net.http_request":
 		host, urlString, err := parseURLFromResource(normalized.Resource)
 		if err != nil {

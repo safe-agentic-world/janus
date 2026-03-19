@@ -46,9 +46,13 @@ type ExecMatch struct {
 	ArgvPatterns [][]string `json:"argv_patterns,omitempty" yaml:"argv_patterns,omitempty"`
 }
 
+const obligationExecAllowlist = "exec_allowlist"
+
 type BundleSource struct {
-	Path string
-	Hash string
+	Path              string `json:"path"`
+	Hash              string `json:"hash"`
+	Role              string `json:"role,omitempty"`
+	SignatureVerified bool   `json:"signature_verified,omitempty"`
 }
 
 type LoadOptions struct {
@@ -56,6 +60,11 @@ type LoadOptions struct {
 	SignaturePath   string
 	PublicKeyPath   string
 }
+
+const (
+	ExecCompatibilityLegacyAllowlistFallback = "legacy_allowlist_fallback"
+	ExecCompatibilityStrict                  = "strict"
+)
 
 func LoadBundle(path string) (Bundle, error) {
 	return LoadBundleWithOptions(path, LoadOptions{})
@@ -250,6 +259,9 @@ func (b Bundle) Validate() error {
 			if rule.ActionType != "process.exec" && rule.ActionType != "*" {
 				return fmt.Errorf("rule %s exec_match requires action_type process.exec or *", rule.ID)
 			}
+			if _, ok := rule.Obligations[obligationExecAllowlist]; ok {
+				return fmt.Errorf("rule %s must not declare both exec_match and exec_allowlist", rule.ID)
+			}
 			if len(rule.ExecMatch.ArgvPatterns) == 0 {
 				return fmt.Errorf("rule %s exec_match.argv_patterns is required", rule.ID)
 			}
@@ -263,6 +275,39 @@ func (b Bundle) Validate() error {
 					}
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func NormalizeExecCompatibilityMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", ExecCompatibilityLegacyAllowlistFallback:
+		return ExecCompatibilityLegacyAllowlistFallback
+	case ExecCompatibilityStrict:
+		return ExecCompatibilityStrict
+	default:
+		return ""
+	}
+}
+
+func ValidateExecCompatibility(bundle Bundle, mode string) error {
+	normalizedMode := NormalizeExecCompatibilityMode(mode)
+	if normalizedMode == "" {
+		return fmt.Errorf("invalid exec compatibility mode %q", strings.TrimSpace(mode))
+	}
+	if normalizedMode != ExecCompatibilityStrict {
+		return nil
+	}
+	for _, rule := range bundle.Rules {
+		if rule.ActionType != "process.exec" && rule.ActionType != "*" {
+			continue
+		}
+		if rule.Decision != DecisionAllow && rule.Decision != DecisionRequireApproval {
+			continue
+		}
+		if _, ok := rule.Obligations[obligationExecAllowlist]; ok {
+			return fmt.Errorf("rule %s uses legacy exec_allowlist but policy.exec_compatibility_mode=strict", rule.ID)
 		}
 	}
 	return nil

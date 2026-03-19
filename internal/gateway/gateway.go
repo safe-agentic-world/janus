@@ -32,20 +32,22 @@ import (
 )
 
 type Gateway struct {
-	cfg            Config
-	server         *http.Server
-	listener       net.Listener
-	writer         audit.Recorder
-	policy         *policy.Engine
-	service        *service.Service
-	approvals      *approval.Store
-	auth           *identity.Authenticator
-	telemetry      *telemetry.Emitter
-	actionTokens   chan struct{}
-	rateLimiter    *principalLimiter
-	breaker        *principalBreaker
-	assuranceLevel string
-	now            func() time.Time
+	cfg                 Config
+	server              *http.Server
+	listener            net.Listener
+	writer              audit.Recorder
+	policy              *policy.Engine
+	service             *service.Service
+	approvals           *approval.Store
+	auth                *identity.Authenticator
+	telemetry           *telemetry.Emitter
+	actionTokens        chan struct{}
+	rateLimiter         *principalLimiter
+	breaker             *principalBreaker
+	assuranceLevel      string
+	policyBundleHash    string
+	policyBundleSources []string
+	now                 func() time.Time
 }
 
 func New(cfg Config) (*Gateway, error) {
@@ -68,11 +70,15 @@ func New(cfg Config) (*Gateway, error) {
 		VerifySignatures: cfg.Policy.VerifySignatures,
 		SignaturePaths:   cfg.Policy.EffectiveSignaturePaths(),
 		PublicKeyPath:    cfg.Policy.PublicKeyPath,
+		BundleRoles:      cfg.Policy.EffectiveBundleRoles(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	engine := policy.NewEngine(bundle)
+	if err := policy.ValidateExecCompatibility(bundle, cfg.Policy.ExecCompatibilityMode); err != nil {
+		return nil, err
+	}
 	limit := cfg.Gateway.ConcurrencyLimit
 	if limit <= 0 {
 		limit = 32
@@ -106,6 +112,8 @@ func New(cfg Config) (*Gateway, error) {
 	execRunner := executor.NewExecRunner(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	httpRunner := executor.NewHTTPRunner(cfg.Executor.MaxOutputBytes)
 	svc := service.New(engine, exec, writerExec, patcher, execRunner, httpRunner, writer, redactor, approvalStore, credentialBroker, cfg.Executor.SandboxProfile, time.Now)
+	svc.SetSandboxEvidence(cfg.Runtime.Evidence.SandboxEvidence(), []string{cfg.Executor.WorkspaceRoot})
+	svc.SetExecCompatibilityMode(cfg.Policy.ExecCompatibilityMode)
 	if cfg.Policy.OPA.Enabled {
 		backend, err := opabridge.NewCommandBackend(opabridge.CommandConfig{
 			BinaryPath: cfg.Policy.OPA.BinaryPath,
@@ -119,7 +127,7 @@ func New(cfg Config) (*Gateway, error) {
 		svc.SetExternalPolicy(backend)
 	}
 	svc.SetTelemetry(telemetry.NewEmitter(telemetryExporter))
-	assuranceLevel := assurance.Derive(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee)
+	assuranceLevel := assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence())
 	svc.SetAssuranceLevel(assuranceLevel)
 	authenticator, err := identity.NewAuthenticator(identity.AuthConfig{
 		APIKeys:           cfg.Identity.APIKeys,
@@ -137,18 +145,20 @@ func New(cfg Config) (*Gateway, error) {
 		return nil, err
 	}
 	gw := &Gateway{
-		cfg:            cfg,
-		writer:         writer,
-		policy:         engine,
-		service:        svc,
-		approvals:      approvalStore,
-		auth:           authenticator,
-		telemetry:      telemetry.NewEmitter(telemetryExporter),
-		actionTokens:   make(chan struct{}, limit),
-		rateLimiter:    newPrincipalLimiter(rateLimit, time.Now),
-		breaker:        newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, time.Now),
-		assuranceLevel: assuranceLevel,
-		now:            time.Now,
+		cfg:                 cfg,
+		writer:              writer,
+		policy:              engine,
+		service:             svc,
+		approvals:           approvalStore,
+		auth:                authenticator,
+		telemetry:           telemetry.NewEmitter(telemetryExporter),
+		actionTokens:        make(chan struct{}, limit),
+		rateLimiter:         newPrincipalLimiter(rateLimit, time.Now),
+		breaker:             newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, time.Now),
+		assuranceLevel:      assuranceLevel,
+		policyBundleHash:    bundle.Hash,
+		policyBundleSources: policy.BundleSourceLabels(bundle),
+		now:                 time.Now,
 	}
 	return gw, nil
 }
@@ -164,11 +174,15 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		VerifySignatures: cfg.Policy.VerifySignatures,
 		SignaturePaths:   cfg.Policy.EffectiveSignaturePaths(),
 		PublicKeyPath:    cfg.Policy.PublicKeyPath,
+		BundleRoles:      cfg.Policy.EffectiveBundleRoles(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	engine := policy.NewEngine(bundle)
+	if err := policy.ValidateExecCompatibility(bundle, cfg.Policy.ExecCompatibilityMode); err != nil {
+		return nil, err
+	}
 	limit := cfg.Gateway.ConcurrencyLimit
 	if limit <= 0 {
 		limit = 32
@@ -213,6 +227,8 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	execRunner := executor.NewExecRunner(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	httpRunner := executor.NewHTTPRunner(cfg.Executor.MaxOutputBytes)
 	svc := service.New(engine, exec, writerExec, patcher, execRunner, httpRunner, recorder, redactor, approvalStore, credentialBroker, cfg.Executor.SandboxProfile, now)
+	svc.SetSandboxEvidence(cfg.Runtime.Evidence.SandboxEvidence(), []string{cfg.Executor.WorkspaceRoot})
+	svc.SetExecCompatibilityMode(cfg.Policy.ExecCompatibilityMode)
 	if cfg.Policy.OPA.Enabled {
 		backend, err := opabridge.NewCommandBackend(opabridge.CommandConfig{
 			BinaryPath: cfg.Policy.OPA.BinaryPath,
@@ -226,7 +242,7 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		svc.SetExternalPolicy(backend)
 	}
 	svc.SetTelemetry(telemetry.NewEmitter(telemetryExporter))
-	assuranceLevel := assurance.Derive(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee)
+	assuranceLevel := assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence())
 	svc.SetAssuranceLevel(assuranceLevel)
 	authenticator, err := identity.NewAuthenticator(identity.AuthConfig{
 		APIKeys:           cfg.Identity.APIKeys,
@@ -244,20 +260,38 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		return nil, err
 	}
 	gw := &Gateway{
-		cfg:            cfg,
-		writer:         recorder,
-		policy:         engine,
-		service:        svc,
-		approvals:      approvalStore,
-		auth:           authenticator,
-		telemetry:      telemetry.NewEmitter(telemetryExporter),
-		actionTokens:   make(chan struct{}, limit),
-		rateLimiter:    newPrincipalLimiter(rateLimit, now),
-		breaker:        newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, now),
-		assuranceLevel: assuranceLevel,
-		now:            now,
+		cfg:                 cfg,
+		writer:              recorder,
+		policy:              engine,
+		service:             svc,
+		approvals:           approvalStore,
+		auth:                authenticator,
+		telemetry:           telemetry.NewEmitter(telemetryExporter),
+		actionTokens:        make(chan struct{}, limit),
+		rateLimiter:         newPrincipalLimiter(rateLimit, now),
+		breaker:             newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, now),
+		assuranceLevel:      assuranceLevel,
+		policyBundleHash:    bundle.Hash,
+		policyBundleSources: policy.BundleSourceLabels(bundle),
+		now:                 now,
 	}
 	return gw, nil
+}
+
+func (g *Gateway) PolicyBundleHash() string {
+	if g == nil {
+		return ""
+	}
+	return g.policyBundleHash
+}
+
+func (g *Gateway) PolicyBundleSources() []string {
+	if g == nil || len(g.policyBundleSources) == 0 {
+		return nil
+	}
+	out := make([]string, len(g.policyBundleSources))
+	copy(out, g.policyBundleSources)
+	return out
 }
 
 func (g *Gateway) Start() error {

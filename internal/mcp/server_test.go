@@ -43,6 +43,9 @@ func TestCapabilitiesDifferByIdentity(t *testing.T) {
 	if state := tools.ToolStates["nomos.fs_read"].State; state != service.ToolStateAllow {
 		t.Fatalf("expected fs_read allow state, got %+v", tools.ToolStates["nomos.fs_read"])
 	}
+	if !tools.AdvisoryOnly || tools.ContractVersion == "" || tools.CapabilitySetHash == "" {
+		t.Fatalf("expected advisory capability contract metadata, got %+v", tools)
+	}
 	if mode := tools.ToolAdvertisementMode; mode != "mcp_tools_list_static" {
 		t.Fatalf("expected static tool advertisement mode, got %+v", tools)
 	}
@@ -126,7 +129,7 @@ func TestCapabilitiesSurfaceAssuranceLevelAndNotice(t *testing.T) {
 func TestCapabilitiesExposeExecWhenSafeBundleUsesExecMatch(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
-	data := `{"version":"v1","rules":[{"id":"deny-git-push","action_type":"process.exec","resource":"file://workspace/","decision":"DENY","principals":["system"],"agents":["nomos"],"environments":["dev"],"exec_match":{"argv_patterns":[["git","push","**"],["git","push"]]}},{"id":"allow-git","action_type":"process.exec","resource":"file://workspace/","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"exec_match":{"argv_patterns":[["git","**"],["git"]]},"obligations":{"sandbox_mode":"local","exec_allowlist":[["git"]]}}]}`
+	data := `{"version":"v1","rules":[{"id":"deny-git-push","action_type":"process.exec","resource":"file://workspace/","decision":"DENY","principals":["system"],"agents":["nomos"],"environments":["dev"],"exec_match":{"argv_patterns":[["git","push","**"],["git","push"]]}},{"id":"allow-git","action_type":"process.exec","resource":"file://workspace/","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"exec_match":{"argv_patterns":[["git","**"],["git"]]},"obligations":{"sandbox_mode":"local"}}]}`
 	if err := os.WriteFile(bundlePath, []byte(data), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
@@ -194,6 +197,12 @@ func TestCapabilitiesExposeHTTPWhenPolicyRequiresApproval(t *testing.T) {
 	if len(tools.ApprovalGatedTools) != 1 || tools.ApprovalGatedTools[0] != "nomos.http_request" {
 		t.Fatalf("expected approval-gated http tool, got %+v", tools.ApprovalGatedTools)
 	}
+	if got := tools.ToolStates["nomos.http_request"].Constraints.HostClasses; len(got) != 1 || got[0] != "host_allowlist" {
+		t.Fatalf("expected bounded host summary, got %+v", tools.ToolStates["nomos.http_request"])
+	}
+	if got := tools.ToolStates["nomos.http_request"].Constraints.ApprovalScopes; len(got) != 1 || got[0] != "action_type_resource" {
+		t.Fatalf("expected approval scope class, got %+v", tools.ToolStates["nomos.http_request"])
+	}
 }
 
 func TestCapabilitiesExposeReadToolForNarrowAllowedResource(t *testing.T) {
@@ -228,5 +237,38 @@ func TestCapabilitiesExposeReadToolForNarrowAllowedResource(t *testing.T) {
 	}
 	if state := tools.ToolStates["nomos.fs_read"].State; state != service.ToolStateAllow {
 		t.Fatalf("expected nomos.fs_read allow state, got %+v", tools.ToolStates["nomos.fs_read"])
+	}
+	if got := tools.ToolStates["nomos.fs_read"].Constraints.ResourceClasses; len(got) != 1 || got[0] != "workspace_single_path" {
+		t.Fatalf("expected narrow safe path-class disclosure, got %+v", tools.ToolStates["nomos.fs_read"])
+	}
+}
+
+func TestCapabilitySetHashChangesAcrossSurfacedStates(t *testing.T) {
+	dir := t.TempDir()
+	allowBundlePath := filepath.Join(dir, "allow.json")
+	approvalBundlePath := filepath.Join(dir, "approval.json")
+	allowData := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	approvalData := `{"version":"v1","rules":[{"id":"approve-read","action_type":"fs.read","resource":"file://workspace/**","decision":"REQUIRE_APPROVAL","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(allowBundlePath, []byte(allowData), 0o600); err != nil {
+		t.Fatalf("write allow bundle: %v", err)
+	}
+	if err := os.WriteFile(approvalBundlePath, []byte(approvalData), 0o600); err != nil {
+		t.Fatalf("write approval bundle: %v", err)
+	}
+	id := identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"}
+	allowServer, err := NewServer(allowBundlePath, id, dir, 64, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new allow server: %v", err)
+	}
+	approvalServer, err := NewServer(approvalBundlePath, id, dir, 64, 10, true, false, "local")
+	if err != nil {
+		t.Fatalf("new approval server: %v", err)
+	}
+	allowResp := allowServer.handleCapabilities(Request{ID: "1", Method: "nomos.capabilities"})
+	approvalResp := approvalServer.handleCapabilities(Request{ID: "2", Method: "nomos.capabilities"})
+	allowCaps := allowResp.Result.(service.CapabilityEnvelope)
+	approvalCaps := approvalResp.Result.(service.CapabilityEnvelope)
+	if allowCaps.CapabilitySetHash == approvalCaps.CapabilitySetHash {
+		t.Fatalf("expected capability hash to differ across surfaced states: %q", allowCaps.CapabilitySetHash)
 	}
 }

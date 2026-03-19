@@ -224,7 +224,7 @@ Exit codes:
 
 ## Capabilities Explanation
 
-Use `nomos.capabilities` to discover what tools are currently available for a principal/agent/environment under loaded policy.
+Use `nomos.capabilities` to discover the current advisory capability contract for a principal/agent/environment under loaded policy.
 
 Response fields:
 - `enabled_tools`: backward-compatible union of all currently usable or approval-gated tools.
@@ -234,6 +234,11 @@ Response fields:
 - `unavailable_tools`: tools advertised through MCP but not currently authorized for this identity context.
 - `advertised_tools`: the static MCP `tools/list` surface.
 - `tool_states`: per-tool machine-readable state (`allow`, `require_approval`, `mixed`, `unavailable`) plus immediate-callable and approval-required flags.
+- `contract_version`: explicit capability contract version.
+- `capability_set_hash`: deterministic hash of the surfaced capability contract for the current identity and runtime.
+- `advisory_only`: always `true`; capability surfacing is not an authorization result.
+- `authorization_notice`: reminder that live action authorization remains authoritative.
+- `tool_states[*].constraints`: bounded safe summaries such as resource classes, host classes, exec classes, and approval scope classes.
 - `tool_advertisement_mode`: how MCP tool advertisement relates to effective policy state. Current value: `mcp_tools_list_static`.
 - `sandbox_modes`: available sandbox mode envelope (`none` or `sandboxed` in current implementation).
 - `network_mode`: `deny` or `allowlist` depending on policy-derived capability.
@@ -245,8 +250,9 @@ Response fields:
 MCP surfacing semantics:
 
 - `tools/list` remains static for compatibility and always advertises the full Nomos tool surface.
-- `nomos.capabilities` is the authoritative policy-derived contract for what is callable now, approval-gated, or unavailable in the current session.
+- `nomos.capabilities` is the authoritative advisory contract for client UX, not for authorization.
 - final authorization is still performed per action with deny-wins semantics.
+- clients should treat `capability_set_hash` changes as a cue to refresh UI state, not as a bypass of live authorization.
 
 ## Unmanaged Laptop Limitations And Safe Workflows
 

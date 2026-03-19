@@ -21,6 +21,10 @@ func TestCompletedAuditEventFields(t *testing.T) {
 			{ID: "allow-readme", ActionType: "fs.read", Resource: "file://workspace/README.md", Decision: policy.DecisionAllow, Obligations: map[string]any{"net_allowlist": []any{"example.com"}}},
 		},
 		Hash: "bundlehash123",
+		SourceBundles: []policy.BundleSource{
+			{Path: "base.yaml", Hash: "hash-base", Role: "baseline"},
+			{Path: "repo.yaml", Hash: "hash-repo", Role: "repo"},
+		},
 	}
 	engine := policy.NewEngine(bundle)
 	reader := executor.NewFSReader(dir, 64*1024, 200)
@@ -73,6 +77,15 @@ func TestCompletedAuditEventFields(t *testing.T) {
 		if e.PolicyBundleHash != "bundlehash123" {
 			t.Fatalf("expected policy bundle hash, got %s", e.PolicyBundleHash)
 		}
+		if len(e.PolicyBundleSources) != 2 {
+			t.Fatalf("expected ordered bundle provenance labels, got %+v", e.PolicyBundleSources)
+		}
+		if len(e.PolicyBundleInputs) != 2 {
+			t.Fatalf("expected structured bundle inputs, got %+v", e.PolicyBundleInputs)
+		}
+		if e.PolicyBundleInputs[0].Role != "baseline" || e.PolicyBundleInputs[1].Role != "repo" {
+			t.Fatalf("expected bundle roles preserved in audit event, got %+v", e.PolicyBundleInputs)
+		}
 		if e.EngineVersion == "" {
 			t.Fatal("expected engine version")
 		}
@@ -86,4 +99,63 @@ func TestCompletedAuditEventFields(t *testing.T) {
 	if !completedFound {
 		t.Fatal("expected action.completed event")
 	}
+}
+
+func TestCompletedAuditExecMetadataIncludesEnforcementMode(t *testing.T) {
+	dir := t.TempDir()
+	argv, _, allowPattern := benignExecFixture()
+	bundle := policy.Bundle{
+		Version: "v1",
+		Rules: []policy.Rule{
+			{
+				ID:         "allow-git",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   policy.DecisionAllow,
+				ExecMatch: &policy.ExecMatch{
+					ArgvPatterns: [][]string{allowPattern},
+				},
+				Obligations: map[string]any{
+					"sandbox_mode": "local",
+				},
+			},
+		},
+		Hash: "bundlehash-exec",
+	}
+	engine := policy.NewEngine(bundle)
+	recorder := &recordSink{}
+	now := time.Date(2026, 2, 26, 12, 0, 0, 0, time.UTC)
+	svc := New(engine, executor.NewFSReader(dir, 64*1024, 200), executor.NewFSWriter(dir, 64*1024), executor.NewPatchApplier(dir, 64*1024), executor.NewExecRunner(dir, 64*1024), executor.NewHTTPRunner(64*1024), recorder, redact.DefaultRedactor(), nil, nil, "local", func() time.Time {
+		now = now.Add(10 * time.Millisecond)
+		return now
+	})
+
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "act-audit-exec",
+		ActionType:    "process.exec",
+		Resource:      "file://workspace/",
+		Params:        mustExecParams(t, argv),
+		TraceID:       "trace-audit-exec",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{Principal: "system", Agent: "nomos", Environment: "dev"})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	if _, err := svc.Process(act); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	for _, e := range recorder.events {
+		if e.EventType != "action.completed" {
+			continue
+		}
+		if e.ExecutorMetadata["exec_enforcement_mode"] != "exec_constraints" {
+			t.Fatalf("expected exec_enforcement_mode exec_constraints, got %+v", e.ExecutorMetadata)
+		}
+		if e.ExecutorMetadata["exec_compatibility_mode"] != policy.ExecCompatibilityLegacyAllowlistFallback {
+			t.Fatalf("expected exec compatibility mode metadata, got %+v", e.ExecutorMetadata)
+		}
+		return
+	}
+	t.Fatal("expected action.completed event")
 }

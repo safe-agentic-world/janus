@@ -19,6 +19,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/sandbox"
 	"github.com/safe-agentic-world/nomos/internal/service"
 )
 
@@ -131,6 +132,15 @@ func runCase(t *testing.T, mode string, tc corpusCase, expected caseExpectation)
 		sandboxProfile,
 		func() time.Time { return time.Unix(0, 0) },
 	)
+	if mode == "controlled" {
+		svc.SetSandboxEvidence(sandbox.Evidence{
+			ContainerBackendReady: true,
+			Rootless:              true,
+			ReadOnlyFS:            true,
+			NoNewPrivileges:       true,
+			NetworkDefaultDeny:    true,
+		}, []string{dir})
+	}
 
 	var resp action.Response
 	var err error
@@ -204,6 +214,15 @@ func runCase(t *testing.T, mode string, tc corpusCase, expected caseExpectation)
 			},
 		})
 		svc = service.New(engine, reader, writer, patcher, execRunner, httpRunner, recorder, redactor, nil, nil, sandboxProfile, func() time.Time { return time.Unix(0, 0) })
+		if mode == "controlled" {
+			svc.SetSandboxEvidence(sandbox.Evidence{
+				ContainerBackendReady: true,
+				Rootless:              true,
+				ReadOnlyFS:            true,
+				NoNewPrivileges:       true,
+				NetworkDefaultDeny:    true,
+			}, []string{dir})
+		}
 		resp, err = svc.Process(mustAction(t, "act-"+tc.ID, "process.exec", "file://workspace/", mustJSON(map[string]any{
 			"argv":               argv,
 			"cwd":                "",

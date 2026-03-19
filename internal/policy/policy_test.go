@@ -1,7 +1,14 @@
 package policy
 
 import (
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,6 +260,97 @@ func TestPolicyExecMatchRejectsInvalidExecParams(t *testing.T) {
 	}
 }
 
+func TestPolicyExecMatchDerivesExecConstraintsForAllowDecision(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "allow-git",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionAllow,
+				ExecMatch: &ExecMatch{
+					ArgvPatterns: [][]string{{"git", "**"}, {"git"}},
+				},
+				Obligations: map[string]any{
+					"sandbox_mode": "local",
+				},
+			},
+		},
+	}
+	decision := NewEngine(bundle).Evaluate(normalize.NormalizedAction{
+		ActionType:  "process.exec",
+		Resource:    "file://workspace/",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+		Params:      []byte(`{"argv":["git","status"],"cwd":"","env_allowlist_keys":[]}`),
+	})
+	if decision.Decision != DecisionAllow {
+		t.Fatalf("expected allow, got %+v", decision)
+	}
+	raw, ok := decision.Obligations["exec_constraints"]
+	if !ok {
+		t.Fatalf("expected derived exec_constraints, got %+v", decision.Obligations)
+	}
+	constraints, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("expected exec_constraints object, got %#v", raw)
+	}
+	patterns, ok := constraints["argv_patterns"].([]any)
+	if !ok || len(patterns) != 2 {
+		t.Fatalf("expected derived argv patterns, got %#v", constraints["argv_patterns"])
+	}
+	if _, exists := decision.Obligations["exec_allowlist"]; exists {
+		t.Fatalf("did not expect legacy exec_allowlist in obligations, got %+v", decision.Obligations)
+	}
+}
+
+func TestPolicyExecModelConflictFailsClosed(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "allow-git-match",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionAllow,
+				ExecMatch: &ExecMatch{
+					ArgvPatterns: [][]string{{"git", "**"}},
+				},
+			},
+			{
+				ID:         "allow-git-legacy",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionAllow,
+				Obligations: map[string]any{
+					"exec_allowlist": []any{[]any{"git"}},
+				},
+			},
+		},
+	}
+	explanation := NewEngine(bundle).Explain(normalize.NormalizedAction{
+		ActionType:  "process.exec",
+		Resource:    "file://workspace/",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+		Params:      []byte(`{"argv":["git","status"],"cwd":"","env_allowlist_keys":[]}`),
+	})
+	if explanation.Decision.Decision != DecisionDeny {
+		t.Fatalf("expected deny on mixed exec model conflict, got %+v", explanation.Decision)
+	}
+	if explanation.Decision.ReasonCode != "deny_by_exec_model_conflict" {
+		t.Fatalf("expected deny_by_exec_model_conflict, got %+v", explanation.Decision)
+	}
+	if !explanation.ExecAuthorization.Conflict {
+		t.Fatalf("expected exec authorization conflict, got %+v", explanation.ExecAuthorization)
+	}
+}
+
 func TestLoadBundleYAMLJSONParity(t *testing.T) {
 	jsonBundle, err := LoadBundle(filepath.Clean(filepath.Join("..", "..", "examples", "policies", "safe.json")))
 	if err != nil {
@@ -350,12 +448,45 @@ func TestLoadBundleRejectsInvalidExecMatch(t *testing.T) {
 	}
 }
 
+func TestLoadBundleRejectsMixedExecAuthorizationInSameRule(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bad-mixed.json")
+	data := `{"version":"v1","rules":[{"id":"mixed-exec","action_type":"process.exec","resource":"file://workspace/","decision":"ALLOW","exec_match":{"argv_patterns":[["git","**"]]},"obligations":{"exec_allowlist":[["git"]]}}]}`
+	if err := os.WriteFile(bundlePath, []byte(data), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	if _, err := LoadBundle(bundlePath); err == nil || !strings.Contains(err.Error(), "must not declare both exec_match and exec_allowlist") {
+		t.Fatalf("expected mixed exec authorization rejection, got %v", err)
+	}
+}
+
+func TestValidateExecCompatibilityStrictRejectsLegacyAllowlist(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "legacy-exec",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionAllow,
+				Obligations: map[string]any{
+					"exec_allowlist": []any{[]any{"git"}},
+				},
+			},
+		},
+	}
+	if err := ValidateExecCompatibility(bundle, ExecCompatibilityStrict); err == nil || !strings.Contains(err.Error(), "policy.exec_compatibility_mode=strict") {
+		t.Fatalf("expected strict compatibility rejection, got %v", err)
+	}
+}
+
 func TestLoadBundleHashGoldenVectorForSafe(t *testing.T) {
 	bundle, err := LoadBundle(filepath.Clean(filepath.Join("..", "..", "examples", "policies", "safe.yaml")))
 	if err != nil {
 		t.Fatalf("load yaml bundle: %v", err)
 	}
-	const expected = "83ae9188b182370f33876f1f7143b29f0a16cef05df4a48b697c78869feec104"
+	const expected = "7ec7bd2481d8cb07eed2c21c21563a62e6fe6277ae8333d1cbf9c01bd8b0bafb"
 	if bundle.Hash != expected {
 		t.Fatalf("expected hash %s, got %s", expected, bundle.Hash)
 	}
@@ -387,6 +518,98 @@ func TestLoadBundlesDeterministicMergedIdentity(t *testing.T) {
 	}
 	if len(first.SourceBundles) != 2 {
 		t.Fatalf("expected 2 source bundles, got %+v", first.SourceBundles)
+	}
+}
+
+func TestLoadBundlesVerifiesEachBundleBeforeMerge(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.json")
+	repoPath := filepath.Join(dir, "repo.json")
+	baseData := []byte(`{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW"}]}`)
+	repoData := []byte(`{"version":"v1","rules":[{"id":"require-approval-net","action_type":"net.http_request","resource":"url://example.com/**","decision":"REQUIRE_APPROVAL"}]}`)
+	if err := os.WriteFile(basePath, baseData, 0o600); err != nil {
+		t.Fatalf("write base bundle: %v", err)
+	}
+	if err := os.WriteFile(repoPath, repoData, 0o600); err != nil {
+		t.Fatalf("write repo bundle: %v", err)
+	}
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signBundle := func(bundleData []byte) string {
+		digest := sha256.Sum256(bundleData)
+		sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, digest[:])
+		if err != nil {
+			t.Fatalf("sign bundle: %v", err)
+		}
+		return base64.StdEncoding.EncodeToString(sig)
+	}
+	baseSigPath := filepath.Join(dir, "base.sig")
+	repoSigPath := filepath.Join(dir, "repo.sig")
+	if err := os.WriteFile(baseSigPath, []byte(signBundle(baseData)), 0o600); err != nil {
+		t.Fatalf("write base sig: %v", err)
+	}
+	if err := os.WriteFile(repoSigPath, []byte("invalid-signature"), 0o600); err != nil {
+		t.Fatalf("write repo sig: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pubPath := filepath.Join(dir, "bundle_pub.pem")
+	if err := os.WriteFile(pubPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}), 0o600); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+
+	_, err = LoadBundlesWithOptions([]string{basePath, repoPath}, MultiLoadOptions{
+		VerifySignatures: true,
+		SignaturePaths:   []string{baseSigPath, repoSigPath},
+		PublicKeyPath:    pubPath,
+	})
+	if err == nil || !strings.Contains(err.Error(), repoPath) || !strings.Contains(strings.ToLower(err.Error()), "signature") {
+		t.Fatalf("expected per-bundle signature verification failure before merge, got %v", err)
+	}
+}
+
+func TestPolicyExplainIncludesMatchedRuleBundleProvenanceForMergedBundles(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.json")
+	envPath := filepath.Join(dir, "env.json")
+	if err := os.WriteFile(basePath, []byte(`{"version":"v1","rules":[{"id":"allow-workspace","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write base bundle: %v", err)
+	}
+	if err := os.WriteFile(envPath, []byte(`{"version":"v1","rules":[{"id":"deny-env","action_type":"fs.read","resource":"file://workspace/.env","decision":"DENY"}]}`), 0o600); err != nil {
+		t.Fatalf("write env bundle: %v", err)
+	}
+	bundle, err := LoadBundlesWithOptions([]string{basePath, envPath}, MultiLoadOptions{
+		BundleRoles: []string{"baseline", "env"},
+	})
+	if err != nil {
+		t.Fatalf("load merged bundles: %v", err)
+	}
+	explanation := NewEngine(bundle).Explain(normalize.NormalizedAction{
+		ActionType:  "fs.read",
+		Resource:    "file://workspace/.env",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if explanation.Decision.Decision != DecisionDeny {
+		t.Fatalf("expected deny, got %+v", explanation.Decision)
+	}
+	if len(explanation.MatchedRuleProvenance) != 2 {
+		t.Fatalf("expected matched-rule provenance for both matched rules, got %+v", explanation.MatchedRuleProvenance)
+	}
+	if explanation.MatchedRuleProvenance[0].BundleSource == "" || explanation.MatchedRuleProvenance[1].BundleSource == "" {
+		t.Fatalf("expected bundle provenance labels, got %+v", explanation.MatchedRuleProvenance)
+	}
+	if len(explanation.Decision.PolicyBundleInputs) != 2 {
+		t.Fatalf("expected ordered bundle inputs, got %+v", explanation.Decision.PolicyBundleInputs)
+	}
+	if explanation.Decision.PolicyBundleInputs[0].Role != "baseline" || explanation.Decision.PolicyBundleInputs[1].Role != "env" {
+		t.Fatalf("expected bundle roles preserved, got %+v", explanation.Decision.PolicyBundleInputs)
 	}
 }
 

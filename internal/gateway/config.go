@@ -11,6 +11,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/safe-agentic-world/nomos/internal/assurance"
+	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/sandbox"
 )
 
 type Config struct {
@@ -47,20 +51,33 @@ type TLSConfig struct {
 }
 
 type RuntimeConfig struct {
-	StatelessMode   bool   `json:"stateless_mode"`
-	StrongGuarantee bool   `json:"strong_guarantee"`
-	DeploymentMode  string `json:"deployment_mode"`
+	StatelessMode   bool                  `json:"stateless_mode"`
+	StrongGuarantee bool                  `json:"strong_guarantee"`
+	DeploymentMode  string                `json:"deployment_mode"`
+	Evidence        RuntimeEvidenceConfig `json:"evidence"`
+}
+
+type RuntimeEvidenceConfig struct {
+	ContainerBackendReady    bool `json:"container_backend_ready"`
+	Rootless                 bool `json:"rootless_or_non_privileged"`
+	ReadOnlyFS               bool `json:"read_only_fs"`
+	NoNewPrivileges          bool `json:"no_new_privileges"`
+	NetworkDefaultDeny       bool `json:"network_default_deny"`
+	WorkloadIdentityVerified bool `json:"workload_identity_verified"`
+	DurableAuditVerified     bool `json:"durable_audit_verified"`
 }
 
 type PolicyConfig struct {
-	BundlePath         string    `json:"policy_bundle_path"`
-	BundlePaths        []string  `json:"policy_bundle_paths"`
-	VerifySignatures   bool      `json:"verify_signatures"`
-	SignaturePath      string    `json:"signature_path"`
-	SignaturePaths     []string  `json:"signature_paths"`
-	PublicKeyPath      string    `json:"public_key_path"`
-	ExplainSuggestions *bool     `json:"explain_suggestions,omitempty"`
-	OPA                OPAConfig `json:"opa"`
+	BundlePath            string    `json:"policy_bundle_path"`
+	BundlePaths           []string  `json:"policy_bundle_paths"`
+	BundleRoles           []string  `json:"policy_bundle_roles"`
+	VerifySignatures      bool      `json:"verify_signatures"`
+	SignaturePath         string    `json:"signature_path"`
+	SignaturePaths        []string  `json:"signature_paths"`
+	PublicKeyPath         string    `json:"public_key_path"`
+	ExecCompatibilityMode string    `json:"exec_compatibility_mode"`
+	ExplainSuggestions    *bool     `json:"explain_suggestions,omitempty"`
+	OPA                   OPAConfig `json:"opa"`
 }
 
 type OPAConfig struct {
@@ -259,6 +276,9 @@ func (c *Config) SetDefaults() error {
 		enabled := true
 		c.Policy.ExplainSuggestions = &enabled
 	}
+	if strings.TrimSpace(c.Policy.ExecCompatibilityMode) == "" {
+		c.Policy.ExecCompatibilityMode = policy.ExecCompatibilityLegacyAllowlistFallback
+	}
 	if c.Policy.OPA.Enabled && c.Policy.OPA.TimeoutMS == 0 {
 		c.Policy.OPA.TimeoutMS = 2000
 	}
@@ -390,6 +410,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Policy.BundlePath) != "" && len(c.Policy.BundlePaths) > 0 {
 		return errors.New("policy.policy_bundle_path and policy.policy_bundle_paths are mutually exclusive")
 	}
+	if policy.NormalizeExecCompatibilityMode(c.Policy.ExecCompatibilityMode) == "" {
+		return errors.New("policy.exec_compatibility_mode must be one of legacy_allowlist_fallback or strict")
+	}
 	effectiveBundlePaths := c.Policy.BundlePaths
 	if strings.TrimSpace(c.Policy.BundlePath) != "" {
 		effectiveBundlePaths = []string{c.Policy.BundlePath}
@@ -400,6 +423,31 @@ func (c Config) Validate() error {
 	for _, path := range effectiveBundlePaths {
 		if _, err := os.Stat(path); err != nil {
 			return fmt.Errorf("policy bundle path invalid: %w", err)
+		}
+	}
+	if len(c.Policy.BundleRoles) > 0 {
+		if len(c.Policy.BundleRoles) != len(effectiveBundlePaths) {
+			return errors.New("policy.policy_bundle_roles must have the same length as the effective policy bundle path list")
+		}
+		hasLocalOverride := false
+		for _, role := range c.Policy.BundleRoles {
+			switch normalizeBundleRole(role) {
+			case "baseline", "org", "repo", "env":
+			case "local_override":
+				hasLocalOverride = true
+			default:
+				return errors.New("policy.policy_bundle_roles entries must be baseline, org, repo, env, or local_override")
+			}
+		}
+		if hasLocalOverride {
+			env := strings.ToLower(strings.TrimSpace(c.Identity.Environment))
+			mode := strings.ToLower(strings.TrimSpace(c.Runtime.DeploymentMode))
+			if env != "dev" && env != "local" {
+				return errors.New("policy local_override bundles are only allowed for identity.environment dev or local")
+			}
+			if mode != "unmanaged" {
+				return errors.New("policy local_override bundles are only allowed for runtime.deployment_mode unmanaged")
+			}
 		}
 	}
 	if c.Policy.VerifySignatures {
@@ -505,6 +553,41 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 	if v := getenv("NOMOS_RUNTIME_DEPLOYMENT_MODE"); v != "" {
 		cfg.Runtime.DeploymentMode = v
 	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_CONTAINER_BACKEND_READY"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.ContainerBackendReady = parsed
+		}
+	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_ROOTLESS"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.Rootless = parsed
+		}
+	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_READ_ONLY_FS"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.ReadOnlyFS = parsed
+		}
+	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_NO_NEW_PRIVILEGES"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.NoNewPrivileges = parsed
+		}
+	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_NETWORK_DEFAULT_DENY"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.NetworkDefaultDeny = parsed
+		}
+	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_WORKLOAD_IDENTITY_VERIFIED"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.WorkloadIdentityVerified = parsed
+		}
+	}
+	if v := getenv("NOMOS_RUNTIME_EVIDENCE_DURABLE_AUDIT_VERIFIED"); v != "" {
+		if parsed, ok := parseBool(v); ok {
+			cfg.Runtime.Evidence.DurableAuditVerified = parsed
+		}
+	}
 	if v := getenv("NOMOS_POLICY_BUNDLE_PATH"); v != "" {
 		cfg.Policy.BundlePath = v
 		cfg.Policy.BundlePaths = nil
@@ -512,6 +595,9 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 	if v := getenv("NOMOS_POLICY_BUNDLE_PATHS"); v != "" {
 		cfg.Policy.BundlePaths = splitList(v)
 		cfg.Policy.BundlePath = ""
+	}
+	if v := getenv("NOMOS_POLICY_BUNDLE_ROLES"); v != "" {
+		cfg.Policy.BundleRoles = splitList(v)
 	}
 	if v := getenv("NOMOS_POLICY_VERIFY_SIGNATURES"); v != "" {
 		if parsed, ok := parseBool(v); ok {
@@ -527,6 +613,9 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 	}
 	if v := getenv("NOMOS_POLICY_PUBLIC_KEY_PATH"); v != "" {
 		cfg.Policy.PublicKeyPath = v
+	}
+	if v := getenv("NOMOS_POLICY_EXEC_COMPATIBILITY_MODE"); v != "" {
+		cfg.Policy.ExecCompatibilityMode = v
 	}
 	if v := getenv("NOMOS_POLICY_EXPLAIN_SUGGESTIONS"); v != "" {
 		if parsed, ok := parseBool(v); ok {
@@ -774,6 +863,19 @@ func (p PolicyConfig) EffectiveBundlePaths() []string {
 	return out
 }
 
+func (p PolicyConfig) EffectiveBundleRoles() []string {
+	if len(p.BundleRoles) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p.BundleRoles))
+	for _, value := range p.BundleRoles {
+		if trimmed := normalizeBundleRole(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 func (p PolicyConfig) EffectiveSignaturePaths() []string {
 	if len(p.BundlePaths) > 1 {
 		out := make([]string, 0, len(p.SignaturePaths))
@@ -796,4 +898,52 @@ func normalizeConfigPathSeparators(value string) string {
 	}
 	normalized := strings.ReplaceAll(value, "\\", "/")
 	return filepath.FromSlash(normalized)
+}
+
+func normalizeBundleRole(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "baseline":
+		return "baseline"
+	case "org":
+		return "org"
+	case "repo":
+		return "repo"
+	case "env":
+		return "env"
+	case "local_override":
+		return "local_override"
+	default:
+		return ""
+	}
+}
+
+func (r RuntimeEvidenceConfig) SandboxEvidence() sandbox.Evidence {
+	return sandbox.Evidence{
+		ContainerBackendReady: r.ContainerBackendReady,
+		Rootless:              r.Rootless,
+		ReadOnlyFS:            r.ReadOnlyFS,
+		NoNewPrivileges:       r.NoNewPrivileges,
+		NetworkDefaultDeny:    r.NetworkDefaultDeny,
+	}
+}
+
+func (c Config) AssuranceEvidence() assurance.Evidence {
+	workloadIdentityConfigured := c.Identity.OIDC.Enabled || c.Identity.SPIFFE.Enabled
+	noSharedAPIKeys := len(c.Identity.APIKeys) == 0
+	durableAuditConfigured := hasDurableAuditSinkConfig(c.Audit.Sink)
+	return assurance.Evidence{
+		RuntimeIsolationVerified: c.Executor.SandboxEnabled && strings.EqualFold(strings.TrimSpace(c.Executor.SandboxProfile), "container") && c.Runtime.Evidence.SandboxEvidence().ContainerReady(),
+		WorkloadIdentityVerified: c.Runtime.Evidence.WorkloadIdentityVerified && workloadIdentityConfigured && noSharedAPIKeys,
+		DurableAuditVerified:     c.Runtime.Evidence.DurableAuditVerified && durableAuditConfigured,
+	}
+}
+
+func hasDurableAuditSinkConfig(sink string) bool {
+	for _, part := range strings.Split(sink, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "sqlite:") || strings.HasPrefix(part, "sqlite://") || strings.HasPrefix(part, "webhook:") {
+			return true
+		}
+	}
+	return false
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/safe-agentic-world/nomos/internal/assurance"
 	"github.com/safe-agentic-world/nomos/internal/gateway"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/opabridge"
@@ -28,11 +29,13 @@ type Check struct {
 }
 
 type Report struct {
-	OverallStatus       string   `json:"overall_status"`
-	Checks              []Check  `json:"checks"`
-	PolicyBundleHash    string   `json:"policy_bundle_hash,omitempty"`
-	PolicyBundleSources []string `json:"policy_bundle_sources,omitempty"`
-	EngineVersion       string   `json:"engine_version"`
+	OverallStatus       string                `json:"overall_status"`
+	Checks              []Check               `json:"checks"`
+	PolicyBundleHash    string                `json:"policy_bundle_hash,omitempty"`
+	PolicyBundleSources []string              `json:"policy_bundle_sources,omitempty"`
+	PolicyBundleInputs  []policy.BundleSource `json:"policy_bundle_inputs,omitempty"`
+	AssuranceLevel      string                `json:"assurance_level,omitempty"`
+	EngineVersion       string                `json:"engine_version"`
 }
 
 type Options struct {
@@ -125,15 +128,31 @@ func Run(options Options) (Report, error) {
 			VerifySignatures: verify,
 			SignaturePaths:   signaturePaths,
 			PublicKeyPath:    publicKeyPath,
+			BundleRoles:      cfg.Policy.EffectiveBundleRoles(),
 		})
 		if err == nil {
 			bundle = loaded
 			bundleLoaded = true
 			report.PolicyBundleHash = loaded.Hash
 			report.PolicyBundleSources = policy.BundleSourceLabels(loaded)
+			report.PolicyBundleInputs = append([]policy.BundleSource{}, loaded.SourceBundles...)
 		}
 	}
-	mark("policy.bundle_parses", bundleLoaded, "policy bundle parsed", "fix bundle JSON/schema so policy.LoadBundle succeeds")
+	parseHint := "fix bundle JSON/schema so policy.LoadBundle succeeds"
+	if cfgErr == nil && !bundleLoaded && len(bundlePaths) > 0 {
+		if _, err := policy.LoadBundlesWithOptions(bundlePaths, policy.MultiLoadOptions{
+			VerifySignatures: cfg.Policy.VerifySignatures,
+			SignaturePaths:   cfg.Policy.EffectiveSignaturePaths(),
+			PublicKeyPath:    cfg.Policy.PublicKeyPath,
+			BundleRoles:      cfg.Policy.EffectiveBundleRoles(),
+		}); err != nil {
+			parseHint = err.Error()
+			if len(bundlePaths) == 1 && !strings.Contains(parseHint, bundlePaths[0]) {
+				parseHint = fmt.Sprintf("load bundle %s: %s", bundlePaths[0], parseHint)
+			}
+		}
+	}
+	mark("policy.bundle_parses", bundleLoaded, "policy bundle parsed", parseHint)
 	mark("policy.bundle_hash", bundleLoaded && report.PolicyBundleHash != "", "policy bundle hash computed", "ensure bundle bytes are readable and valid")
 
 	if cfgErr == nil && cfg.Policy.OPA.Enabled {
@@ -234,8 +253,8 @@ func Run(options Options) (Report, error) {
 		mTLS := cfg.Gateway.TLS.Enabled && cfg.Gateway.TLS.RequireMTLS
 		mark("strong.gateway_mtls", mTLS, "gateway mTLS enforced", "enable gateway.tls.enabled=true and gateway.tls.require_mtls=true for strong-guarantee deployments")
 
-		workloadIdentity := cfg.Identity.OIDC.Enabled
-		mark("strong.workload_identity", workloadIdentity, "workload identity configured", "enable identity.oidc for strong-guarantee deployments so identity is asserted by the environment")
+		workloadIdentity := cfg.Identity.OIDC.Enabled || cfg.Identity.SPIFFE.Enabled
+		mark("strong.workload_identity", workloadIdentity, "workload identity configured", "enable identity.oidc or identity.spiffe for strong-guarantee deployments so identity is asserted by the environment")
 		mark("strong.no_shared_api_keys", len(cfg.Identity.APIKeys) == 0, "shared API keys disabled", "remove identity.api_keys for strong-guarantee deployments and rely on workload identity or stronger non-shared auth")
 
 		durableAudit := hasDurableAuditSink(cfg.Audit.Sink)
@@ -243,6 +262,24 @@ func Run(options Options) (Report, error) {
 
 		strictEnv := isStrongGuaranteeEnvironment(cfg.Identity.Environment)
 		mark("strong.environment_bound", strictEnv, "deployment-bound environment is set", "set identity.environment to ci, staging, or prod for strong-guarantee deployments")
+
+		containerEvidence := cfg.Runtime.Evidence.SandboxEvidence()
+		mark("evidence.runtime.container_backend_ready", cfg.Runtime.Evidence.ContainerBackendReady, "runtime evidence confirms container backend availability", "record runtime evidence that a real hardened container backend is available")
+		mark("evidence.runtime.rootless_or_non_privileged", cfg.Runtime.Evidence.Rootless, "runtime evidence confirms non-privileged execution", "record runtime evidence for rootless or equivalent non-privileged execution")
+		mark("evidence.runtime.read_only_fs", cfg.Runtime.Evidence.ReadOnlyFS, "runtime evidence confirms read-only filesystem defaults", "record runtime evidence for read-only filesystem enforcement outside explicit writable mounts")
+		mark("evidence.runtime.no_new_privileges", cfg.Runtime.Evidence.NoNewPrivileges, "runtime evidence confirms no-new-privileges", "record runtime evidence for no-new-privileges enforcement")
+		mark("evidence.runtime.network_default_deny", cfg.Runtime.Evidence.NetworkDefaultDeny, "runtime evidence confirms default-deny egress", "record runtime evidence for default-deny egress in the hardened sandbox path")
+		mark("evidence.identity.workload_identity_verified", cfg.Runtime.Evidence.WorkloadIdentityVerified, "runtime evidence confirms workload identity verification", "record workload identity evidence compatible with SPIFFE/SPIRE or workload OIDC")
+		mark("evidence.audit.durable_verified", cfg.Runtime.Evidence.DurableAuditVerified, "runtime evidence confirms durable audit delivery", "record runtime evidence that durable audit delivery is configured and verified")
+
+		report.AssuranceLevel = deriveAssuranceLevel(cfg, containerEvidence.ContainerReady())
+		mark("strong.assurance_evidence_backed", report.AssuranceLevel == "STRONG", "effective assurance remains strong", "runtime evidence is incomplete or unverifiable, so effective assurance degrades below STRONG")
+	} else if cfgErr == nil {
+		report.AssuranceLevel = deriveAssuranceLevel(cfg, cfg.Runtime.Evidence.SandboxEvidence().ContainerReady())
+	}
+
+	if report.AssuranceLevel == "" && cfgErr != nil {
+		report.AssuranceLevel = "NONE"
 	}
 
 	report.Checks = stableChecks(report.Checks)
@@ -322,6 +359,17 @@ func HumanSummary(report Report) string {
 	}
 	b.WriteString("\nResult: ")
 	b.WriteString(report.OverallStatus)
+	if strings.TrimSpace(report.AssuranceLevel) != "" {
+		b.WriteString(" (assurance=")
+		b.WriteString(report.AssuranceLevel)
+		b.WriteString(")")
+	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+func deriveAssuranceLevel(cfg gateway.Config, runtimeIsolationVerified bool) string {
+	evidence := cfg.AssuranceEvidence()
+	evidence.RuntimeIsolationVerified = runtimeIsolationVerified && evidence.RuntimeIsolationVerified
+	return assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, evidence)
 }

@@ -42,6 +42,8 @@ type Event struct {
 	ResultClassification  string         `json:"result_classification,omitempty"`
 	Retryable             bool           `json:"retryable,omitempty"`
 	PolicyBundleHash      string         `json:"policy_bundle_hash,omitempty"`
+	PolicyBundleSources   []string       `json:"policy_bundle_sources,omitempty"`
+	PolicyBundleInputs    []PolicyInput  `json:"policy_bundle_inputs,omitempty"`
 	EngineVersion         string         `json:"engine_version,omitempty"`
 	ParamsRedactedSummary string         `json:"params_redacted_summary,omitempty"`
 	ResultRedactedSummary string         `json:"result_redacted_summary,omitempty"`
@@ -57,6 +59,13 @@ type Event struct {
 	EventHash             string         `json:"event_hash,omitempty"`
 	Decision              string         `json:"decision,omitempty"`
 	Reason                string         `json:"reason,omitempty"`
+}
+
+type PolicyInput struct {
+	Path              string `json:"path"`
+	Hash              string `json:"hash"`
+	Role              string `json:"role,omitempty"`
+	SignatureVerified bool   `json:"signature_verified,omitempty"`
 }
 
 type Recorder interface {

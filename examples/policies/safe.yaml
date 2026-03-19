@@ -74,5 +74,3 @@ rules:
         - ["git"]
     obligations:
       sandbox_mode: local
-      exec_allowlist:
-        - ["git"]

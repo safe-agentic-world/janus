@@ -15,6 +15,7 @@ type MultiLoadOptions struct {
 	VerifySignatures bool
 	SignaturePaths   []string
 	PublicKeyPath    string
+	BundleRoles      []string
 }
 
 func LoadBundles(paths []string) (Bundle, error) {
@@ -32,6 +33,9 @@ func LoadBundlesWithOptions(paths []string, options MultiLoadOptions) (Bundle, e
 	if len(normalized) == 0 {
 		return Bundle{}, errors.New("at least one bundle path is required")
 	}
+	if len(options.BundleRoles) > 0 && len(options.BundleRoles) != len(normalized) {
+		return Bundle{}, errors.New("policy_bundle_roles must match policy_bundle_paths when provided")
+	}
 	if len(normalized) == 1 {
 		loadOptions := LoadOptions{
 			VerifySignature: options.VerifySignatures,
@@ -40,12 +44,25 @@ func LoadBundlesWithOptions(paths []string, options MultiLoadOptions) (Bundle, e
 		if len(options.SignaturePaths) > 0 {
 			loadOptions.SignaturePath = options.SignaturePaths[0]
 		}
-		return LoadBundleWithOptions(normalized[0], loadOptions)
+		bundle, err := LoadBundleWithOptions(normalized[0], loadOptions)
+		if err != nil {
+			return Bundle{}, err
+		}
+		role := ""
+		if len(options.BundleRoles) > 0 {
+			role = strings.TrimSpace(options.BundleRoles[0])
+		}
+		bundle.SourceBundles = []BundleSource{{
+			Path:              normalized[0],
+			Hash:              bundle.Hash,
+			Role:              role,
+			SignatureVerified: options.VerifySignatures,
+		}}
+		return bundle, nil
 	}
 	if options.VerifySignatures && len(options.SignaturePaths) != len(normalized) {
 		return Bundle{}, errors.New("signature_paths must match policy_bundle_paths when policy.verify_signatures is true")
 	}
-
 	merged := Bundle{
 		Version:       "v1",
 		Rules:         make([]Rule, 0),
@@ -65,7 +82,16 @@ func LoadBundlesWithOptions(paths []string, options MultiLoadOptions) (Bundle, e
 		if err != nil {
 			return Bundle{}, fmt.Errorf("load bundle %s: %w", path, err)
 		}
-		merged.SourceBundles = append(merged.SourceBundles, BundleSource{Path: path, Hash: bundle.Hash})
+		role := ""
+		if len(options.BundleRoles) > 0 {
+			role = strings.TrimSpace(options.BundleRoles[idx])
+		}
+		merged.SourceBundles = append(merged.SourceBundles, BundleSource{
+			Path:              path,
+			Hash:              bundle.Hash,
+			Role:              role,
+			SignatureVerified: options.VerifySignatures,
+		})
 		inputHashes = append(inputHashes, bundle.Hash)
 		for _, rule := range bundle.Rules {
 			if existing, ok := seenRuleIDs[rule.ID]; ok {

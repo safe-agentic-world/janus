@@ -152,6 +152,73 @@ func TestGatewayDerivesAndPropagatesAssuranceLevel(t *testing.T) {
 		t.Fatalf("write readme: %v", err)
 	}
 	cfg := Config{
+		Gateway: GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
+		Runtime: RuntimeConfig{StrongGuarantee: true, DeploymentMode: "k8s", Evidence: RuntimeEvidenceConfig{
+			ContainerBackendReady:    true,
+			Rootless:                 true,
+			ReadOnlyFS:               true,
+			NoNewPrivileges:          true,
+			NetworkDefaultDeny:       true,
+			WorkloadIdentityVerified: true,
+			DurableAuditVerified:     true,
+		}},
+		Audit:    AuditConfig{Sink: "sqlite:" + filepath.Join(dir, "audit.db")},
+		Executor: ExecutorConfig{WorkspaceRoot: dir, SandboxEnabled: true, SandboxProfile: "container"},
+		Identity: IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "prod",
+			AgentSecrets: map[string]string{
+				"nomos": "agent-secret",
+			},
+			SPIFFE: SPIFFEConfig{
+				Enabled:     true,
+				TrustDomain: "example.org",
+			},
+		},
+		Policy: PolicyConfig{BundlePath: bundlePath},
+	}
+	gw, err := NewWithRecorder(cfg, recorder, func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	body := `{"schema_version":"v1","action_id":"act1","action_type":"fs.read","resource":"file://workspace/README.md","params":{},"trace_id":"trace1","context":{"extensions":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/action", strings.NewReader(body))
+	req.Header.Set("X-Nomos-Agent-Id", "nomos")
+	req.Header.Set("X-Nomos-Agent-Signature", hmacHex("agent-secret", []byte(body)))
+	spiffeID, _ := url.Parse("spiffe://example.org/workload/nomos")
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{{URIs: []*url.URL{spiffeID}}},
+	}
+	w := httptest.NewRecorder()
+	gw.handleAction(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if gw.assuranceLevel != "STRONG" {
+		t.Fatalf("expected gateway assurance STRONG, got %s", gw.assuranceLevel)
+	}
+	if len(recorder.events) == 0 {
+		t.Fatal("expected audit events")
+	}
+	for _, event := range recorder.events {
+		if event.AssuranceLevel != "STRONG" {
+			t.Fatalf("expected assurance STRONG on %s, got %q", event.EventType, event.AssuranceLevel)
+		}
+	}
+}
+
+func TestGatewayStrongGuaranteeDegradesWithoutRuntimeEvidence(t *testing.T) {
+	recorder := &recordSink{}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow-readme","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	cfg := Config{
 		Gateway:  GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
 		Runtime:  RuntimeConfig{StrongGuarantee: true, DeploymentMode: "k8s"},
 		Audit:    AuditConfig{Sink: "stdout"},
@@ -173,26 +240,8 @@ func TestGatewayDerivesAndPropagatesAssuranceLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
 	}
-	body := `{"schema_version":"v1","action_id":"act1","action_type":"fs.read","resource":"file://workspace/README.md","params":{},"trace_id":"trace1","context":{"extensions":{}}}`
-	req := httptest.NewRequest(http.MethodPost, "/action", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer key1")
-	req.Header.Set("X-Nomos-Agent-Id", "nomos")
-	req.Header.Set("X-Nomos-Agent-Signature", hmacHex("agent-secret", []byte(body)))
-	w := httptest.NewRecorder()
-	gw.handleAction(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	if gw.assuranceLevel != "STRONG" {
-		t.Fatalf("expected gateway assurance STRONG, got %s", gw.assuranceLevel)
-	}
-	if len(recorder.events) == 0 {
-		t.Fatal("expected audit events")
-	}
-	for _, event := range recorder.events {
-		if event.AssuranceLevel != "STRONG" {
-			t.Fatalf("expected assurance STRONG on %s, got %q", event.EventType, event.AssuranceLevel)
-		}
+	if gw.assuranceLevel != "GUARDED" {
+		t.Fatalf("expected degraded gateway assurance GUARDED, got %s", gw.assuranceLevel)
 	}
 }
 
