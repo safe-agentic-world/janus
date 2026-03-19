@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -269,8 +268,8 @@ func TestServiceExecUsesPolicyAsAuthorizationSourceWithoutLegacyAllowlist(t *tes
 	if resp.ExitCode != 0 {
 		t.Fatalf("expected exit code 0, got %+v", resp)
 	}
-	if !strings.Contains(resp.Stdout, "hi") {
-		t.Fatalf("expected stdout to contain hi, got %+v", resp)
+	if !strings.Contains(strings.ToLower(resp.Stdout), "go version") {
+		t.Fatalf("expected stdout to contain go version, got %+v", resp)
 	}
 }
 
@@ -391,10 +390,7 @@ func TestServiceExecStrictModeRejectsLegacyAllowlistFallback(t *testing.T) {
 }
 
 func benignExecFixture() ([]string, []any, []string) {
-	if runtime.GOOS == "windows" {
-		return []string{"cmd", "/c", "echo", "hi"}, []any{"cmd", "/c", "echo"}, []string{"cmd", "/c", "echo", "*"}
-	}
-	return []string{"sh", "-c", "printf %s hi"}, []any{"sh", "-c", "printf %s hi"}, []string{"sh", "-c", "printf %s *"}
+	return []string{"go", "version"}, []any{"go", "version"}, []string{"go", "version"}
 }
 
 func mustExecParams(t *testing.T, argv []string) []byte {
