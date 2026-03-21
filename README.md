@@ -47,20 +47,6 @@ The fastest way to understand Nomos is to watch the **same agent** attempt the *
 2. A customer-support agent tries to issue a refund and Nomos returns **`REQUIRE_APPROVAL`**.
 3. A normal read action succeeds through Nomos, proving it is **governance**, not blanket obstruction.
 
-
-## Key Features
-
-- `nomos doctor`: deterministic preflight checks before agents connect
-- `nomos policy test`: test a specific action against a policy bundle without executing it
-- `nomos policy explain`: understand why an action was allowed, denied, or approval-gated
-- **MCP** server mode: expose governed tools to MCP-compatible agent clients
-- **HTTP** gateway mode: mediate actions from custom tool loops and app backends
-- approval workflow: route sensitive actions into narrow, fingerprint-bound approvals
-- audit trail: record governed actions with stable policy and identity context
-- redaction: strip sensitive output before it reaches the agent, logs, or audit sinks
-- capability contract: surface what is immediately allowed, approval-gated, or unavailable
-- multi-bundle policy loading: compose layered policy packs with deterministic merge behavior
-
 ## Install
 
 ### Homebrew
@@ -166,6 +152,21 @@ See:
 - [docs/obligations.md](./docs/obligations.md)
 - [docs/approvals.md](./docs/approvals.md)
 - [docs/audit-schema.md](./docs/audit-schema.md)
+
+
+## Key Features
+
+- `nomos doctor`: deterministic preflight checks before agents connect
+- `nomos policy test`: test a specific action against a policy bundle without executing it
+- `nomos policy explain`: understand why an action was allowed, denied, or approval-gated
+- **MCP** server mode: expose governed tools to MCP-compatible agent clients
+- **HTTP** gateway mode: mediate actions from custom tool loops and app backends
+- approval workflow: route sensitive actions into narrow, fingerprint-bound approvals
+- audit trail: record governed actions with stable policy and identity context
+- redaction: strip sensitive output before it reaches the agent, logs, or audit sinks
+- capability contract: surface what is immediately allowed, approval-gated, or unavailable
+- multi-bundle policy loading: compose layered policy packs with deterministic merge behavior
+
 
 ## Few More Use Cases
 
