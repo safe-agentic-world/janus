@@ -15,32 +15,38 @@ It sits between agents and real actions such as reading files, changing code, ru
 - `DENY`
 - `REQUIRE_APPROVAL`
 
-If your agent can still call arbitrary APIs, issue unwanted refunds, book free tickets, leak customer data, trigger `terraform destroy`, or run `git push origin main`, your safety boundary is at risk. Prompt injection, tool misuse, and over-broad credentials turn into real-world side effects fast. Nomos is built to enforce that boundary.
+Nomos is agent-agnostic and model-agnostic. You can put it in front of different agent frameworks, different model providers, and different tool runtimes, then shape its behavior with your own policies and configs.
 
-## Why It Exists
+
+## Why Nomos Exists
 
 Agents can be genuinely useful, but they are still one bad tool call away from:
 
-- grabbing secrets you did not mean to expose
-- changing or deleting files you did not ask them to touch
-- pushing code, shipping changes, or running destructive commands too early
 - refunding money, booking something for free, or taking the wrong business action
+- pushing code, shipping changes, or running destructive commands like `terraform destroy`, or run `git push origin main`, or `kubectl delete`
+- changing or deleting files you did not ask them to touch
 - sending private data to the wrong place
 - using powerful credentials in ways you never intended
 
-Nomos does not try to control what the model thinks. It controls what the agent is actually allowed to do.
+If your agent can still call arbitrary APIs, leak customer data, your safety boundary is at risk. Prompt injection, tool misuse, and over-broad credentials are real-world side effects with current day AI agents. Nomos is exactly built to enforce that boundary based on Zero trust security principles.
+
+Nomos does not restrict or control what the model thinks or its reasoining capabilities. It controls what the agent is actually allowed to do.
 
 With Nomos:
 
 - risky actions hit one control point before they happen
 - policy returns `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`
+- the same normalized action gets the same decision under the same identity, environment, and policy bundle
 - sensitive actions can be routed to manual approval
-- actions are normalized before policy evaluation, so decisions are deterministic
 - approvals are bound to action fingerprints, so they cannot be replayed onto different inputs
+- agents do not need to hold long-lived enterprise credentials
+- credentials can be brokered with least privilege and short-lived bindings
 - output can be redacted before it leaves the boundary
-- audit evidence is produced for governed actions
+- governed actions produce audit evidence and replayable traces
 - the same action can be tested, explained, and replayed against policy in a repeatable way
+- budgets, limits, and circuit breakers can bound runaway behavior
 - the same boundary works across MCP and HTTP integrations
+- behavior stays flexible because you shape it with your own policies and configs
 
 ## Demo First
 
@@ -58,70 +64,18 @@ Placeholder: add a screenshot here of a blocked action with the Nomos decision v
 
 Placeholder: add a screenshot here of an approval-gated action with approval metadata visible.
 
-## Quickstart
+## Key Features
 
-This path uses only checked-in files and gives you one `ALLOW` and one `DENY` in a few minutes.
-
-From the repo root:
-
-```bash
-nomos doctor -c ./examples/quickstart/config.quickstart.json --format json
-nomos policy test --action ./examples/quickstart/actions/allow-readme.json --bundle ./examples/policies/safe.yaml
-nomos policy test --action ./examples/quickstart/actions/deny-env.json --bundle ./examples/policies/safe.yaml
-```
-
-Expected result:
-
-- `doctor` reports `READY`
-- `allow-readme.json` returns `ALLOW`
-- `deny-env.json` returns `DENY`
-
-Example:
-
-```text
-ALLOW  fs.read  file://workspace/README.md
-DENY   fs.read  file://workspace/.env
-```
-
-Then start Nomos in MCP mode:
-
-```bash
-nomos mcp -c ./examples/quickstart/config.quickstart.json
-```
-
-Register it in your MCP client with:
-
-```json
-{
-  "command": "nomos",
-  "args": ["mcp", "-c", "./examples/quickstart/config.quickstart.json"]
-}
-```
-
-Then ask your agent to read:
-
-- `file://workspace/README.md`
-- `file://workspace/.env`
-
-Expected result:
-
-- `README.md` is allowed
-- `.env` is denied
-
-If you want the HTTP path instead:
-
-```bash
-nomos serve -c ./examples/quickstart/config.quickstart.json
-python ./examples/openai-compatible/nomos_http_loop.py
-```
-
-Use `http://127.0.0.1:8080` locally.
-
-See:
-
-- [docs/quickstart.md](./docs/quickstart.md)
-- [docs/local-test-plan.md](./docs/local-test-plan.md)
-- [docs/local-rebuild-and-mcp-commands.md](./docs/local-rebuild-and-mcp-commands.md)
+- `nomos doctor`: deterministic preflight checks before agents connect
+- `nomos policy test`: test a specific action against a policy bundle without executing it
+- `nomos policy explain`: understand why an action was allowed, denied, or approval-gated
+- MCP server mode: expose governed tools to MCP-compatible agent clients
+- HTTP gateway mode: mediate actions from custom tool loops and app backends
+- approval workflow: route sensitive actions into narrow, fingerprint-bound approvals
+- audit trail: record governed actions with stable policy and identity context
+- redaction: strip sensitive output before it reaches the agent, logs, or audit sinks
+- capability contract: surface what is immediately allowed, approval-gated, or unavailable
+- multi-bundle policy loading: compose layered policy packs with deterministic merge behavior
 
 ## Install
 
