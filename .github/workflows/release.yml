@@ -23,6 +23,7 @@ jobs:
     name: Publish Release
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: release
     permissions:
       contents: write
       id-token: write
@@ -96,14 +97,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go install github.com/anchore/syft/cmd/syft@v1.24.0
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          TOOLS_BIN="${RUNNER_TEMP}/release-tools"
+          mkdir -p "${TOOLS_BIN}"
+          GOBIN="${TOOLS_BIN}" go install github.com/anchore/syft/cmd/syft@v1.24.0
+          GOBIN="${TOOLS_BIN}" go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          echo "TOOLS_BIN=${TOOLS_BIN}" >> "${GITHUB_ENV}"
 
       - name: Generate SBOM
         shell: bash
         run: |
           set -euo pipefail
-          "$(go env GOPATH)/bin/syft" packages dir:dist -o spdx-json > dist/nomos-sbom.spdx.json
+          "${TOOLS_BIN}/syft" packages dir:dist -o spdx-json > dist/nomos-sbom.spdx.json
 
       - name: Generate provenance
         shell: bash
@@ -115,7 +119,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          COSIGN_BIN="$(go env GOPATH)/bin/cosign"
+          COSIGN_BIN="${TOOLS_BIN}/cosign"
           for file in \
             dist/nomos-*.tar.gz \
             dist/nomos-*.zip \
