@@ -26,6 +26,12 @@
       "../policies/dev.yaml",
       "../policies/purchase.yaml"
     ],
+    "policy_bundle_roles": [
+      "baseline",
+      "repo",
+      "env",
+      "env"
+    ],
     "verify_signatures": false,
     "signature_paths": [],
     "public_key_path": "",
@@ -38,14 +44,7 @@
   },
   "credentials": {
     "enabled": false,
-    "secrets": [
-      {
-        "id": "github_token",
-        "env_key": "GITHUB_TOKEN",
-        "value": "replace-me",
-        "ttl_seconds": 300
-      }
-    ]
+    "secrets": []
   },
   "audit": {
     "sink": "stdout"
