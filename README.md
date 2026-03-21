@@ -49,26 +49,26 @@ The fastest way to understand Nomos is to watch the **same agent** attempt the *
 
 ## Install
 
-### Homebrew
+### Homebrew (macOS)
 
 ```bash
 brew install safe-agentic-world/nomos/nomos
 ```
 
-### Scoop
+### Scoop (Windows)
 
 ```powershell
 scoop bucket add nomos https://github.com/safe-agentic-world/scoop-nomos
 scoop install nomos
 ```
 
-### Go
+### Build From Source (Go)
 
 ```bash
 go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
 ```
 
-### macOS And Linux Installer
+### Shell Installer (macOS And Linux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
