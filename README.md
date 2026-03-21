@@ -74,6 +74,8 @@ go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
 curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
 ```
 
+## Serve
+
 ### MCP
 
 Use Nomos as an **MCP server** when your agent client already knows how to use MCP tools.
