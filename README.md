@@ -27,7 +27,7 @@ Agents can be useful, but they are still one bad tool call away from:
 - changing or deleting files you did not ask it to touch
 - using powerful credentials in ways you never intended
 
-If your agent can still call arbitrary APIs or leak customer data, your **safety boundary** is at risk. **Prompt injection**, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real. It does not control the model's reasoning. It controls what the agent is actually **allowed to do**.
+If your agent can still call arbitrary APIs or leak customer data, your safety boundary is **at risk**. **Prompt injection**, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real. It does not control the model's reasoning. It controls what the agent is actually allowed to do.
 
 With Nomos:
 
@@ -43,17 +43,10 @@ With Nomos:
 
 The fastest way to understand Nomos is to watch the **same agent** attempt the **same action** with and without Nomos in front of it.
 
-Good launch demos:
-
 1. A coding agent tries to read `.env` or run `git push` and Nomos **denies** it.
 2. A customer-support agent tries to issue a refund and Nomos returns **`REQUIRE_APPROVAL`**.
 3. A normal read action succeeds through Nomos, proving it is **governance**, not blanket obstruction.
 
-Placeholder: add a short hero GIF or video here showing one safe action, one approval-gated action, and one denied action.
-
-Placeholder: add a screenshot here of a blocked action with the Nomos decision visible.
-
-Placeholder: add a screenshot here of an approval-gated action with approval metadata visible.
 
 ## Key Features
 
