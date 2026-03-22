@@ -159,6 +159,9 @@ See:
 
 - [docs/deployment.md](./docs/deployment.md)
 - [docs/http-sdk.md](./docs/http-sdk.md)
+- [docs/http-integration-kit.md](./docs/http-integration-kit.md)
+- [docs/integration-patterns.md](./docs/integration-patterns.md)
+- [docs/custom-actions.md](./docs/custom-actions.md)
 - [docs/quickstart.md](./docs/quickstart.md)
 - [docs/operator-ui.md](./docs/operator-ui.md)
 
@@ -326,6 +329,9 @@ Start here:
 
 - [docs/quickstart.md](./docs/quickstart.md)
 - [docs/http-sdk.md](./docs/http-sdk.md)
+- [docs/http-integration-kit.md](./docs/http-integration-kit.md)
+- [docs/integration-patterns.md](./docs/integration-patterns.md)
+- [docs/custom-actions.md](./docs/custom-actions.md)
 - [docs/integration-kit.md](./docs/integration-kit.md)
 - [docs/local-test-plan.md](./docs/local-test-plan.md)
 - [docs/operator-ui.md](./docs/operator-ui.md)

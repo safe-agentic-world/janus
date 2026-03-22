@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -26,11 +27,34 @@ type ApprovalDecisionRequest struct {
 	Decision   string `json:"decision"`
 }
 
+type ExternalReportRequest struct {
+	SchemaVersion       string `json:"schema_version"`
+	ActionID            string `json:"action_id"`
+	TraceID             string `json:"trace_id"`
+	ActionType          string `json:"action_type"`
+	Resource            string `json:"resource"`
+	Outcome             string `json:"outcome"`
+	Message             string `json:"message,omitempty"`
+	ExternalReference   string `json:"external_reference,omitempty"`
+	ApprovalID          string `json:"approval_id,omitempty"`
+	ApprovalFingerprint string `json:"approval_fingerprint,omitempty"`
+	StatusCode          int    `json:"status_code,omitempty"`
+}
+
+type ExternalReportResponse struct {
+	Recorded bool   `json:"recorded"`
+	TraceID  string `json:"trace_id"`
+	ActionID string `json:"action_id"`
+	Outcome  string `json:"outcome"`
+}
+
 type DecisionResponse struct {
 	Decision            string         `json:"decision"`
 	Reason              string         `json:"reason,omitempty"`
 	TraceID             string         `json:"trace_id,omitempty"`
 	ActionID            string         `json:"action_id,omitempty"`
+	ExecutionMode       string         `json:"execution_mode,omitempty"`
+	ReportPath          string         `json:"report_path,omitempty"`
 	Output              string         `json:"output,omitempty"`
 	Truncated           bool           `json:"truncated,omitempty"`
 	BytesWritten        int            `json:"bytes_written,omitempty"`
@@ -86,6 +110,16 @@ const (
 	ErrorKindDecode     ErrorKind = "decode"
 	ErrorKindGateway    ErrorKind = "gateway"
 )
+
+var actionTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+var builtInActionTypes = map[string]struct{}{
+	"fs.read":          {},
+	"fs.write":         {},
+	"repo.apply_patch": {},
+	"process.exec":     {},
+	"net.http_request": {},
+	"secrets.checkout": {},
+}
 
 type Error struct {
 	Kind       ErrorKind
@@ -151,8 +185,8 @@ func (r ActionRequest) Validate() error {
 	if strings.TrimSpace(r.TraceID) == "" {
 		return errors.New("trace_id is required")
 	}
-	if strings.TrimSpace(r.ActionType) == "" {
-		return errors.New("action_type is required")
+	if err := ValidateActionType(r.ActionType); err != nil {
+		return err
 	}
 	if strings.TrimSpace(r.Resource) == "" {
 		return errors.New("resource is required")
@@ -161,6 +195,42 @@ func (r ActionRequest) Validate() error {
 		return errors.New("params is required")
 	}
 	return nil
+}
+
+func (r *ExternalReportRequest) ensureDefaults() {
+	if r == nil {
+		return
+	}
+	if strings.TrimSpace(r.SchemaVersion) == "" {
+		r.SchemaVersion = "v1"
+	}
+}
+
+func (r ExternalReportRequest) Validate() error {
+	if strings.TrimSpace(r.SchemaVersion) != "v1" {
+		return errors.New("schema_version must be v1")
+	}
+	if strings.TrimSpace(r.ActionID) == "" {
+		return errors.New("action_id is required")
+	}
+	if strings.TrimSpace(r.TraceID) == "" {
+		return errors.New("trace_id is required")
+	}
+	if err := ValidateActionType(r.ActionType); err != nil {
+		return err
+	}
+	if IsBuiltInActionType(r.ActionType) {
+		return errors.New("built-in action types do not support external outcome reporting")
+	}
+	if strings.TrimSpace(r.Resource) == "" {
+		return errors.New("resource is required")
+	}
+	switch strings.TrimSpace(r.Outcome) {
+	case "SUCCEEDED", "FAILED":
+		return nil
+	default:
+		return errors.New("outcome must be SUCCEEDED or FAILED")
+	}
 }
 
 func decodeGatewayError(statusCode int, body []byte) error {
@@ -207,4 +277,20 @@ func cloneMap(input map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func ValidateActionType(actionType string) error {
+	actionType = strings.TrimSpace(actionType)
+	if actionType == "" {
+		return errors.New("action_type is required")
+	}
+	if !actionTypePattern.MatchString(actionType) {
+		return errors.New("action_type has invalid format")
+	}
+	return nil
+}
+
+func IsBuiltInActionType(actionType string) bool {
+	_, ok := builtInActionTypes[strings.TrimSpace(actionType)]
+	return ok
 }

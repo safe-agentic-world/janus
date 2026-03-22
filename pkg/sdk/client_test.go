@@ -233,3 +233,63 @@ func TestDebugLoggingDoesNotLeakSecrets(t *testing.T) {
 		t.Fatalf("expected debug logs to avoid secrets, got %s", joined)
 	}
 }
+
+func TestRunActionDecodesExternalAuthorizationFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(DecisionResponse{
+			Decision:      "ALLOW",
+			ExecutionMode: "external_authorized",
+			ReportPath:    "/actions/report",
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{
+		BaseURL:     server.URL,
+		BearerToken: "key1",
+		AgentID:     "agent-http",
+		AgentSecret: "agent-secret",
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := client.RunAction(context.Background(), NewActionRequest("payments.refund", "payment://shop.example.com/orders/ORD-1001", map[string]any{}))
+	if err != nil {
+		t.Fatalf("run action: %v", err)
+	}
+	if resp.ExecutionMode != "external_authorized" || resp.ReportPath != "/actions/report" {
+		t.Fatalf("unexpected external response %+v", resp)
+	}
+}
+
+func TestReportExternalOutcome(t *testing.T) {
+	var captured ExternalReportRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ExternalReportResponse{Recorded: true, TraceID: captured.TraceID, ActionID: captured.ActionID, Outcome: captured.Outcome})
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{
+		BaseURL:     server.URL,
+		BearerToken: "key1",
+		AgentID:     "agent-http",
+		AgentSecret: "agent-secret",
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := client.ReportExternalOutcome(context.Background(), ExternalReportRequest{
+		ActionID:   "act-custom-report",
+		TraceID:    "trace-custom-report",
+		ActionType: "payments.refund",
+		Resource:   "payment://shop.example.com/orders/ORD-1001",
+		Outcome:    "SUCCEEDED",
+	})
+	if err != nil {
+		t.Fatalf("report outcome: %v", err)
+	}
+	if !resp.Recorded || captured.SchemaVersion != "v1" || captured.ActionType != "payments.refund" {
+		t.Fatalf("unexpected report response %+v captured=%+v", resp, captured)
+	}
+}

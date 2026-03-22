@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "action_id": "act_refund_1",
+  "action_type": "payments.refund",
+  "resource": "payment://shop.example.com/orders/ORD-1001",
+  "params": {
+    "amount": "249.00",
+    "currency": "USD",
+    "reason": "damaged_on_arrival"
+  },
+  "trace_id": "trace_refund_1",
+  "context": {
+    "extensions": {}
+  }
+}

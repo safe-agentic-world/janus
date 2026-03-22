@@ -1,0 +1,7 @@
+{
+  "decision": "ALLOW",
+  "reason": "allow_by_rule",
+  "trace_id": "trace_readme_1",
+  "action_id": "act_readme_1",
+  "output": "Nomos README excerpt"
+}

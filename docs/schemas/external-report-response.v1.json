@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "required": [
+    "recorded",
+    "trace_id",
+    "action_id",
+    "outcome"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "recorded": {
+      "type": "boolean"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "action_id": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string"
+    }
+  }
+}

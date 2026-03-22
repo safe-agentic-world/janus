@@ -1,0 +1,9 @@
+{
+  "schema_version": "v1",
+  "action_id": "act_refund_1",
+  "trace_id": "trace_refund_1",
+  "action_type": "payments.refund",
+  "resource": "payment://shop.example.com/orders/ORD-1001",
+  "outcome": "SUCCEEDED",
+  "external_reference": "refund_123"
+}

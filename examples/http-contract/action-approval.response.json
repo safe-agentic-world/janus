@@ -1,0 +1,8 @@
+{
+  "decision": "REQUIRE_APPROVAL",
+  "reason": "require_approval_by_rule",
+  "trace_id": "trace_refund_1",
+  "action_id": "act_refund_1",
+  "approval_id": "apr_1234567890",
+  "approval_fingerprint": "fp_1234567890"
+}

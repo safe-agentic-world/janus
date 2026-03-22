@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "required": [
+    "approval_id",
+    "decision"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["APPROVE", "DENY", "approve", "deny"]
+    }
+  }
+}

@@ -1,0 +1,100 @@
+openapi: 3.1.0
+info:
+  title: Nomos HTTP Gateway
+  version: v1
+  description: Minimal stable HTTP contract for action authorization, approval, explain-only evaluation, and external action outcome reporting.
+paths:
+  /action:
+    post:
+      summary: Evaluate and, when applicable, execute a governed action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+      responses:
+        '200':
+          description: Decision response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+  /run:
+    post:
+      summary: Alias of /action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+      responses:
+        '200':
+          description: Decision response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+  /approvals/decide:
+    post:
+      summary: Record an approval decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Decision response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+  /explain:
+    post:
+      summary: Evaluate policy without executing side effects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+      responses:
+        '200':
+          description: Explain response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExplainResponse'
+  /actions/report:
+    post:
+      summary: Record caller-reported outcome for an externally executed custom action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExternalReportRequest'
+      responses:
+        '200':
+          description: External report response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExternalReportResponse'
+components:
+  schemas:
+    ActionRequest:
+      $ref: '../schemas/action-request.v1.json'
+    ActionResponse:
+      $ref: '../schemas/action-response.v1.json'
+    ApprovalDecisionRequest:
+      $ref: '../schemas/approval-decision-request.v1.json'
+    ExplainResponse:
+      $ref: '../schemas/explain-response.v1.json'
+    ExternalReportRequest:
+      $ref: '../schemas/external-report-request.v1.json'
+    ExternalReportResponse:
+      $ref: '../schemas/external-report-response.v1.json'

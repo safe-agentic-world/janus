@@ -1,0 +1,11 @@
+{
+  "action_id": "act_refund_1",
+  "trace_id": "trace_refund_1",
+  "decision": "REQUIRE_APPROVAL",
+  "reason_code": "require_approval_by_rule",
+  "matched_rule_ids": ["approve-refund"],
+  "policy_bundle_hash": "bundlehash123",
+  "engine_version": "dev",
+  "assurance_level": "BEST_EFFORT",
+  "obligations_preview": {}
+}

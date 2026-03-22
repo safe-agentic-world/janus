@@ -20,8 +20,10 @@ func TestQuickstartDocsReferenceExistingFilesAndCurrentFlags(t *testing.T) {
 	root := repoRoot(t)
 	quickstartPath := filepath.Join(root, "docs", "quickstart.md")
 	integrationPath := filepath.Join(root, "docs", "integration-kit.md")
+	httpContractPath := filepath.Join(root, "docs", "http-integration-kit.md")
 	quickstart := mustReadFile(t, quickstartPath)
 	integration := mustReadFile(t, integrationPath)
+	httpContract := mustReadFile(t, httpContractPath)
 
 	requiredFiles := []string{
 		"examples/quickstart/config.quickstart.json",
@@ -29,11 +31,21 @@ func TestQuickstartDocsReferenceExistingFilesAndCurrentFlags(t *testing.T) {
 		"examples/quickstart/actions/deny-env.json",
 		"examples/openai-compatible/nomos_http_loop.py",
 		"examples/http-sdk/go/main.go",
+		"examples/http-sdk/go/guarded-http-tool/main.go",
 		"examples/http-sdk/python/quickstart.py",
+		"examples/http-sdk/python/guarded_langchain_tool.py",
+		"examples/http-sdk/python/custom_action_external.py",
 		"examples/http-sdk/typescript/quickstart.ts",
+		"examples/http-sdk/typescript/guarded_cli_tool.ts",
 		"sdk/python/nomos_sdk.py",
 		"sdk/typescript/nomos_sdk.ts",
 		"docs/http-sdk.md",
+		"docs/http-integration-kit.md",
+		"docs/integration-patterns.md",
+		"docs/custom-actions.md",
+		"docs/openapi/nomos-http-v1.yaml",
+		"docs/schemas/action-request.v1.json",
+		"docs/schemas/action-response.v1.json",
 		"examples/local-tooling/codex.mcp.json",
 		"examples/local-tooling/claude-code-mcp.json",
 		"deploy/docker-compose/docker-compose.yml",
@@ -65,6 +77,18 @@ func TestQuickstartDocsReferenceExistingFilesAndCurrentFlags(t *testing.T) {
 	for _, snippet := range requiredIntegrationCommands {
 		if !strings.Contains(integration, snippet) {
 			t.Fatalf("integration kit missing command %q", snippet)
+		}
+	}
+	requiredHTTPContractSnippets := []string{
+		"`POST /action`",
+		"`POST /approvals/decide`",
+		"`POST /explain`",
+		"`POST /actions/report`",
+		"`Authorization: Bearer <principal token>`",
+	}
+	for _, snippet := range requiredHTTPContractSnippets {
+		if !strings.Contains(httpContract, snippet) {
+			t.Fatalf("http integration kit missing snippet %q", snippet)
 		}
 	}
 }

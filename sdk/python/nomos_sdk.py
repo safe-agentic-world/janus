@@ -6,7 +6,10 @@ import json
 import secrets
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Generic, TypeVar
+
+InputT = TypeVar("InputT")
+OutputT = TypeVar("OutputT")
 
 
 def _generate_id(prefix: str) -> str:
@@ -35,6 +38,22 @@ class ActionRequest:
         }
 
 
+@dataclass
+class GuardResult(Generic[OutputT]):
+    decision_response: dict[str, Any]
+    executed: bool = False
+    value: OutputT | None = None
+
+    def is_allowed(self) -> bool:
+        return self.decision_response.get("decision") == "ALLOW"
+
+    def is_denied(self) -> bool:
+        return self.decision_response.get("decision") == "DENY"
+
+    def requires_approval(self) -> bool:
+        return self.decision_response.get("decision") == "REQUIRE_APPROVAL"
+
+
 class NomosClient:
     def __init__(self, *, base_url: str, bearer_token: str, agent_id: str, agent_secret: str, timeout: float = 5.0):
         if not base_url or not bearer_token or not agent_id or not agent_secret:
@@ -54,6 +73,11 @@ class NomosClient:
     def explain_action(self, request: ActionRequest) -> dict[str, Any]:
         return self._post("/explain", request.as_dict())
 
+    def report_external_outcome(self, payload: dict[str, Any]) -> dict[str, Any]:
+        report = dict(payload)
+        report.setdefault("schema_version", "v1")
+        return self._post("/actions/report", report)
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
         signature = hmac.new(self.agent_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -71,3 +95,119 @@ class NomosClient:
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+
+
+class GuardedCallable(Generic[InputT, OutputT]):
+    def __init__(
+        self,
+        *,
+        client: NomosClient,
+        build_request: Callable[[InputT], ActionRequest],
+        execute: Callable[[InputT], OutputT],
+    ):
+        self.client = client
+        self.build_request = build_request
+        self.execute = execute
+
+    def invoke(self, value: InputT) -> GuardResult[OutputT]:
+        request = self.build_request(value)
+        decision = self.client.run_action(request)
+        if decision.get("decision") != "ALLOW":
+            return GuardResult(decision_response=decision)
+        return GuardResult(
+            decision_response=decision,
+            executed=True,
+            value=self.execute(value),
+        )
+
+    def invoke_and_report(
+        self,
+        value: InputT,
+        report_builder: Callable[[InputT, OutputT, dict[str, Any]], dict[str, Any]] | None,
+    ) -> GuardResult[OutputT]:
+        result = self.invoke(value)
+        if not result.executed or report_builder is None or result.value is None:
+            return result
+        self.client.report_external_outcome(report_builder(value, result.value, result.decision_response))
+        return result
+
+
+def guard_callable(
+    *,
+    client: NomosClient,
+    build_request: Callable[[InputT], ActionRequest],
+    execute: Callable[[InputT], OutputT],
+) -> GuardedCallable[InputT, OutputT]:
+    return GuardedCallable(client=client, build_request=build_request, execute=execute)
+
+
+def guard_http_tool(
+    *,
+    client: NomosClient,
+    resource_fn: Callable[[InputT], str],
+    params_fn: Callable[[InputT], dict[str, Any]],
+    execute_fn: Callable[[InputT], OutputT],
+) -> GuardedCallable[InputT, OutputT]:
+    return guard_callable(
+        client=client,
+        build_request=lambda value: ActionRequest(
+            action_type="net.http_request",
+            resource=resource_fn(value),
+            params=params_fn(value),
+        ),
+        execute=execute_fn,
+    )
+
+
+def guard_subprocess_tool(
+    *,
+    client: NomosClient,
+    resource_fn: Callable[[InputT], str],
+    params_fn: Callable[[InputT], dict[str, Any]],
+    execute_fn: Callable[[InputT], OutputT],
+) -> GuardedCallable[InputT, OutputT]:
+    return guard_callable(
+        client=client,
+        build_request=lambda value: ActionRequest(
+            action_type="process.exec",
+            resource=resource_fn(value),
+            params=params_fn(value),
+        ),
+        execute=execute_fn,
+    )
+
+
+def guard_file_read_tool(
+    *,
+    client: NomosClient,
+    resource_fn: Callable[[InputT], str],
+    params_fn: Callable[[InputT], dict[str, Any]],
+    execute_fn: Callable[[InputT], OutputT],
+) -> GuardedCallable[InputT, OutputT]:
+    return guard_callable(
+        client=client,
+        build_request=lambda value: ActionRequest(
+            action_type="fs.read",
+            resource=resource_fn(value),
+            params=params_fn(value),
+        ),
+        execute=execute_fn,
+    )
+
+
+def guard_file_write_tool(
+    *,
+    client: NomosClient,
+    resource_fn: Callable[[InputT], str],
+    params_fn: Callable[[InputT], dict[str, Any]],
+    execute_fn: Callable[[InputT], OutputT],
+) -> GuardedCallable[InputT, OutputT]:
+    return guard_callable(
+        client=client,
+        build_request=lambda value: ActionRequest(
+            action_type="fs.write",
+            resource=resource_fn(value),
+            params=params_fn(value),
+        ),
+        execute=execute_fn,
+    )

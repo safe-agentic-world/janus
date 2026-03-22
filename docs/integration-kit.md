@@ -111,6 +111,11 @@ What it demonstrates:
 - deterministic handling of both responses over the HTTP API
 - the same HTTP path can now be wrapped with the official SDKs instead of handwritten headers and envelopes
 
+For wrapper-based integration patterns that let you guard one tool at a time, see:
+
+- [docs/http-sdk.md](./http-sdk.md)
+- [docs/integration-patterns.md](./integration-patterns.md)
+
 Troubleshooting:
 
 - if the script returns `401`, use the default checked-in key `dev-api-key`

@@ -136,6 +136,8 @@ func (r Request) Validate(rawContext json.RawMessage) error {
 	}
 	if strings.TrimSpace(r.ActionType) == "" {
 		errs = append(errs, "action_type is required")
+	} else if err := ValidateActionType(r.ActionType); err != nil {
+		errs = append(errs, err.Error())
 	}
 	if strings.TrimSpace(r.Resource) == "" {
 		errs = append(errs, "resource is required")
@@ -200,6 +202,9 @@ func ToAction(req Request, id identity.VerifiedIdentity) (Action, error) {
 		Context:       req.Context,
 		TraceID:       strings.TrimSpace(req.TraceID),
 	}
+	if err := ValidateActionType(act.ActionType); err != nil {
+		return Action{}, err
+	}
 	if err := ValidateActionSchema(act); err != nil {
 		return Action{}, err
 	}
@@ -227,6 +232,9 @@ func DecodeAction(data []byte) (Action, error) {
 	if err := ValidateActionSchema(act); err != nil {
 		return Action{}, err
 	}
+	if err := ValidateActionType(act.ActionType); err != nil {
+		return Action{}, err
+	}
 	return act, nil
 }
 
@@ -235,6 +243,8 @@ type Response struct {
 	Reason              string         `json:"reason,omitempty"`
 	TraceID             string         `json:"trace_id,omitempty"`
 	ActionID            string         `json:"action_id,omitempty"`
+	ExecutionMode       string         `json:"execution_mode,omitempty"`
+	ReportPath          string         `json:"report_path,omitempty"`
 	Output              string         `json:"output,omitempty"`
 	Truncated           bool           `json:"truncated,omitempty"`
 	BytesWritten        int            `json:"bytes_written,omitempty"`

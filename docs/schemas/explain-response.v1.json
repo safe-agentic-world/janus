@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "required": [
+    "action_id",
+    "trace_id",
+    "decision",
+    "reason_code",
+    "matched_rule_ids",
+    "policy_bundle_hash",
+    "engine_version",
+    "assurance_level",
+    "obligations_preview"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "action_id": {
+      "type": "string"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "matched_rule_ids": {
+      "type": "array"
+    },
+    "policy_bundle_hash": {
+      "type": "string"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "assurance_level": {
+      "type": "string"
+    },
+    "obligations_preview": {
+      "type": "object"
+    }
+  }
+}

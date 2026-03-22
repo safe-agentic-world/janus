@@ -37,7 +37,12 @@ func Action(input action.Action) (NormalizedAction, error) {
 	}
 	normalizedResource, err := normalizeResource(strings.TrimSpace(input.Resource))
 	if err != nil {
-		return NormalizedAction{}, err
+		if !action.IsBuiltInActionType(input.ActionType) {
+			normalizedResource, err = NormalizeCustomResource(strings.TrimSpace(input.Resource))
+		}
+		if err != nil {
+			return NormalizedAction{}, err
+		}
 	}
 	canonicalParams, err := canonicaljson.Canonicalize(input.Params)
 	if err != nil {
@@ -61,6 +66,14 @@ func Action(input action.Action) (NormalizedAction, error) {
 
 func NormalizeResource(raw string) (string, error) {
 	return normalizeResource(strings.TrimSpace(raw))
+}
+
+func NormalizeCustomResource(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("invalid resource uri: %w", err)
+	}
+	return normalizeCustomResource(parsed)
 }
 
 func NormalizeRedirectURL(raw string) (string, error) {
@@ -148,6 +161,31 @@ func normalizeSecretResource(parsed *url.URL) (string, error) {
 		return "", errors.New("secret path must be single segment")
 	}
 	return "secret://" + host + "/" + secretPath, nil
+}
+
+func normalizeCustomResource(parsed *url.URL) (string, error) {
+	if parsed.User != nil {
+		return "", errors.New("custom resource userinfo is not allowed")
+	}
+	if parsed.RawQuery != "" {
+		return "", errors.New("custom resource query is not allowed")
+	}
+	if parsed.Fragment != "" {
+		return "", errors.New("custom resource fragment is not allowed")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme == "" {
+		return "", errors.New("custom resource scheme is required")
+	}
+	host, err := normalizeHostPort(parsed.Host)
+	if err != nil {
+		return "", fmt.Errorf("invalid custom resource host: %w", err)
+	}
+	cleaned, err := normalizeResourcePath(parsed.EscapedPath(), "custom resource")
+	if err != nil {
+		return "", err
+	}
+	return scheme + "://" + host + cleaned, nil
 }
 
 func normalizeNetworkLocation(rawHost, rawPath string) (string, error) {

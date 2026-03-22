@@ -324,6 +324,7 @@ func (g *Gateway) Start() error {
 	mux.HandleFunc("/explain", g.handleExplain)
 	mux.HandleFunc("/run", g.handleAction)
 	mux.HandleFunc("/action", g.handleAction)
+	mux.HandleFunc("/actions/report", g.handleExternalReport)
 	mux.HandleFunc("/approvals/decide", g.handleApprovalDecision)
 	mux.HandleFunc("/webhooks/approvals", g.handleApprovalDecisionWebhook)
 	mux.HandleFunc("/webhooks/slack/approvals", g.handleSlackApprovalWebhook)

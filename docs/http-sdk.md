@@ -14,6 +14,10 @@ This surface is intentionally narrow. It is not a second control plane and it do
 - Python: [`sdk/python/nomos_sdk.py`](../sdk/python/nomos_sdk.py)
 - TypeScript: [`sdk/typescript/nomos_sdk.ts`](../sdk/typescript/nomos_sdk.ts)
 
+The SDKs also include a small framework-neutral wrapper layer for existing tools and side-effecting functions. See [`docs/integration-patterns.md`](./integration-patterns.md).
+
+For application-defined side effects and external execution reporting, see [`docs/custom-actions.md`](./custom-actions.md).
+
 The supported HTTP contract remains additive and backward-compatible:
 
 - `POST /action`
@@ -151,5 +155,29 @@ with:
 - `RunAction` / `run_action`
 - `DecideApproval` / `decide_approval`
 - `ExplainAction` / `explain_action`
+- `ReportExternalOutcome` / `report_external_outcome`
+- guarded wrapper helpers such as:
+  - `NewGuardedHTTPTool`
+  - `guard_http_tool`
+  - `guardHttpTool`
 
 This is an adoption convenience layer only. It does not change Nomos authorization semantics.
+
+## Wrapper Layer
+
+The M38 wrapper layer is intentionally small:
+
+- construct a valid Nomos action
+- send it through the existing HTTP gateway
+- execute the wrapped function only on `ALLOW`
+- surface `DENY` and `REQUIRE_APPROVAL` without hidden fallbacks
+
+Reference examples:
+
+- Go: [`examples/http-sdk/go/guarded-http-tool/main.go`](../examples/http-sdk/go/guarded-http-tool/main.go)
+- Python: [`examples/http-sdk/python/guarded_langchain_tool.py`](../examples/http-sdk/python/guarded_langchain_tool.py)
+- TypeScript: [`examples/http-sdk/typescript/guarded_cli_tool.ts`](../examples/http-sdk/typescript/guarded_cli_tool.ts)
+
+For custom external business actions:
+
+- Python: [`examples/http-sdk/python/custom_action_external.py`](../examples/http-sdk/python/custom_action_external.py)

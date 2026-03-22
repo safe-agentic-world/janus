@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "required": [
+    "decision"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["ALLOW", "DENY", "REQUIRE_APPROVAL"]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "action_id": {
+      "type": "string"
+    },
+    "execution_mode": {
+      "type": "string"
+    },
+    "report_path": {
+      "type": "string"
+    },
+    "approval_id": {
+      "type": "string"
+    },
+    "approval_fingerprint": {
+      "type": "string"
+    },
+    "approval_expires_at": {
+      "type": "string"
+    },
+    "obligations": {
+      "type": "object"
+    }
+  }
+}

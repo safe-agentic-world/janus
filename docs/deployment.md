@@ -44,9 +44,16 @@ Nomos exposes an HTTP run endpoint:
 - `POST /action`
 - `POST /approvals/decide`
 - `POST /explain`
+- `POST /actions/report`
 
 `/run` uses the same request schema and auth model as `POST /action`.
 `/explain` uses the same request schema and auth model as `POST /action`, but it does not execute side effects.
+`/actions/report` records caller-reported outcomes for custom actions that Nomos authorized but did not execute itself.
+
+For the published contract, schemas, and OpenAPI artifact, see:
+
+- `docs/http-integration-kit.md`
+- `docs/openapi/nomos-http-v1.yaml`
 
 ## Operator UI
 

@@ -134,6 +134,14 @@ func (c *Client) DecideApproval(ctx context.Context, req ApprovalDecisionRequest
 	return doJSON[DecisionResponse](ctx, c, http.MethodPost, "/approvals/decide", req)
 }
 
+func (c *Client) ReportExternalOutcome(ctx context.Context, req ExternalReportRequest) (ExternalReportResponse, error) {
+	req.ensureDefaults()
+	if err := req.Validate(); err != nil {
+		return ExternalReportResponse{}, err
+	}
+	return doJSON[ExternalReportResponse](ctx, c, http.MethodPost, "/actions/report", req)
+}
+
 func doJSON[T any](ctx context.Context, c *Client, method, endpoint string, requestBody any) (T, error) {
 	var zero T
 	data, err := json.Marshal(requestBody)

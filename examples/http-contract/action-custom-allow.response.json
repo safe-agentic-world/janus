@@ -1,0 +1,9 @@
+{
+  "decision": "ALLOW",
+  "reason": "allow_by_rule",
+  "trace_id": "trace_refund_1",
+  "action_id": "act_refund_1",
+  "approval_fingerprint": "fp_1234567890",
+  "execution_mode": "external_authorized",
+  "report_path": "/actions/report"
+}

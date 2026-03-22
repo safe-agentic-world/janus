@@ -341,6 +341,21 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		return response, nil
 	}
 
+	if !action.IsBuiltInActionType(normalized.ActionType) {
+		response.ExecutionMode = action.ExecutionModeExternalAuthorized
+		response.ReportPath = "/actions/report"
+		auditCtx.executorMetadata = map[string]any{
+			"execution_mode":      action.ExecutionModeExternalAuthorized,
+			"nomos_executed":      false,
+			"reporting_supported": true,
+		}
+		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
+		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
+		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
+		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+		return response, nil
+	}
+
 	if normalized.ActionType == "fs.read" {
 		s.emitTelemetryEvent("executor.run", normalized.TraceID, "", map[string]any{
 			"action_id":   normalized.ActionID,

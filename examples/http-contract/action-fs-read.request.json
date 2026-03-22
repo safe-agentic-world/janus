@@ -1,0 +1,11 @@
+{
+  "schema_version": "v1",
+  "action_id": "act_readme_1",
+  "action_type": "fs.read",
+  "resource": "file://workspace/README.md",
+  "params": {},
+  "trace_id": "trace_readme_1",
+  "context": {
+    "extensions": {}
+  }
+}

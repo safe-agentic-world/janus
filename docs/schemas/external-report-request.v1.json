@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "required": [
+    "schema_version",
+    "action_id",
+    "trace_id",
+    "action_type",
+    "resource",
+    "outcome"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["v1"]
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resource": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["SUCCEEDED", "FAILED"]
+    },
+    "message": {
+      "type": "string"
+    },
+    "external_reference": {
+      "type": "string"
+    },
+    "approval_id": {
+      "type": "string"
+    },
+    "approval_fingerprint": {
+      "type": "string"
+    },
+    "status_code": {
+      "type": "integer"
+    }
+  }
+}

@@ -108,6 +108,45 @@ func TestNormalizeRepoLowercase(t *testing.T) {
 	}
 }
 
+func TestNormalizeCustomResource(t *testing.T) {
+	result, err := Action(action.Action{
+		SchemaVersion: "v1",
+		ActionID:      "act1",
+		ActionType:    "payments.refund",
+		Resource:      "Payment://Shop.Example.Com/orders/ORD-1001",
+		Params:        []byte(`{}`),
+		Principal:     "system",
+		Agent:         "nomos",
+		Environment:   "dev",
+		TraceID:       "trace1",
+		Context:       action.Context{},
+	})
+	if err != nil {
+		t.Fatalf("normalize custom resource: %v", err)
+	}
+	if result.Resource != "payment://shop.example.com/orders/ORD-1001" {
+		t.Fatalf("expected normalized custom resource, got %s", result.Resource)
+	}
+}
+
+func TestNormalizeCustomResourceRejectsQuery(t *testing.T) {
+	_, err := Action(action.Action{
+		SchemaVersion: "v1",
+		ActionID:      "act1",
+		ActionType:    "payments.refund",
+		Resource:      "payment://shop.example.com/orders/ORD-1001?x=1",
+		Params:        []byte(`{}`),
+		Principal:     "system",
+		Agent:         "nomos",
+		Environment:   "dev",
+		TraceID:       "trace1",
+		Context:       action.Context{},
+	})
+	if err == nil {
+		t.Fatal("expected custom resource query rejection")
+	}
+}
+
 func TestMatchPatternDeterministic(t *testing.T) {
 	ok, err := MatchPattern("foo/*/bar", "foo/a/bar")
 	if err != nil {
