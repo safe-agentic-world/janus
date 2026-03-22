@@ -1,0 +1,192 @@
+:root {
+  --bg: #f5f0e7;
+  --panel: #fffaf2;
+  --ink: #1d2d2a;
+  --muted: #596866;
+  --accent: #0f766e;
+  --warn: #b77218;
+  --border: #d8cdbc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  background: radial-gradient(circle at top, #fff8ec 0%, var(--bg) 55%, #efe5d6 100%);
+  color: var(--ink);
+}
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.hero {
+  margin-bottom: 20px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+h1, h2 {
+  margin: 0 0 8px;
+}
+
+.subtle {
+  margin: 0;
+  color: var(--muted);
+}
+
+.grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  margin-bottom: 20px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: 0 10px 30px rgba(73, 59, 42, 0.08);
+}
+
+.card-header,
+.auth-row,
+.approval-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.auth-card {
+  margin-bottom: 20px;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  background: #fff;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.decision-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.list {
+  display: grid;
+  gap: 12px;
+}
+
+.trace-filters {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  margin-bottom: 12px;
+}
+
+.approval-item {
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.approval-item button {
+  white-space: nowrap;
+}
+
+.approval-copy strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+.badge.warn {
+  background: rgba(183, 114, 24, 0.12);
+  color: var(--warn);
+}
+
+.json {
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  min-height: 200px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #f7f2ea;
+  border: 1px solid #eadfce;
+}
+
+.editor {
+  width: 100%;
+  min-height: 220px;
+  margin: 0 0 12px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid #eadfce;
+  background: #f7f2ea;
+  font: 0.95rem/1.4 "Courier New", monospace;
+  color: var(--ink);
+}
+
+.empty {
+  color: var(--muted);
+}
+
+@media (max-width: 760px) {
+  .page {
+    padding: 16px;
+  }
+
+  .card-header,
+  .auth-row,
+  .approval-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

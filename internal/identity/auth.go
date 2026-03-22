@@ -51,6 +51,19 @@ func (a *Authenticator) Verify(req *http.Request, body []byte) (VerifiedIdentity
 	}, nil
 }
 
+func (a *Authenticator) VerifyPrincipalOnly(req *http.Request) (string, error) {
+	if principal, ok := a.verifyAPIKey(req); ok {
+		return principal, nil
+	}
+	if principal, ok := a.verifySPIFFEIdentity(req); ok {
+		return principal, nil
+	}
+	if principal, ok := a.verifyOIDCToken(req); ok {
+		return principal, nil
+	}
+	return "", errors.New("principal authentication failed")
+}
+
 func (a *Authenticator) verifyPrincipal(req *http.Request, body []byte) (string, error) {
 	if principal, ok := a.verifyAPIKey(req); ok {
 		return principal, nil

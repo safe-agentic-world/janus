@@ -1,2 +1,2 @@
-// Package sdk contains client stubs for Nomos.
+// Package sdk provides the official Go HTTP client for Nomos.
 package sdk

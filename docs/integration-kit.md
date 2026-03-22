@@ -1,6 +1,6 @@
 # Integration Kit
 
-This guide covers local agent integration for Nomos using checked-in quickstart files and MCP stdio mode.
+This guide covers local agent integration for Nomos using checked-in quickstart files, MCP stdio mode, and the official HTTP SDK adoption layer.
 
 Unless otherwise stated, the examples here show how to route actions through Nomos. They do not, by themselves, prove full mediation in unmanaged local environments.
 
@@ -90,6 +90,7 @@ Troubleshooting:
 Use the runnable local HTTP example:
 
 - [nomos_http_loop.py](../examples/openai-compatible/nomos_http_loop.py)
+- [http-sdk.md](./http-sdk.md)
 
 1. Start Nomos:
 
@@ -108,6 +109,7 @@ What it demonstrates:
 - a tool loop sending one governed action that returns `ALLOW`
 - a second governed action that returns `DENY`
 - deterministic handling of both responses over the HTTP API
+- the same HTTP path can now be wrapped with the official SDKs instead of handwritten headers and envelopes
 
 Troubleshooting:
 

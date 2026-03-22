@@ -149,13 +149,18 @@ Nomos exposes:
 
 - `POST /action`
 - `POST /run`
+- `POST /approvals/decide`
+- `POST /explain`
+- `GET /ui/`
 
 with bearer principal auth and agent HMAC signing.
 
 See:
 
 - [docs/deployment.md](./docs/deployment.md)
+- [docs/http-sdk.md](./docs/http-sdk.md)
 - [docs/quickstart.md](./docs/quickstart.md)
+- [docs/operator-ui.md](./docs/operator-ui.md)
 
 ## Key Features
 
@@ -165,6 +170,7 @@ See:
 - **MCP** server mode: expose governed tools to MCP-compatible agent clients
 - **HTTP** gateway mode: mediate actions from custom tool loops and app backends
 - approval workflow: route sensitive actions into narrow, fingerprint-bound approvals
+- operator UI: inspect readiness, pending approvals, action detail, trace timelines, and explain-only policy results over existing gateway state
 - audit trail: record governed actions with stable policy and identity context
 - redaction: strip sensitive output before it reaches the agent, logs, or audit sinks
 - capability contract: surface what is immediately allowed, approval-gated, or unavailable
@@ -319,8 +325,10 @@ See:
 Start here:
 
 - [docs/quickstart.md](./docs/quickstart.md)
+- [docs/http-sdk.md](./docs/http-sdk.md)
 - [docs/integration-kit.md](./docs/integration-kit.md)
 - [docs/local-test-plan.md](./docs/local-test-plan.md)
+- [docs/operator-ui.md](./docs/operator-ui.md)
 
 Policy and behavior:
 

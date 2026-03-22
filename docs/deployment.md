@@ -41,8 +41,36 @@ Example:
 
 Nomos exposes an HTTP run endpoint:
 - `POST /run`
+- `POST /action`
+- `POST /approvals/decide`
+- `POST /explain`
 
 `/run` uses the same request schema and auth model as `POST /action`.
+`/explain` uses the same request schema and auth model as `POST /action`, but it does not execute side effects.
+
+## Operator UI
+
+Nomos serves a small operator UI at:
+
+- `GET /ui/`
+
+The UI is intentionally narrow:
+
+- readiness / doctor posture
+- approval inbox
+- action detail
+
+Security notes:
+
+- treat `/ui/` as an operator surface
+- UI data APIs require authenticated principal access
+- approval decisions from the UI still flow through the existing approval machinery
+- action detail currently depends on a sqlite audit sink for stored audit evidence
+- the UI does not imply stronger assurance than the runtime evidence already supports
+
+For details, see:
+
+- `docs/operator-ui.md`
 
 ## Container Image
 

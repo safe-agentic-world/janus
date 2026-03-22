@@ -30,6 +30,7 @@ type Config struct {
 	Approvals   ApprovalsConfig   `json:"approvals"`
 	Identity    IdentityConfig    `json:"identity"`
 	Redaction   RedactionConfig   `json:"redaction"`
+	SourcePath  string            `json:"-"`
 }
 
 type GatewayConfig struct {
@@ -221,6 +222,7 @@ func LoadConfig(path string, getenv func(string) string, policyBundleOverride st
 		cfg.Policy.BundlePath = policyBundleOverride
 		cfg.Policy.BundlePaths = nil
 	}
+	cfg.SourcePath = path
 	if err := cfg.ResolveRelativePaths(filepath.Dir(path)); err != nil {
 		return Config{}, err
 	}

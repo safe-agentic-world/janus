@@ -614,6 +614,53 @@ func TestGatewayPropagatesAcceptedTraceContext(t *testing.T) {
 	}
 }
 
+func TestGatewayExplainEndpointUsesRequestEnvelopeAndSkipsAudit(t *testing.T) {
+	recorder := &recordSink{}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"refund-approval","action_type":"net.http_request","resource":"url://api.example.com/**","decision":"REQUIRE_APPROVAL","obligations":{"net_allowlist":["api.example.com"]}}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	cfg := Config{
+		Gateway: GatewayConfig{Listen: "127.0.0.1:0", Transport: "http"},
+		Audit:   AuditConfig{Sink: "stdout"},
+		Identity: IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "dev",
+			APIKeys:     map[string]string{"key1": "system"},
+			AgentSecrets: map[string]string{
+				"nomos": "agent-secret",
+			},
+		},
+		Policy: PolicyConfig{BundlePath: bundlePath},
+	}
+	gw, err := NewWithRecorder(cfg, recorder, func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("new gateway: %v", err)
+	}
+	body := `{"schema_version":"v1","action_id":"act-explain","action_type":"net.http_request","resource":"url://api.example.com/refunds/ord-1","params":{"method":"POST"},"trace_id":"trace-explain","context":{"extensions":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/explain", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer key1")
+	req.Header.Set("X-Nomos-Agent-Id", "nomos")
+	req.Header.Set("X-Nomos-Agent-Signature", hmacHex("agent-secret", []byte(body)))
+	w := httptest.NewRecorder()
+	gw.handleExplain(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, `"decision":"REQUIRE_APPROVAL"`) {
+		t.Fatalf("expected explain decision in response, got %s", respBody)
+	}
+	if !strings.Contains(respBody, `"action_id":"act-explain"`) || !strings.Contains(respBody, `"trace_id":"trace-explain"`) {
+		t.Fatalf("expected explain response to preserve ids, got %s", respBody)
+	}
+	if len(recorder.events) != 0 {
+		t.Fatalf("expected explain endpoint not to write audit events, got %d", len(recorder.events))
+	}
+}
+
 func TestGatewaySPIFFEIdentityPropagatesIntoAudit(t *testing.T) {
 	recorder := &recordSink{}
 	dir := t.TempDir()

@@ -58,7 +58,7 @@ nomos.exe serve -c .\examples\quickstart\config.quickstart.json
 
 The gateway listens on `http://127.0.0.1:8080`.
 
-## 6. Run The SDK Example
+## 6. Run The HTTP SDK Example
 
 In a second terminal:
 
@@ -72,6 +72,37 @@ Expected result:
 - the second request targets `.env` and returns `DENY`
 
 The example prints both responses so you can see the policy-gated behavior directly.
+
+If you want the official Go SDK path instead of the raw Python loop:
+
+```powershell
+go run .\examples\http-sdk\go
+```
+
+## 7. Optional: Open The Operator UI
+
+Nomos now serves a small operator UI at:
+
+```text
+http://127.0.0.1:8080/ui/
+```
+
+The UI shell is static, but the data APIs require authenticated operator access.
+
+For the quickstart config:
+
+- use bearer token `dev-api-key`
+- readiness works immediately
+- approval inbox is disabled because `approvals.enabled` is `false`
+- action detail and trace inspection are limited because the quickstart audit sink is `stdout`, not sqlite
+- explain-only inspection works if you paste a full action JSON payload
+
+If you want the full M36a UI path locally, use a config with:
+
+- `approvals.enabled: true`
+- `audit.sink: sqlite:<path>`
+
+See [operator-ui.md](./operator-ui.md).
 
 ## Troubleshooting
 
@@ -87,6 +118,8 @@ The example prints both responses so you can see the policy-gated behavior direc
 ## Next Paths
 
 - Codex and Claude Code MCP setup: [integration-kit.md](./integration-kit.md)
+- HTTP SDK reference: [http-sdk.md](./http-sdk.md)
+- Operator UI details: [operator-ui.md](./operator-ui.md)
 - Docker demo: `docker compose -f .\deploy\docker-compose\docker-compose.yml up --build`
 - Kubernetes install: [deploy/helm/nomos/README.md](../deploy/helm/nomos/README.md)
 

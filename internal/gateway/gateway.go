@@ -36,6 +36,7 @@ type Gateway struct {
 	server              *http.Server
 	listener            net.Listener
 	writer              audit.Recorder
+	redactor            *redact.Redactor
 	policy              *policy.Engine
 	service             *service.Service
 	approvals           *approval.Store
@@ -47,6 +48,7 @@ type Gateway struct {
 	assuranceLevel      string
 	policyBundleHash    string
 	policyBundleSources []string
+	uiReadinessReporter func() (UIReadinessReport, error)
 	now                 func() time.Time
 }
 
@@ -147,6 +149,7 @@ func New(cfg Config) (*Gateway, error) {
 	gw := &Gateway{
 		cfg:                 cfg,
 		writer:              writer,
+		redactor:            redactor,
 		policy:              engine,
 		service:             svc,
 		approvals:           approvalStore,
@@ -262,6 +265,7 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	gw := &Gateway{
 		cfg:                 cfg,
 		writer:              recorder,
+		redactor:            redactor,
 		policy:              engine,
 		service:             svc,
 		approvals:           approvalStore,
@@ -294,6 +298,13 @@ func (g *Gateway) PolicyBundleSources() []string {
 	return out
 }
 
+func (g *Gateway) SetUIReadinessReporter(fn func() (UIReadinessReport, error)) {
+	if g == nil {
+		return
+	}
+	g.uiReadinessReporter = fn
+}
+
 func (g *Gateway) Start() error {
 	if g.server != nil {
 		return errors.New("gateway already started")
@@ -301,6 +312,16 @@ func (g *Gateway) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", g.handleHealthz)
 	mux.HandleFunc("/version", g.handleVersion)
+	mux.HandleFunc("/ui", g.handleUIRoot)
+	mux.HandleFunc("/ui/", g.handleUIStatic)
+	mux.HandleFunc("/api/ui/readiness", g.handleUIReadiness)
+	mux.HandleFunc("/api/ui/approvals", g.handleUIApprovals)
+	mux.HandleFunc("/api/ui/approvals/decide", g.handleUIApprovalDecision)
+	mux.HandleFunc("/api/ui/actions/", g.handleUIActionDetail)
+	mux.HandleFunc("/api/ui/traces", g.handleUITraceList)
+	mux.HandleFunc("/api/ui/traces/", g.handleUITraceDetail)
+	mux.HandleFunc("/api/ui/explain", g.handleUIExplain)
+	mux.HandleFunc("/explain", g.handleExplain)
 	mux.HandleFunc("/run", g.handleAction)
 	mux.HandleFunc("/action", g.handleAction)
 	mux.HandleFunc("/approvals/decide", g.handleApprovalDecision)

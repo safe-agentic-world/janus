@@ -324,6 +324,33 @@ func scanRecord(s scanner) (Record, error) {
 	return rec, nil
 }
 
+func (s *Store) ListPending(ctx context.Context, limit int) ([]Record, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("approval store not initialized")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, principal, agent, environment, created_at, expires_at, updated_at
+	FROM approvals WHERE status = ? ORDER BY created_at DESC LIMIT ?`, StatusPending, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Record, 0)
+	for rows.Next() {
+		rec, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func normalizeDecision(decision string) (string, error) {
 	switch decision {
 	case StatusApproved, "approve", "APPROVE", "approved":

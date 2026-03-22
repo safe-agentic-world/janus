@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nomos Operator UI</title>
+    <link rel="stylesheet" href="/ui/styles.css">
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Nomos Operator UI</p>
+          <h1>Approvals, action detail, and readiness</h1>
+          <p class="subtle">This UI is read-mostly. Approval decisions route through the existing Nomos approval flow.</p>
+        </div>
+      </header>
+
+      <section class="card auth-card">
+        <label for="token">Operator bearer token</label>
+        <div class="auth-row">
+          <input id="token" type="password" placeholder="Paste a Nomos bearer token">
+          <button id="connect">Connect</button>
+        </div>
+        <p id="auth-status" class="subtle">The UI shell is static. Data loads only after authenticated API calls succeed.</p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="card-header">
+            <h2>Dashboard</h2>
+            <button id="refresh">Refresh</button>
+          </div>
+          <pre id="readiness" class="json empty">No readiness data loaded.</pre>
+        </article>
+
+        <article class="card">
+          <div class="card-header">
+            <h2>Approval Inbox</h2>
+          </div>
+          <div id="approvals" class="list empty">No approvals loaded.</div>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Action Detail</h2>
+          <div class="decision-actions">
+            <button id="approve" disabled>Approve</button>
+            <button id="deny" disabled>Deny</button>
+          </div>
+        </div>
+        <pre id="action-detail" class="json empty">Select a pending approval to inspect its linked action.</pre>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="card-header">
+            <h2>Trace List</h2>
+            <button id="refresh-traces">Refresh Traces</button>
+          </div>
+          <div class="trace-filters">
+            <input id="trace-id-filter" type="text" placeholder="trace id">
+            <input id="trace-action-filter" type="text" placeholder="action type">
+            <input id="trace-decision-filter" type="text" placeholder="decision">
+            <button id="apply-trace-filter">Apply Filter</button>
+          </div>
+          <div id="traces" class="list empty">No traces loaded.</div>
+        </article>
+
+        <article class="card">
+          <div class="card-header">
+            <h2>Trace Detail</h2>
+          </div>
+          <pre id="trace-detail" class="json empty">Select a trace to inspect its ordered timeline.</pre>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Policy Explain</h2>
+          <button id="run-explain">Explain</button>
+        </div>
+        <textarea id="explain-input" class="editor" spellcheck="false">{
+  "schema_version": "v1",
+  "action_id": "ui_explain_demo",
+  "action_type": "fs.read",
+  "resource": "file://workspace/README.md",
+  "params": {},
+  "principal": "system",
+  "agent": "nomos",
+  "environment": "dev",
+  "context": { "extensions": {} },
+  "trace_id": "ui_explain_trace"
+}</textarea>
+        <pre id="explain-output" class="json empty">Explain-only results will appear here.</pre>
+      </section>
+    </main>
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

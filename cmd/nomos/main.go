@@ -84,6 +84,13 @@ func runServe(args []string) {
 	if err != nil {
 		cliFatalf("init gateway: %v", err)
 	}
+	gw.SetUIReadinessReporter(func() (gateway.UIReadinessReport, error) {
+		report, err := doctor.Run(doctor.Options{ConfigPath: cfg.SourcePath, Getenv: os.Getenv})
+		if err != nil {
+			return gateway.UIReadinessReport{}, err
+		}
+		return toUIReadinessReport(report), nil
+	})
 	if sources := gw.PolicyBundleSources(); len(sources) > 0 {
 		cliInfof("policy bundle sources: %s", strings.Join(sources, ", "))
 	}
@@ -102,6 +109,36 @@ func runServe(args []string) {
 		cliFatalf("gateway shutdown: %v", err)
 	}
 	cliSuccess("gateway stopped cleanly")
+}
+
+func toUIReadinessReport(report doctor.Report) gateway.UIReadinessReport {
+	checks := make([]gateway.UIReadinessCheck, 0, len(report.Checks))
+	for _, check := range report.Checks {
+		checks = append(checks, gateway.UIReadinessCheck{
+			ID:      check.ID,
+			Status:  check.Status,
+			Message: check.Message,
+			Hint:    check.Hint,
+		})
+	}
+	inputs := make([]map[string]any, 0, len(report.PolicyBundleInputs))
+	for _, input := range report.PolicyBundleInputs {
+		inputs = append(inputs, map[string]any{
+			"path":               input.Path,
+			"hash":               input.Hash,
+			"role":               input.Role,
+			"signature_verified": input.SignatureVerified,
+		})
+	}
+	return gateway.UIReadinessReport{
+		OverallStatus:       report.OverallStatus,
+		Checks:              checks,
+		PolicyBundleHash:    report.PolicyBundleHash,
+		PolicyBundleSources: append([]string{}, report.PolicyBundleSources...),
+		PolicyBundleInputs:  inputs,
+		AssuranceLevel:      report.AssuranceLevel,
+		EngineVersion:       report.EngineVersion,
+	}
 }
 
 func runMCP(args []string) {
