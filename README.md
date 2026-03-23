@@ -22,6 +22,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/safe-agentic-world/nomos" alt="License"></a>
 </div>
 
+<br>
 
 Nomos is an **agent-agnostic** and **model-agnostic** firewall built based on zero trust security principles. It sits between agents and real actions. Instead of trusting prompts or hoping the agent behaves, Nomos makes one explicit decision at the **execution boundary**:
 
