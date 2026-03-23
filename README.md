@@ -174,9 +174,12 @@ For MCP file tools, Nomos accepts canonical resources like `file://workspace/REA
 See:
 
 - [docs/integration-kit.md](./docs/integration-kit.md)
+- [docs/upstream-mcp-gateway.md](./docs/upstream-mcp-gateway.md)
 - [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
 - [examples/local-tooling/claude-code-mcp.json](./examples/local-tooling/claude-code-mcp.json)
 - [examples/local-tooling/codex.mcp.json](./examples/local-tooling/codex.mcp.json)
+
+Nomos can also run as an additive MCP governance gateway in front of configured upstream MCP servers. In that mode, downstream agents keep their MCP client architecture while Nomos governs forwarded tools as `mcp.call` actions.
 
 ### HTTP
 
@@ -270,7 +273,6 @@ This matters because a local demo proves Nomos can govern the **path it sees**, 
 See:
 
 - [docs/assurance-levels.md](./docs/assurance-levels.md)
-- [docs/guarantees.md](./docs/guarantees.md)
 - [docs/strong-guarantee-deployment.md](./docs/strong-guarantee-deployment.md)
 - [docs/reference-architecture.md](./docs/reference-architecture.md)
 
@@ -362,8 +364,6 @@ See:
 See:
 
 - [docs/use-cases.md](./docs/use-cases.md)
-- [deploy/ci/github-actions-quickstart.yml](./deploy/ci/github-actions-quickstart.yml)
-- [deploy/ci/github-actions-hardened.yml](./deploy/ci/github-actions-hardened.yml)
 
 
 ## Docs Map
@@ -397,7 +397,6 @@ Security and standards:
 
 - [docs/threat-model.md](./docs/threat-model.md)
 - [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
-- [docs/supply-chain-security.md](./docs/supply-chain-security.md)
 - [docs/release-verification.md](./docs/release-verification.md)
 - [docs/owasp-agentic-mapping.md](./docs/owasp-agentic-mapping.md)
 

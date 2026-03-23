@@ -40,7 +40,7 @@ This document defines the reference architecture for a strong-guarantee deployme
 
 1. Runtime isolation:
    The agent workload runs in a separate container or runner boundary with direct network egress denied by default.
-   In the K8s reference, this is the `sample-agent` deployment plus the `sample-agent-egress` NetworkPolicy.
+   In Kubernetes, this normally means an isolated agent workload plus operator-managed egress controls.
 2. Identity:
    Workload identity is asserted by the runtime environment, not by agent input.
 3. Mediation:
@@ -78,11 +78,10 @@ These are enforced by Nomos once a request reaches the gateway:
 
 The current strong-guarantee validation surface in this repository is intentionally conservative:
 
-- deployment manifests express the required runtime constraints
 - `nomos doctor` validates strong-guarantee readiness signals
-- integration tests validate the reference manifest and Nomos-mediated behavior
+- integration tests validate Nomos-mediated behavior and the readiness logic itself
 
-This is stronger than a documentation-only claim, but it is still scoped to the checked-in reference deployment and tests.
+This is stronger than a documentation-only claim, but it is still scoped to the current runtime checks and tests rather than a shipped deployment bundle.
 
 ## Verifiable Signals
 

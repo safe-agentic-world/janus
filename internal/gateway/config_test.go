@@ -3,6 +3,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -766,5 +767,114 @@ func TestLoadConfigExecCompatibilityModeDefaultsAndValidation(t *testing.T) {
 	}
 	if _, err := LoadConfig(badPath, os.Getenv, ""); err == nil {
 		t.Fatal("expected invalid exec compatibility mode error")
+	}
+}
+
+func TestLoadConfigSupportsMCPUpstreamServers(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	workdir := filepath.Join(dir, "upstream")
+	if err := os.MkdirAll(workdir, 0o700); err != nil {
+		t.Fatalf("mkdir upstream workdir: %v", err)
+	}
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":  map[string]any{"policy_bundle_path": ".\\bundle.json"},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+		},
+		"audit": map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"upstream_servers": []any{
+				map[string]any{
+					"name":      "retail",
+					"transport": "stdio",
+					"command":   ".\\nomos-upstream.exe",
+					"args":      []any{"serve"},
+					"workdir":   ".\\upstream",
+					"env":       map[string]any{"RETAIL_ENV": "demo"},
+				},
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.MCP.UpstreamServers) != 1 {
+		t.Fatalf("expected one upstream server, got %+v", cfg.MCP.UpstreamServers)
+	}
+	server := cfg.MCP.UpstreamServers[0]
+	if server.Name != "retail" || server.Transport != "stdio" {
+		t.Fatalf("unexpected upstream server config: %+v", server)
+	}
+	if server.Command != filepath.Join(dir, "nomos-upstream.exe") {
+		t.Fatalf("expected config-relative upstream command, got %s", server.Command)
+	}
+	if server.Workdir != workdir {
+		t.Fatalf("expected config-relative upstream workdir, got %s", server.Workdir)
+	}
+	if server.Env["RETAIL_ENV"] != "demo" {
+		t.Fatalf("expected upstream env, got %+v", server.Env)
+	}
+}
+
+func TestLoadConfigRejectsInvalidMCPUpstreamServer(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":  map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+		},
+		"audit": map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"upstream_servers": []any{
+				map[string]any{
+					"name":      "retail",
+					"transport": "http",
+					"command":   "ignored",
+				},
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), `mcp.upstream_servers.transport must be "stdio"`) {
+		t.Fatalf("expected invalid upstream transport error, got %v", err)
 	}
 }

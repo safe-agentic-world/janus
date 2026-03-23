@@ -26,13 +26,13 @@ Shared quickstart assets used below:
 1. Run a preflight check:
 
 ```powershell
-nomos.exe doctor -c .\examples\quickstart\config.quickstart.json --format json
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
 2. Start the MCP server:
 
 ```powershell
-nomos.exe mcp -c .\examples\quickstart\config.quickstart.json
+nomos mcp -c .\examples\quickstart\config.quickstart.json
 ```
 
 3. Register Nomos in Codex MCP configuration with the checked-in example:
@@ -60,13 +60,13 @@ Troubleshooting:
 1. Run the same preflight:
 
 ```powershell
-nomos.exe doctor -c .\examples\quickstart\config.quickstart.json --format json
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
 2. Start the MCP server:
 
 ```powershell
-nomos.exe mcp -c .\examples\quickstart\config.quickstart.json
+nomos mcp -c .\examples\quickstart\config.quickstart.json
 ```
 
 3. Register Nomos using the checked-in example:
@@ -102,7 +102,7 @@ Use the runnable local HTTP example:
 1. Start Nomos:
 
 ```powershell
-nomos.exe serve -c .\examples\quickstart\config.quickstart.json
+nomos serve -c .\examples\quickstart\config.quickstart.json
 ```
 
 2. In a second terminal, run:
@@ -147,6 +147,37 @@ nomos mcp -c .\examples\configs\config.example.json
 If you want to override the checked-in example policy set, add:
 - `-p`
 - `.\examples\policies\your-policy-bundle.json`
+
+## Upstream MCP Gateway
+
+Nomos can also sit in front of third-party MCP servers without changing the downstream MCP-native agent.
+
+Use:
+
+- [examples/configs/config.mcp-gateway.example.json](../examples/configs/config.mcp-gateway.example.json)
+- [examples/policies/mcp-gateway.example.yaml](../examples/policies/mcp-gateway.example.yaml)
+- [docs/upstream-mcp-gateway.md](./upstream-mcp-gateway.md)
+
+What this mode does:
+
+- Nomos acts as the MCP server to the agent
+- Nomos acts as an MCP client to configured upstream `stdio` servers
+- forwarded upstream tools appear downstream as `upstream.<server>.<tool>`
+- each forwarded call is evaluated as:
+  - `action_type`: `mcp.call`
+  - `resource`: `mcp://<server>/<tool>`
+
+Example:
+
+```powershell
+nomos mcp -c .\examples\configs\config.mcp-gateway.example.json
+```
+
+In this example:
+
+- `upstream.retail.get_order_details` is allowed
+- `upstream.retail.request_refund` requires approval
+- `upstream.retail.issue_compensation` is denied
 
 ## MCP Runtime UX
 

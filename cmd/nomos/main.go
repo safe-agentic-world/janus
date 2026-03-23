@@ -180,6 +180,7 @@ func runMCP(args []string) {
 		ApprovalStorePath:     cfg.Approvals.StorePath,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.UpstreamServers),
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -801,6 +802,28 @@ func toMCPUpstreamRoutes(routes []gateway.UpstreamRoute) []mcp.UpstreamRoute {
 			URL:        route.URL,
 			Methods:    append([]string(nil), route.Methods...),
 			PathPrefix: route.PathPrefix,
+		})
+	}
+	return out
+}
+
+func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
+	if len(servers) == 0 {
+		return nil
+	}
+	out := make([]mcp.UpstreamServerConfig, 0, len(servers))
+	for _, server := range servers {
+		env := map[string]string{}
+		for key, value := range server.Env {
+			env[key] = value
+		}
+		out = append(out, mcp.UpstreamServerConfig{
+			Name:      server.Name,
+			Transport: server.Transport,
+			Command:   server.Command,
+			Args:      append([]string(nil), server.Args...),
+			Env:       env,
+			Workdir:   server.Workdir,
 		})
 	}
 	return out

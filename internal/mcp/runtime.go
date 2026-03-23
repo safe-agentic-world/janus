@@ -24,12 +24,22 @@ type RuntimeOptions struct {
 	ApprovalStorePath     string
 	ApprovalTTLSeconds    int
 	UpstreamRoutes        []UpstreamRoute
+	UpstreamServers       []UpstreamServerConfig
 }
 
 type UpstreamRoute struct {
 	URL        string
 	Methods    []string
 	PathPrefix string
+}
+
+type UpstreamServerConfig struct {
+	Name      string
+	Transport string
+	Command   string
+	Args      []string
+	Env       map[string]string
+	Workdir   string
 }
 
 type logLevel int
@@ -77,6 +87,7 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 		ApprovalStorePath:     strings.TrimSpace(options.ApprovalStorePath),
 		ApprovalTTLSeconds:    options.ApprovalTTLSeconds,
 		UpstreamRoutes:        append([]UpstreamRoute(nil), options.UpstreamRoutes...),
+		UpstreamServers:       append([]UpstreamServerConfig(nil), options.UpstreamServers...),
 	}, nil
 }
 
