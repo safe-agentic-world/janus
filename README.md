@@ -111,7 +111,8 @@ You can also prove:
 1. a normal read succeeds through Nomos
 2. `git status` is allowed
 3. `git push` is denied
-4. a customer-support action like a refund can be routed to `REQUIRE_APPROVAL`
+
+### A customer-support action like a refund can be routed to `REQUIRE_APPROVAL`
 
 
 ## Architecture In One Picture
