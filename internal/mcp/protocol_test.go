@@ -382,6 +382,109 @@ func TestHandleRequestMapsTraversalToNormalizationError(t *testing.T) {
 	}
 }
 
+func TestHandleRequestAdaptsRelativeFsReadPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	resp := server.handleRequest(Request{
+		ID:     "1",
+		Method: "nomos.fs_read",
+		Params: mustJSONBytes(map[string]any{"resource": "README.md"}),
+	})
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+	result := resp.Result.(action.Response)
+	if result.Decision != "ALLOW" || !strings.Contains(result.Output, "hello") {
+		t.Fatalf("expected shorthand read to allow, got %+v", result)
+	}
+}
+
+func TestHandleRequestAdaptsRelativeFsWritePath(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-write","action_type":"fs.write","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"obligations":{"sandbox_mode":"local"}}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	resp := server.handleRequest(Request{
+		ID:     "1",
+		Method: "nomos.fs_write",
+		Params: mustJSONBytes(map[string]any{"resource": "./notes.txt", "content": "hello"}),
+	})
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+	result := resp.Result.(action.Response)
+	if result.Decision != "ALLOW" || result.BytesWritten != len("hello") {
+		t.Fatalf("expected shorthand write to allow, got %+v", result)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "notes.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("unexpected file content %q", string(data))
+	}
+}
+
+func TestHandleRequestShorthandDotEnvStillHitsPolicyDeny(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"deny-env","action_type":"fs.read","resource":"file://workspace/.env","decision":"DENY","principals":["system"],"agents":["nomos"],"environments":["dev"]},{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	resp := server.handleRequest(Request{
+		ID:     "1",
+		Method: "nomos.fs_read",
+		Params: mustJSONBytes(map[string]any{"resource": ".env"}),
+	})
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+	result := resp.Result.(action.Response)
+	if result.Decision != "DENY" {
+		t.Fatalf("expected policy deny for shorthand .env, got %+v", result)
+	}
+}
+
 func TestHandleRequestMapsMissingFilesToNotFound(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
@@ -405,6 +508,32 @@ func TestHandleRequestMapsMissingFilesToNotFound(t *testing.T) {
 	})
 	if resp.Error != "not_found" {
 		t.Fatalf("expected not_found, got %+v", resp)
+	}
+}
+
+func TestHandleRequestRejectsAbsoluteHostPathForFsRead(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	resp := server.handleRequest(Request{
+		ID:     "1",
+		Method: "nomos.fs_read",
+		Params: mustJSONBytes(map[string]any{"resource": `C:\Users\name\secret.txt`}),
+	})
+	if resp.Error != "normalization_error" {
+		t.Fatalf("expected normalization_error, got %+v", resp)
 	}
 }
 
@@ -457,6 +586,48 @@ func TestFramedToolsCallRequireApprovalIncludesApprovalMetadata(t *testing.T) {
 	text := result["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "APPROVAL") || !strings.Contains(text, "approval_id:") || !strings.Contains(text, "approval_fingerprint:") || !strings.Contains(text, "approval_expires_at:") {
 		t.Fatalf("expected approval metadata in tools/call content, got %s", text)
+	}
+}
+
+func TestFramedToolsCallNormalizationErrorIncludesShorthandHint(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	var in bytes.Buffer
+	writeFramedRequest(t, &in, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      9,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "nomos.fs_read",
+			"arguments": map[string]any{"resource": `/etc/passwd`},
+		},
+	})
+	var out bytes.Buffer
+	if err := server.ServeStdio(&in, &out); err != nil {
+		t.Fatalf("serve stdio: %v", err)
+	}
+	reader := bufio.NewReader(bytes.NewReader(out.Bytes()))
+	resp := readFramedResponse(t, reader)
+	result := resp["result"].(map[string]any)
+	if !result["isError"].(bool) {
+		t.Fatalf("expected error result, got %+v", result)
+	}
+	text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "workspace-relative path") || !strings.Contains(text, "file://workspace/README.md") {
+		t.Fatalf("expected shorthand hint in error text, got %q", text)
 	}
 }
 

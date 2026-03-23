@@ -123,7 +123,17 @@ type RedactionConfig struct {
 }
 
 type MCPConfig struct {
-	Enabled bool `json:"enabled"`
+	Enabled         bool                      `json:"enabled"`
+	UpstreamServers []MCPUpstreamServerConfig `json:"upstream_servers,omitempty"`
+}
+
+type MCPUpstreamServerConfig struct {
+	Name      string            `json:"name"`
+	Transport string            `json:"transport"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Workdir   string            `json:"workdir,omitempty"`
 }
 
 type UpstreamRoute struct {
@@ -512,6 +522,36 @@ func (c Config) Validate() error {
 			return errors.New("upstream.routes.path_prefix must start with /")
 		}
 	}
+	if len(c.MCP.UpstreamServers) > 0 {
+		seen := map[string]struct{}{}
+		for _, server := range c.MCP.UpstreamServers {
+			name := strings.TrimSpace(server.Name)
+			if name == "" {
+				return errors.New("mcp.upstream_servers.name is required")
+			}
+			if _, ok := seen[name]; ok {
+				return errors.New("mcp.upstream_servers.name must be unique")
+			}
+			seen[name] = struct{}{}
+			if strings.TrimSpace(server.Transport) != "stdio" {
+				return errors.New("mcp.upstream_servers.transport must be \"stdio\"")
+			}
+			if strings.TrimSpace(server.Command) == "" {
+				return errors.New("mcp.upstream_servers.command is required")
+			}
+			for key := range server.Env {
+				if strings.TrimSpace(key) == "" {
+					return errors.New("mcp.upstream_servers.env keys must be non-empty")
+				}
+			}
+			if value := strings.TrimSpace(server.Workdir); value != "" {
+				info, err := os.Stat(value)
+				if err != nil || !info.IsDir() {
+					return errors.New("mcp.upstream_servers.workdir must be an existing directory")
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -801,6 +841,12 @@ func (c *Config) ResolveRelativePaths(baseDir string) error {
 	c.Approvals.StorePath = resolveRelativePath(absBase, c.Approvals.StorePath)
 	c.Identity.OIDC.PublicKeyPath = resolveRelativePath(absBase, c.Identity.OIDC.PublicKeyPath)
 	c.Audit.Sink = resolveAuditSinkPaths(absBase, c.Audit.Sink)
+	for idx := range c.MCP.UpstreamServers {
+		if hasPathSeparator(c.MCP.UpstreamServers[idx].Command) {
+			c.MCP.UpstreamServers[idx].Command = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].Command)
+		}
+		c.MCP.UpstreamServers[idx].Workdir = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].Workdir)
+	}
 	return nil
 }
 
@@ -900,6 +946,10 @@ func normalizeConfigPathSeparators(value string) string {
 	}
 	normalized := strings.ReplaceAll(value, "\\", "/")
 	return filepath.FromSlash(normalized)
+}
+
+func hasPathSeparator(value string) bool {
+	return strings.Contains(value, "/") || strings.Contains(value, "\\")
 }
 
 func normalizeBundleRole(value string) string {

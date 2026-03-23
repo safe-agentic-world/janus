@@ -26,13 +26,13 @@ Shared quickstart assets used below:
 1. Run a preflight check:
 
 ```powershell
-nomos.exe doctor -c .\examples\quickstart\config.quickstart.json --format json
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
 2. Start the MCP server:
 
 ```powershell
-nomos.exe mcp -c .\examples\quickstart\config.quickstart.json
+nomos mcp -c .\examples\quickstart\config.quickstart.json
 ```
 
 3. Register Nomos in Codex MCP configuration with the checked-in example:
@@ -60,13 +60,13 @@ Troubleshooting:
 1. Run the same preflight:
 
 ```powershell
-nomos.exe doctor -c .\examples\quickstart\config.quickstart.json --format json
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
 2. Start the MCP server:
 
 ```powershell
-nomos.exe mcp -c .\examples\quickstart\config.quickstart.json
+nomos mcp -c .\examples\quickstart\config.quickstart.json
 ```
 
 3. Register Nomos using the checked-in example:
@@ -78,11 +78,18 @@ nomos.exe mcp -c .\examples\quickstart\config.quickstart.json
 - allowed: read `file://workspace/README.md`
 - denied: read `file://workspace/.env`
 
+M41 shorthand note:
+
+- for `nomos.fs_read` and `nomos.fs_write`, common workspace-relative inputs such as `README.md`, `./README.md`, `.env`, or `src/app.py` are now accepted and adapted to canonical `file://workspace/...` resources
+- policy, explain, and audit still operate on the canonical normalized resource
+- absolute host paths and traversal attempts remain rejected
+
 Troubleshooting:
 
 - if Claude Code cannot connect, verify the MCP command path points to `nomos`
 - if the wrong workspace is used, confirm the config file is [config.quickstart.json](../examples/quickstart/config.quickstart.json)
 - if startup fails while loading `examples/policies/safe.yaml`, your installed `nomos` release may be older than the policy language used by the current repo
+- if a file read still returns `normalization_error`, retry with a workspace-relative path like `README.md` or the explicit canonical form `file://workspace/README.md`
 - in unmanaged local sessions, disable direct built-in file tools if you want Nomos to be the practical side-effect boundary
 
 ## OpenAI-Compatible Agent SDK Setup
@@ -95,7 +102,7 @@ Use the runnable local HTTP example:
 1. Start Nomos:
 
 ```powershell
-nomos.exe serve -c .\examples\quickstart\config.quickstart.json
+nomos serve -c .\examples\quickstart\config.quickstart.json
 ```
 
 2. In a second terminal, run:
@@ -140,6 +147,37 @@ nomos mcp -c .\examples\configs\config.example.json
 If you want to override the checked-in example policy set, add:
 - `-p`
 - `.\examples\policies\your-policy-bundle.json`
+
+## Upstream MCP Gateway
+
+Nomos can also sit in front of third-party MCP servers without changing the downstream MCP-native agent.
+
+Use:
+
+- [examples/configs/config.mcp-gateway.example.json](../examples/configs/config.mcp-gateway.example.json)
+- [examples/policies/mcp-gateway.example.yaml](../examples/policies/mcp-gateway.example.yaml)
+- [docs/upstream-mcp-gateway.md](./upstream-mcp-gateway.md)
+
+What this mode does:
+
+- Nomos acts as the MCP server to the agent
+- Nomos acts as an MCP client to configured upstream `stdio` servers
+- forwarded upstream tools appear downstream as `upstream.<server>.<tool>`
+- each forwarded call is evaluated as:
+  - `action_type`: `mcp.call`
+  - `resource`: `mcp://<server>/<tool>`
+
+Example:
+
+```powershell
+nomos mcp -c .\examples\configs\config.mcp-gateway.example.json
+```
+
+In this example:
+
+- `upstream.retail.get_order_details` is allowed
+- `upstream.retail.request_refund` requires approval
+- `upstream.retail.issue_compensation` is denied
 
 ## MCP Runtime UX
 

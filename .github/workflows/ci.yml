@@ -435,51 +435,6 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
-  docker-build:
-    name: Docker Build Validation
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.2
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.0.0
-
-      - name: Build image
-        uses: docker/build-push-action@v7.0.0
-        with:
-          context: .
-          file: ./Dockerfile
-          target: runtime
-          push: false
-          load: true
-          tags: nomos:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Container doctor smoke
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            nomos:ci doctor -c /workspace/examples/quickstart/config.quickstart.json --format json
-
-      - name: Build OPA-enabled image
-        uses: docker/build-push-action@v7.0.0
-        with:
-          context: .
-          file: ./Dockerfile
-          target: runtime-opa
-          push: false
-          load: true
-          tags: nomos:ci-opa
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: OPA binary smoke
-        run: docker run --rm --entrypoint /opa nomos:ci-opa version
-
   release-dry-run:
     name: Release Dry Run
     if: github.event_name == 'pull_request'

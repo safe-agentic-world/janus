@@ -12,7 +12,6 @@ func TestReleaseWorkflowAndDocsStayInSync(t *testing.T) {
 
 	workflow := mustReadFile(t, filepath.Join(root, ".github", "workflows", "release.yml"))
 	releaseVerification := mustReadFile(t, filepath.Join(root, "docs", "release-verification.md"))
-	supplyChain := mustReadFile(t, filepath.Join(root, "docs", "supply-chain-security.md"))
 
 	requiredWorkflowSnippets := []string{
 		"go install github.com/anchore/syft/cmd/syft@v1.24.0",
@@ -67,8 +66,8 @@ func TestReleaseWorkflowAndDocsStayInSync(t *testing.T) {
 		"does not publish container images",
 	}
 	for _, snippet := range requiredSupplyChainClaims {
-		if !strings.Contains(supplyChain, snippet) {
-			t.Fatalf("supply-chain doc missing %q", snippet)
+		if !strings.Contains(releaseVerification, snippet) {
+			t.Fatalf("release verification doc missing supply-chain claim %q", snippet)
 		}
 	}
 }

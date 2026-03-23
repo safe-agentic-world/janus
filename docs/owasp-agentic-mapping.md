@@ -191,7 +191,6 @@ Relevant code and runtime surfaces:
 - `internal/executor/exec.go`
 - `internal/sandbox/sandbox.go`
 - `internal/doctor/doctor.go`
-- `deploy/k8s/strong-guarantee.yaml`
 
 Evidence:
 
@@ -308,7 +307,8 @@ Evidence:
 
 - `internal/gateway/gateway_test.go`
 - `cmd/nomos/main_test.go`
-- `docs/ci-k8s.md`
+- `docs/deployment.md`
+- `docs/strong-guarantee-deployment.md`
 
 Guarantee by environment:
 

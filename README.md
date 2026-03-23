@@ -1,21 +1,36 @@
-<img src="docs/assets/nomos-logo.png" alt="Nomos logo" width="220">
+<div align="center">
+  <table>
+    <tr>
+      <td>
+        <img src="docs/assets/nomos-logo.png" alt="Nomos logo" width="96">
+      </td>
+      <td>
+        <h1>Nomos</h1>
+      </td>
+    </tr>
+  </table>
+</div>
 
-# Nomos
+<div align="center">
+  <h3>Nomos is an execution firewall for AI agents.</h3>
+</div>
 
-[![CI](https://github.com/safe-agentic-world/nomos/actions/workflows/ci.yml/badge.svg)](https://github.com/safe-agentic-world/nomos/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/safe-agentic-world/nomos)](https://github.com/safe-agentic-world/nomos/releases)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/safe-agentic-world/nomos)](./go.mod)
-[![License](https://img.shields.io/github/license/safe-agentic-world/nomos)](./LICENSE)
+<div align="center">
+  <a href="https://github.com/safe-agentic-world/nomos/actions/workflows/ci.yml"><img src="https://github.com/safe-agentic-world/nomos/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/safe-agentic-world/nomos/releases"><img src="https://img.shields.io/github/v/release/safe-agentic-world/nomos" alt="Release"></a>
+  <a href="./go.mod"><img src="https://img.shields.io/github/go-mod/go-version/safe-agentic-world/nomos" alt="Go Version"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/safe-agentic-world/nomos" alt="License"></a>
+</div>
 
-**Nomos is an execution firewall for AI agents.**
+<br>
 
-It sits between agents and **real actions** such as reading files, changing code, running commands, calling APIs, and using credentials. Instead of trusting prompts or hoping the agent behaves, Nomos makes one explicit decision at the **execution boundary**:
+Nomos is an **agent-agnostic** and **model-agnostic** firewall built based on zero trust security principles. It sits between agents and real actions. Instead of trusting prompts or hoping the agent behaves, Nomos makes one explicit decision at the **execution boundary**:
 
 - `ALLOW`
 - `DENY`
 - `REQUIRE_APPROVAL`
 
-Nomos is **agent-agnostic** and **model-agnostic**. You can put it in front of different agent frameworks, different model providers, and different tool runtimes, then shape its behavior with your own **policies** and **configs**.
+ You can put it in front of different agent frameworks, different model providers, and different tool runtimes, then shape its behavior with your own **policies** and **configs**.
 
 
 ## Why Nomos Exists
@@ -27,7 +42,7 @@ Agents can be useful, but they are still one bad tool call away from:
 - changing or deleting files you did not ask it to touch
 - using powerful credentials in ways you never intended
 
-If your agent can still call arbitrary APIs or leak customer data, your safety boundary is **at risk**. **Prompt injection**, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real. It does not control the model's reasoning. It controls what the agent is actually allowed to do.
+If you do not govern agent actions your safety boundary is at risk. **Prompt injection**, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real. It does not restrict the model's reasoning. It controls what the agent is actually allowed to do.
 
 With Nomos:
 
@@ -38,14 +53,6 @@ With Nomos:
 - outputs can be **redacted** and governed actions produce **audit evidence**
 - the same control model works across **MCP** and **HTTP** integrations
 - behavior stays flexible because you shape it with your own **policies** and **configs**
-
-## Demo First
-
-The fastest way to understand Nomos is to watch the **same agent** attempt the **same action** with and without Nomos in front of it.
-
-1. A coding agent tries to read `.env` or run `git push` and Nomos **denies** it.
-2. A customer-support agent tries to issue a refund and Nomos returns **`REQUIRE_APPROVAL`**.
-3. A normal read action succeeds through Nomos, proving it is **governance**, not blanket obstruction.
 
 ## Install
 
@@ -73,6 +80,40 @@ go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
 ```bash
 curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
 ```
+
+## Demo First
+
+### Try A Real Denial Yourself
+
+Use the demo repo and Claude Code to see Nomos deny a sensitive file read:
+
+```powershell
+git clone git@github.com:safe-agentic-world/demo-langchain-nomos.git
+cd demo-langchain-nomos
+claude mcp add --transport stdio --scope local nomos-demo -- nomos mcp -c "nomos\config.claude-demo.json"
+claude mcp list
+```
+
+You should see `nomos-demo`.
+
+Then open Claude in the repo and ask:
+
+```text
+Use Nomos to read .env from the repo root.
+```
+
+Nomos should deny the action.
+
+<img src="docs/assets/claude-demo.png" alt="Claude Code using Nomos to deny a risky action" width="100%">
+
+You can also prove:
+
+1. a normal read succeeds through Nomos
+2. `git status` is allowed
+3. `git push` is denied
+
+### A customer-support action like a refund can be routed to `REQUIRE_APPROVAL`
+
 
 ## Architecture In One Picture
 
@@ -128,12 +169,17 @@ Nomos exposes governed tools such as:
 - `nomos.exec`
 - `nomos.http_request`
 
+For MCP file tools, Nomos accepts canonical resources like `file://workspace/README.md` and now also accepts common workspace-relative shorthands like `README.md` or `./README.md`, which are adapted safely into the canonical internal form.
+
 See:
 
 - [docs/integration-kit.md](./docs/integration-kit.md)
+- [docs/upstream-mcp-gateway.md](./docs/upstream-mcp-gateway.md)
 - [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
 - [examples/local-tooling/claude-code-mcp.json](./examples/local-tooling/claude-code-mcp.json)
 - [examples/local-tooling/codex.mcp.json](./examples/local-tooling/codex.mcp.json)
+
+Nomos can also run as an additive MCP governance gateway in front of configured upstream MCP servers. In that mode, downstream agents keep their MCP client architecture while Nomos governs forwarded tools as `mcp.call` actions.
 
 ### HTTP
 
@@ -227,7 +273,6 @@ This matters because a local demo proves Nomos can govern the **path it sees**, 
 See:
 
 - [docs/assurance-levels.md](./docs/assurance-levels.md)
-- [docs/guarantees.md](./docs/guarantees.md)
 - [docs/strong-guarantee-deployment.md](./docs/strong-guarantee-deployment.md)
 - [docs/reference-architecture.md](./docs/reference-architecture.md)
 
@@ -319,8 +364,6 @@ See:
 See:
 
 - [docs/use-cases.md](./docs/use-cases.md)
-- [deploy/ci/github-actions-quickstart.yml](./deploy/ci/github-actions-quickstart.yml)
-- [deploy/ci/github-actions-hardened.yml](./deploy/ci/github-actions-hardened.yml)
 
 
 ## Docs Map
@@ -354,7 +397,6 @@ Security and standards:
 
 - [docs/threat-model.md](./docs/threat-model.md)
 - [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
-- [docs/supply-chain-security.md](./docs/supply-chain-security.md)
 - [docs/release-verification.md](./docs/release-verification.md)
 - [docs/owasp-agentic-mapping.md](./docs/owasp-agentic-mapping.md)
 

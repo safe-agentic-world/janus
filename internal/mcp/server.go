@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/approval"
@@ -21,6 +22,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/executor"
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/service"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
@@ -37,6 +39,7 @@ type Server struct {
 	policyBundleSources []string
 	assuranceLevel      string
 	upstreamRoutes      []UpstreamRoute
+	upstreamRegistry    *upstreamRegistry
 	logger              *runtimeLogger
 	pid                 int
 }
@@ -162,6 +165,10 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	svc := service.New(engine, reader, writerExec, patcher, execRunner, httpRunner, recorder, logger.redactor, approvalStore, nil, sandboxProfile, nil)
 	svc.SetSandboxEvidence(runtimeOptions.SandboxEvidence, []string{workspaceRoot})
 	svc.SetExecCompatibilityMode(runtimeOptions.ExecCompatibilityMode)
+	upstreamRegistry, err := loadUpstreamRegistry(runtimeOptions.UpstreamServers)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		service:             svc,
 		approvals:           approvalStore,
@@ -174,6 +181,7 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		policyBundleSources: policy.BundleSourceLabels(bundle),
 		assuranceLevel:      "NONE",
 		upstreamRoutes:      append([]UpstreamRoute(nil), runtimeOptions.UpstreamRoutes...),
+		upstreamRegistry:    upstreamRegistry,
 		logger:              logger,
 		pid:                 os.Getpid(),
 	}, nil
@@ -368,7 +376,7 @@ func (s *Server) handleToolsCall(req rpcRequest) (string, error) {
 	}
 	legacyResp := s.handleRequest(legacyReq)
 	if legacyResp.Error != "" {
-		return "", errors.New(legacyResp.Error)
+		return "", errors.New(toolErrorMessage(name, legacyResp.Error))
 	}
 	return formatToolResult(name, legacyResp.Result)
 }
@@ -401,15 +409,23 @@ func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
 }
 
 func (s *Server) toolsList() []map[string]any {
-	return []map[string]any{
+	tools := []map[string]any{
 		{"name": "nomos.capabilities", "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "additionalProperties": false}},
-		{"name": "nomos.fs_read", "description": "Read a workspace file. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": "nomos.fs_write", "description": "Write a workspace file. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}},
+		{"name": "nomos.fs_read", "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
+		{"name": "nomos.fs_write", "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}},
 		{"name": "nomos.apply_patch", "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}},
 		{"name": "nomos.exec", "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}},
 		{"name": "nomos.http_request", "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
 		{"name": "repo.validate_change_set", "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}},
 	}
+	for _, tool := range s.upstreamRegistry.tools {
+		tools = append(tools, map[string]any{
+			"name":        tool.DownstreamName,
+			"description": forwardedToolDescription(tool),
+			"inputSchema": tool.InputSchema,
+		})
+	}
+	return tools
 }
 
 func readFramedPayload(reader *bufio.Reader) ([]byte, error) {
@@ -499,6 +515,9 @@ func (s *Server) handleRequest(req Request) Response {
 		case "repo.validate_change_set":
 			return s.handleValidateChangeSet(req)
 		default:
+			if s.isForwardedTool(req.Method) {
+				return s.handleForwardedTool(req)
+			}
 			return Response{ID: req.ID, Error: "method_not_found"}
 		}
 	}
@@ -508,11 +527,15 @@ func (s *Server) handleRequest(req Request) Response {
 	if err := dec.Decode(&params); err != nil || params.Resource == "" {
 		return Response{ID: req.ID, Error: "invalid_params"}
 	}
+	resource, err := adaptMCPFileResource(params.Resource)
+	if err != nil {
+		return Response{ID: req.ID, Error: classifyToolError(err)}
+	}
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + req.ID,
 		ActionType:    "fs.read",
-		Resource:      params.Resource,
+		Resource:      resource,
 		Params:        []byte(`{}`),
 		TraceID:       "mcp_" + req.ID,
 		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
@@ -528,6 +551,68 @@ func (s *Server) handleRequest(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
+func (s *Server) isForwardedTool(name string) bool {
+	if s == nil || s.upstreamRegistry == nil {
+		return false
+	}
+	_, ok := s.upstreamRegistry.toolsByName[name]
+	return ok
+}
+
+func (s *Server) handleForwardedTool(req Request) Response {
+	tool, ok := s.upstreamRegistry.toolsByName[req.Method]
+	if !ok {
+		return Response{ID: req.ID, Error: "method_not_found"}
+	}
+	args := bytes.TrimSpace(req.Params)
+	if len(args) == 0 {
+		args = []byte(`{}`)
+	}
+	var check map[string]any
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&check); err != nil {
+		return Response{ID: req.ID, Error: "invalid_params"}
+	}
+	approvalID := extractForwardedApprovalID(check)
+	delete(check, "approval_id")
+	sanitizedArgs := mustJSONBytes(check)
+	actionReq := action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "mcp_" + req.ID,
+		ActionType:    "mcp.call",
+		Resource:      "mcp://" + tool.ServerName + "/" + tool.ToolName,
+		Params: mustJSONBytes(map[string]any{
+			"upstream_server": tool.ServerName,
+			"upstream_tool":   tool.ToolName,
+			"tool_arguments":  check,
+		}),
+		TraceID: "mcp_" + req.ID,
+		Context: action.Context{Extensions: buildActionExtensions(approvalID)},
+	}
+	act, err := action.ToAction(actionReq, s.identity)
+	if err != nil {
+		return Response{ID: req.ID, Error: "validation_error"}
+	}
+	resp, err := s.service.Process(act)
+	if err != nil {
+		return Response{ID: req.ID, Error: classifyToolError(err)}
+	}
+	if resp.Decision != policy.DecisionAllow {
+		return Response{ID: req.ID, Result: resp}
+	}
+	config := s.upstreamRegistry.serversByName[tool.ServerName]
+	output, err := callUpstreamTool(config, tool.ToolName, sanitizedArgs)
+	if err != nil {
+		return Response{ID: req.ID, Error: "execution_error"}
+	}
+	resp.ExecutionMode = "mcp_forwarded"
+	resp.ReportPath = ""
+	resp.Output, resp.Truncated = redactAndLimitForwardedOutput(s.logger.redactor, output, resp.Obligations)
+	resp.Obligations = nil
+	return Response{ID: req.ID, Result: resp}
+}
+
 func (s *Server) handleFSWrite(req Request) Response {
 	if !s.toolEnabled("nomos.fs_write") {
 		return Response{ID: req.ID, Error: "denied_policy"}
@@ -538,11 +623,15 @@ func (s *Server) handleFSWrite(req Request) Response {
 	if err := dec.Decode(&params); err != nil || params.Resource == "" || params.Content == "" {
 		return Response{ID: req.ID, Error: "invalid_params"}
 	}
+	resource, err := adaptMCPFileResource(params.Resource)
+	if err != nil {
+		return Response{ID: req.ID, Error: classifyToolError(err)}
+	}
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + req.ID,
 		ActionType:    "fs.write",
-		Resource:      params.Resource,
+		Resource:      resource,
 		Params:        mustJSONBytes(map[string]string{"content": params.Content}),
 		TraceID:       "mcp_" + req.ID,
 		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
@@ -674,7 +763,41 @@ func (s *Server) handleCapabilities(req Request) Response {
 	result.AssuranceLevel = s.assuranceLevel
 	result.MediationNotice = capabilityMediationNotice(s.assuranceLevel)
 	result = service.FinalizeCapabilityEnvelope(result, s.identity, s.policyBundleHash)
-	return Response{ID: req.ID, Result: result}
+	if len(s.upstreamRegistry.tools) == 0 {
+		return Response{ID: req.ID, Result: result}
+	}
+	forwarded := make([]map[string]any, 0, len(s.upstreamRegistry.tools))
+	for _, tool := range s.upstreamRegistry.tools {
+		forwarded = append(forwarded, map[string]any{
+			"name":            tool.DownstreamName,
+			"upstream_server": tool.ServerName,
+			"upstream_tool":   tool.ToolName,
+			"action_type":     "mcp.call",
+			"resource":        "mcp://" + tool.ServerName + "/" + tool.ToolName,
+		})
+	}
+	return Response{ID: req.ID, Result: map[string]any{
+		"contract_version":        result.ContractVersion,
+		"capability_set_hash":     result.CapabilitySetHash,
+		"advisory_only":           result.AdvisoryOnly,
+		"authorization_notice":    result.AuthorizationNotice,
+		"enabled_tools":           result.EnabledTools,
+		"immediate_tools":         result.ImmediateTools,
+		"approval_gated_tools":    result.ApprovalGatedTools,
+		"mixed_tools":             result.MixedTools,
+		"unavailable_tools":       result.UnavailableTools,
+		"advertised_tools":        result.AdvertisedTools,
+		"tool_states":             result.ToolStates,
+		"tool_advertisement_mode": result.ToolAdvertisementMode,
+		"sandbox_modes":           result.SandboxModes,
+		"network_mode":            result.NetworkMode,
+		"output_max_bytes":        result.OutputMaxBytes,
+		"output_max_lines":        result.OutputMaxLines,
+		"approvals_enabled":       result.ApprovalsEnabled,
+		"assurance_level":         result.AssuranceLevel,
+		"mediation_notice":        result.MediationNotice,
+		"forwarded_tools":         forwarded,
+	}}
 }
 
 func (s *Server) handleValidateChangeSet(req Request) Response {
@@ -745,6 +868,56 @@ func buildActionExtensions(approvalID string) map[string]json.RawMessage {
 	return extensions
 }
 
+func extractForwardedApprovalID(payload map[string]any) string {
+	value, ok := payload["approval_id"]
+	if !ok {
+		return ""
+	}
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
+func adaptMCPFileResource(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("resource is empty")
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		return trimmed, nil
+	}
+	if strings.Contains(trimmed, "://") {
+		return "", errors.New("resource must be a workspace-relative path or file://workspace/... resource")
+	}
+	if isAbsoluteHostPath(trimmed) {
+		return "", errors.New("absolute host paths are not allowed; use a workspace-relative path or file://workspace/... resource")
+	}
+	normalized := strings.ReplaceAll(trimmed, "\\", "/")
+	for strings.HasPrefix(normalized, "./") {
+		normalized = strings.TrimPrefix(normalized, "./")
+	}
+	if normalized == "" || normalized == "." {
+		return "", errors.New("resource is empty")
+	}
+	return "file://workspace/" + normalized, nil
+}
+
+func isAbsoluteHostPath(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "\\") {
+		return true
+	}
+	if len(trimmed) >= 3 && trimmed[1] == ':' {
+		drive := trimmed[0]
+		if (drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z') {
+			return trimmed[2] == '\\' || trimmed[2] == '/'
+		}
+	}
+	return false
+}
+
 type noopRecorder struct{}
 
 func (noopRecorder) WriteEvent(_ audit.Event) error { return nil }
@@ -763,6 +936,8 @@ func classifyToolError(err error) string {
 		strings.Contains(msg, "cwd escape"),
 		strings.Contains(msg, "unsupported resource"),
 		strings.Contains(msg, "invalid resource uri"),
+		strings.Contains(msg, "workspace-relative path"),
+		strings.Contains(msg, "absolute host paths"),
 		strings.Contains(msg, "encoded separators"),
 		strings.Contains(msg, "userinfo is not allowed"),
 		strings.Contains(msg, "url host is required"),
@@ -774,6 +949,103 @@ func classifyToolError(err error) string {
 	default:
 		return "execution_error"
 	}
+}
+
+func toolErrorMessage(method, code string) string {
+	if code != "normalization_error" {
+		return code
+	}
+	switch method {
+	case "nomos.fs_read", "nomos.fs_write":
+		return "normalization_error: use a workspace-relative path like README.md or src/app.py, or a canonical resource like file://workspace/README.md"
+	default:
+		return code
+	}
+}
+
+func forwardedToolDescription(tool upstreamTool) string {
+	description := strings.TrimSpace(tool.Description)
+	if description == "" {
+		description = "Forwarded upstream MCP tool."
+	}
+	return description + " Governed by Nomos before forwarding to upstream server " + strconv.Quote(tool.ServerName) + "."
+}
+
+func redactAndLimitForwardedOutput(redactor *redact.Redactor, text string, obligations map[string]any) (string, bool) {
+	if redactor == nil {
+		redactor = redact.DefaultRedactor()
+	}
+	out := redactor.RedactText(text)
+	truncated := false
+	if maxBytes, ok := forwardedIntObligation(obligations["output_max_bytes"]); ok && maxBytes >= 0 && len(out) > maxBytes {
+		out = trimToBytes(out, maxBytes)
+		truncated = true
+	}
+	if maxLines, ok := forwardedIntObligation(obligations["output_max_lines"]); ok && maxLines >= 0 {
+		limited, trimmed := trimToLines(out, maxLines)
+		out = limited
+		if trimmed {
+			truncated = true
+		}
+	}
+	return out, truncated
+}
+
+func forwardedIntObligation(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
+}
+
+func trimToBytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	cut := value[:limit]
+	for !utf8.ValidString(cut) && len(cut) > 0 {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
+}
+
+func trimToLines(value string, maxLines int) (string, bool) {
+	if maxLines <= 0 {
+		if value == "" {
+			return value, false
+		}
+		return "", true
+	}
+	if value == "" {
+		return value, false
+	}
+	lineCount := 0
+	for idx, r := range value {
+		if lineCount >= maxLines {
+			return value[:idx], true
+		}
+		if r == '\n' {
+			lineCount++
+		}
+	}
+	return value, false
 }
 
 func validateUpstreamRoute(routes []UpstreamRoute, resource, method string) error {

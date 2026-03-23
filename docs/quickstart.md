@@ -20,7 +20,7 @@ go install ./cmd/nomos
 ## 2. Run Deterministic Preflight
 
 ```powershell
-nomos.exe doctor -c .\examples\quickstart\config.quickstart.json --format json
+nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
 Expected result:
@@ -33,7 +33,7 @@ Audit output for the quickstart uses `stdout`, so the same terminal shows readin
 ## 3. Verify One Allowed Action
 
 ```powershell
-nomos.exe policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\examples\policies\safe.yaml
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\examples\policies\safe.yaml
 ```
 
 Expected result:
@@ -43,7 +43,7 @@ Expected result:
 ## 4. Verify One Denied Action
 
 ```powershell
-nomos.exe policy test --action .\examples\quickstart\actions\deny-env.json --bundle .\examples\policies\safe.yaml
+nomos policy test --action .\examples\quickstart\actions\deny-env.json --bundle .\examples\policies\safe.yaml
 ```
 
 Expected result:
@@ -53,7 +53,7 @@ Expected result:
 ## 5. Start The HTTP Gateway
 
 ```powershell
-nomos.exe serve -c .\examples\quickstart\config.quickstart.json
+nomos serve -c .\examples\quickstart\config.quickstart.json
 ```
 
 The gateway listens on `http://127.0.0.1:8080`.
@@ -120,6 +120,4 @@ See [operator-ui.md](./operator-ui.md).
 - Codex and Claude Code MCP setup: [integration-kit.md](./integration-kit.md)
 - HTTP SDK reference: [http-sdk.md](./http-sdk.md)
 - Operator UI details: [operator-ui.md](./operator-ui.md)
-- Docker demo: `docker compose -f .\deploy\docker-compose\docker-compose.yml up --build`
-- Kubernetes install: [deploy/helm/nomos/README.md](../deploy/helm/nomos/README.md)
 

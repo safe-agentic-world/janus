@@ -468,10 +468,6 @@ func TestM17ReferenceArtifactsExist(t *testing.T) {
 		filepath.Join("docs", "reference-architecture.md"),
 		filepath.Join("docs", "strong-guarantee-deployment.md"),
 		filepath.Join("docs", "egress-and-identity.md"),
-		filepath.Join("deploy", "ci", "github-actions-hardened.yml"),
-		filepath.Join("deploy", "k8s", "networkpolicy.yaml"),
-		filepath.Join("deploy", "k8s", "serviceaccount.yaml"),
-		filepath.Join("deploy", "k8s", "strong-guarantee.yaml"),
 	}
 	for _, path := range required {
 		if _, err := os.Stat(filepath.Clean(filepath.Join("..", "..", path))); err != nil {

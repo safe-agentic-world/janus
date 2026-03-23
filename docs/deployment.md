@@ -79,50 +79,11 @@ For details, see:
 
 - `docs/operator-ui.md`
 
-## Container Image
+## Container Packaging
 
-A production-oriented container build is provided via `Dockerfile`:
-- multi-stage build
-- distroless runtime image
-- non-root user
+Nomos does not currently publish or maintain an official container image path.
 
-Build:
-
-```powershell
-docker build -t nomos:local .
-```
-
-Multi-arch build example (`docker buildx`):
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t nomos:local .
-```
-
-OPA-enabled variant:
-
-```bash
-docker build --target runtime-opa -t nomos:opa-local .
-```
-
-This variant includes the OPA binary at `/opa` so `policy.opa.enabled=true` can run inside the container.
-
-Run:
-
-```powershell
-docker run --rm -p 8080:8080 -v ${PWD}:/workspace nomos:local serve -c /workspace/examples/configs/config.example.json
-```
-
-If you want to override the checked-in example policy set, add:
-
-```powershell
-docker run --rm -p 8080:8080 -v ${PWD}:/workspace nomos:local serve -c /workspace/examples/configs/config.example.json -p /workspace/examples/policies/your-policy-bundle.json
-```
-
-Validate OPA binary presence in the OPA-enabled image:
-
-```bash
-docker run --rm --entrypoint /opa nomos:opa-local version
-```
+If you deploy Nomos in Kubernetes or another containerized environment today, treat image packaging as an operator-managed concern and build or supply your own image out of band.
 
 ## Graceful Shutdown
 
@@ -163,40 +124,19 @@ Checks:
 - bypass suite
 - race tests + `nomos doctor` smoke
 - `govulncheck`
-- container image build (`docker buildx`)
 - release dry-run build on pull requests
 - CodeQL analysis on `main` and pull requests
 
 ## Kubernetes Readiness
 
-Reference manifests in `deploy/k8s/`:
+Nomos can be deployed in Kubernetes, but this repository does not currently ship checked-in manifests or Helm packaging.
 
-- `configmap.yaml`
-- `deployment.yaml`
-- `service.yaml`
-- `networkpolicy.yaml`
-- `serviceaccount.yaml`
-- `strong-guarantee.yaml`
-
-Apply:
-
-```powershell
-kubectl apply -f deploy/k8s/configmap.yaml
-kubectl apply -f deploy/k8s/deployment.yaml
-kubectl apply -f deploy/k8s/service.yaml
-```
-
-For the stronger reference posture:
-
-```powershell
-kubectl apply -f deploy/k8s/strong-guarantee.yaml
-```
+If you deploy Nomos in Kubernetes today, treat the manifests, image packaging, workload identity wiring, and network boundary controls as operator-managed concerns.
 
 Design notes:
 
-- stateless mode enabled in sample config
-- readiness/liveness probes on `/healthz`
-- resource requests/limits set
-- multiple replicas for horizontal scaling
-- graceful termination via deployment `terminationGracePeriodSeconds`
+- stateless mode is the preferred scale-out posture
+- readiness/liveness should target `/healthz`
+- multiple replicas and graceful termination belong at the workload layer
+- strong-guarantee claims depend on real runtime controls, not config intent alone
 - release path is workflow-managed: successful `main` CI can tag, publish a GitHub Release, and update Homebrew (`safe-agentic-world/homebrew-nomos`) and Scoop (`safe-agentic-world/scoop-nomos`) manifests

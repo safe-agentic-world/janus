@@ -1,10 +1,10 @@
 # Egress And Identity
 
-This document explains how the reference deployment combines environment controls and Nomos controls.
+This document explains how the reference architecture combines environment controls and Nomos controls.
 
 ## Egress Enforcement
 
-The reference deployment assumes:
+The reference architecture assumes:
 
 - agent workloads have default-deny egress
 - only Nomos is allowed to reach approved upstream destinations
@@ -17,7 +17,7 @@ This creates a layered model:
 
 ## Identity Enforcement
 
-The reference deployment uses workload identity to bind the runtime to an operator-controlled identity source.
+The reference architecture uses workload identity to bind the runtime to an operator-controlled identity source.
 
 For the strong-guarantee posture, the readiness signal is OIDC enabled in Nomos config:
 
@@ -42,12 +42,12 @@ The reference architecture is therefore explicitly a combined control plane:
 
 ## Explicit Out-Of-Scope Bypass Conditions
 
-The current strong-guarantee reference does **not** claim protection if:
+The current strong-guarantee posture does **not** claim protection if:
 
 - the Kubernetes cluster does not actually enforce `NetworkPolicy`
-- the runtime allows privileged pods or host-level escape paths outside the reference constraints
+- the runtime allows privileged pods or host-level escape paths outside the required constraints
 - the operator injects direct credentials into the agent workload
-- the deployment diverges from the checked-in hardening constraints without equivalent replacements
+- the deployment diverges from the required hardening constraints without equivalent replacements
 - the host or cluster control plane itself is already compromised
 
 In those cases, Nomos should be treated as a deterministic authorization layer running inside a weaker outer boundary, not as a complete strong-guarantee deployment.

@@ -1,6 +1,6 @@
 # Strong-Guarantee Deployment
 
-This is the golden path for a reproducible strong-guarantee deployment of Nomos.
+This document describes the runtime conditions Nomos needs before `STRONG` is a defensible claim. It no longer assumes checked-in manifests or deployment templates.
 
 ## Prerequisites
 
@@ -8,41 +8,28 @@ You need:
 
 - a Kubernetes cluster that enforces `NetworkPolicy`
 - a TLS secret named `nomos-tls`
-- a Nomos image available as `nomos:local` or an equivalent image override
+- an operator-built Nomos image available to the cluster
 - a runtime where the operator controls network, identity, and pod security settings
 
 If the cluster does not enforce `NetworkPolicy`, this deployment does **not** provide a strong guarantee.
 
 ## Kubernetes Golden Path
 
-1. Build the image:
+1. Build the Nomos binary or produce the container image through your own packaging pipeline.
 
-```bash
-go build -o ./bin/nomos ./cmd/nomos
-docker build -t nomos:local .
-```
-
-2. Apply the single reference manifest:
-
-```bash
-kubectl apply -f deploy/k8s/strong-guarantee.yaml
-```
-
-The manifest deploys:
+2. Deploy operator-managed workloads for:
 
 - the Nomos gateway
-- a locked-down `sample-agent` pod
-- a Nomos-only egress policy for the sample agent
+- the locked-down agent workload
+- a Nomos-only egress policy for that agent
 - a restricted Nomos egress policy for approved upstream access
 
-3. Confirm health:
+3. Confirm health and outer-boundary posture using your platform tooling. At minimum, verify:
 
-```bash
-kubectl get pods -l app=nomos
-kubectl get pods -l app=sample-agent
-kubectl get networkpolicy nomos-egress
-kubectl get networkpolicy sample-agent-egress
-```
+- the Nomos workload is healthy
+- the agent workload is healthy
+- direct agent egress is blocked by default
+- only Nomos can reach approved upstream destinations
 
 4. Run doctor against the strong-guarantee config:
 
@@ -67,57 +54,38 @@ The strong-guarantee readiness signal is intentionally conservative. For a deplo
 - shared API keys disabled
 - durable audit sink configured
 
-5. Verify the outer boundary from the sample agent:
+5. Verify the outer boundary from the agent workload:
 
-Direct egress to arbitrary hosts should fail:
+Expected checks:
 
-```bash
-kubectl exec deploy/sample-agent -- wget -T 5 -qO- https://example.com || true
-```
-
-Access to the Nomos service should remain possible:
-
-```bash
-kubectl exec deploy/sample-agent -- wget -T 5 -qO- http://nomos:8080/healthz
-```
-
-The sample agent should not have an automounted service account token:
-
-```bash
-kubectl exec deploy/sample-agent -- sh -c 'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token'
-```
-
-The sample agent should run as non-root:
-
-```bash
-kubectl exec deploy/sample-agent -- id -u
-```
-
-The expected result is a non-zero UID.
+- direct egress to arbitrary hosts fails
+- access to the Nomos service remains possible
+- the agent workload does not receive an automounted service account token unless explicitly required
+- the agent workload runs as non-root
 
 ## CI Golden Path
 
-Use the reference workflow in `deploy/ci/github-actions-hardened.yml` as the hardened baseline:
+Use your CI platform's hardened workflow as the baseline:
 
 - Nomos is the policy gate for governed actions
 - `nomos doctor` runs in strong-guarantee mode before agent tasks begin
 - workload identity should come from the CI platform identity provider rather than long-lived shared keys
 
-The checked-in CI example validates the strong-guarantee config shape and readiness signals. It is still the operator's job to ensure the CI runtime enforces the outer network and credential boundary.
+It is the operator's job to ensure the CI runtime enforces the outer network and credential boundary.
 
 The evidence block is explicit by design. It exists so `STRONG` remains an earned claim backed by verifiable runtime conditions, not by config intent alone.
 
 ## Operational Expectations
 
 - Direct agent egress is blocked by runtime network policy.
-- The sample agent can only egress to the Nomos gateway on TCP 8080.
+- The agent workload can only egress to the Nomos gateway and approved downstream destinations.
 - Enterprise identity is asserted by the platform.
 - Agent-visible effects occur only through Nomos-mediated actions.
 - Denied bypass attempts are auditable.
 
 ## Scope
 
-This provides a reference deployment, a reusable validation harness, and conservative readiness checks.
+This provides a runtime contract and conservative readiness checks.
 
 It does not claim:
 
@@ -125,4 +93,4 @@ It does not claim:
 - enforcement on unmanaged developer machines
 - complete mediation outside operator-controlled runtimes
 
-Treat this document as the source of truth for what the current strong-guarantee reference actually enforces.
+Treat this document as the source of truth for the current strong-guarantee requirements, not as a promise of shipped deployment assets.
