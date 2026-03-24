@@ -20,7 +20,8 @@ This is the 2026 MCP-native architecture path where:
 - configured upstream MCP servers over `stdio`
 - standards-compatible upstream stdio interoperability with common newline-delimited JSON MCP server implementations
 - compatibility fallback for framed upstream MCP responses when encountered
-- deterministic downstream naming: `upstream.<server>.<tool>`
+- deterministic downstream naming using a conservative cross-vendor-safe character set:
+  - `upstream_<server>_<tool>`
 - policy-visible forwarded action identity:
   - `action_type`: `mcp.call`
   - `resource`: `mcp://<server>/<tool>`
@@ -73,12 +74,14 @@ rules:
 
 If the upstream server is named `retail` and it exposes a tool named `request_refund`, Nomos advertises:
 
-- `upstream.retail.request_refund`
+- `upstream_retail_request_refund`
 
 That tool maps deterministically to:
 
 - `action_type`: `mcp.call`
 - `resource`: `mcp://retail/request_refund`
+
+Only the client-facing forwarded tool name is adapted for broad MCP client and model-provider compatibility. Policy, approvals, explain, and audit continue to key off the canonical `mcp://<server>/<tool>` resource identity.
 
 ## How Forwarding Works
 

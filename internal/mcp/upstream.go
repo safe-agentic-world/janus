@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -322,7 +323,39 @@ func stringifyUpstreamCallResult(result any) (string, error) {
 }
 
 func downstreamToolName(serverName, toolName string) string {
-	return "upstream." + serverName + "." + toolName
+	base := "upstream_" + sanitizeForwardedNamePart(serverName) + "_" + sanitizeForwardedNamePart(toolName)
+	base = strings.Trim(base, "_")
+	if base == "" {
+		return "upstream_tool"
+	}
+	return base
+}
+
+func sanitizeForwardedNamePart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "tool"
+	}
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_':
+			b.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out != "" {
+		return out
+	}
+	sum := sha256.Sum256([]byte(value))
+	return "tool_" + fmt.Sprintf("%x", sum[:4])
 }
 
 func cloneMap(in map[string]any) map[string]any {

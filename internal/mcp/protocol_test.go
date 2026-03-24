@@ -110,13 +110,30 @@ func TestToolsListRemainsStaticWhenPolicyDoesNotEnableAListedTool(t *testing.T) 
 	tools := server.toolsList()
 	foundHTTP := false
 	for _, tool := range tools {
-		if tool["name"] == "nomos.http_request" {
+		if tool["name"] == "nomos_http_request" {
 			foundHTTP = true
 			break
 		}
 	}
 	if !foundHTTP {
-		t.Fatalf("expected static tools/list to advertise nomos.http_request, got %+v", tools)
+		t.Fatalf("expected static tools/list to advertise nomos_http_request, got %+v", tools)
+	}
+	foundCapabilities := false
+	for _, tool := range tools {
+		if tool["name"] != "nomos_capabilities" {
+			continue
+		}
+		foundCapabilities = true
+		schema, ok := tool["inputSchema"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected capabilities input schema map, got %+v", tool["inputSchema"])
+		}
+		if _, ok := schema["properties"].(map[string]any); !ok {
+			t.Fatalf("expected capabilities schema to expose empty properties for compatibility, got %+v", schema)
+		}
+	}
+	if !foundCapabilities {
+		t.Fatalf("expected static tools/list to advertise nomos_capabilities, got %+v", tools)
 	}
 
 	resp := server.handleCapabilities(Request{ID: "1", Method: "nomos.capabilities"})
@@ -175,6 +192,85 @@ func TestLineDelimitedRPCInitialize(t *testing.T) {
 	}
 }
 
+func TestLineDelimitedRPCToolsList(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	in := bytes.NewBufferString("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n")
+	var out bytes.Buffer
+	if err := server.ServeStdio(in, &out); err != nil {
+		t.Fatalf("serve stdio: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode line-delimited tools/list response: %v body=%q", err, out.String())
+	}
+	if resp["error"] != nil {
+		t.Fatalf("unexpected tools/list error: %+v", resp["error"])
+	}
+	result := resp["result"].(map[string]any)
+	tools := result["tools"].([]any)
+	if len(tools) == 0 {
+		t.Fatalf("expected tools/list content, got %+v", result)
+	}
+}
+
+func TestLineDelimitedRPCToolsCallFsRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	in := bytes.NewBufferString("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"nomos_fs_read\",\"arguments\":{\"resource\":\"file://workspace/README.md\"}}}\n")
+	var out bytes.Buffer
+	if err := server.ServeStdio(in, &out); err != nil {
+		t.Fatalf("serve stdio: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode line-delimited tools/call response: %v body=%q", err, out.String())
+	}
+	result := resp["result"].(map[string]any)
+	if result["isError"].(bool) {
+		t.Fatalf("expected successful tools/call response: %+v", result)
+	}
+	content := result["content"].([]any)
+	if len(content) == 0 {
+		t.Fatalf("expected tools/call content: %+v", result)
+	}
+	text := content[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "ALLOW") || !strings.Contains(text, "hello") {
+		t.Fatalf("expected line-delimited tools/call content, got %q", text)
+	}
+}
+
 func TestLineDelimitedLegacyRequestStillUsesLegacyEnvelope(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
@@ -206,6 +302,32 @@ func TestLineDelimitedLegacyRequestStillUsesLegacyEnvelope(t *testing.T) {
 	}
 	if resp["error"] != nil {
 		t.Fatalf("unexpected legacy error: %+v", resp["error"])
+	}
+}
+
+func TestLineDelimitedRPCNotificationWritesNoNullResponse(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServer(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	in := bytes.NewBufferString("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n")
+	var out bytes.Buffer
+	if err := server.ServeStdio(in, &out); err != nil {
+		t.Fatalf("serve stdio: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("expected no notification response, got %q", out.String())
 	}
 }
 

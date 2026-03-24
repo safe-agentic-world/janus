@@ -214,44 +214,24 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 	defer writer.Flush()
 	s.logger.ReadyBanner(s.identity.Environment, s.policyBundleHash, s.policyBundleSources, version.Current().Version, s.pid)
 	for {
-		peek, err := reader.Peek(1)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+		payload, mode, readErr := readStdioPayload(reader)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
 				return nil
 			}
-			s.logger.Error("mcp stdio read failure: " + err.Error())
-			return err
+			s.logger.Error("mcp stdio read failure: " + readErr.Error())
+			return readErr
 		}
-		if len(peek) == 0 {
-			continue
-		}
-		if peek[0] == '{' {
-			line, err := reader.ReadBytes('\n')
-			if err != nil && !errors.Is(err, io.EOF) {
-				s.logger.Error("mcp stdio line read failure: " + err.Error())
-				return err
-			}
-			line = bytes.TrimSpace(line)
-			if len(line) == 0 {
-				if errors.Is(err, io.EOF) {
-					return nil
-				}
+		if mode == stdioModeLine {
+			resp := s.handleLinePayload(payload)
+			if resp == nil {
 				continue
 			}
-			resp := s.handleLinePayload(line)
 			if writeErr := writeJSONLine(writer, resp); writeErr != nil {
 				s.logger.Error("mcp stdio line write failure: " + writeErr.Error())
 				return writeErr
 			}
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
 			continue
-		}
-		payload, readErr := readFramedPayload(reader)
-		if readErr != nil {
-			s.logger.Error("mcp stdio framed read failure: " + readErr.Error())
-			return readErr
 		}
 		resp := s.handleRPCPayload(payload)
 		if resp == nil {
@@ -264,9 +244,55 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 	}
 }
 
+type stdioMode string
+
+const (
+	stdioModeLine   stdioMode = "line"
+	stdioModeFramed stdioMode = "framed"
+)
+
+func readStdioPayload(reader *bufio.Reader) ([]byte, stdioMode, error) {
+	for {
+		peek, err := reader.Peek(1)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(peek) == 0 {
+			continue
+		}
+		switch peek[0] {
+		case '\r', '\n', ' ', '\t':
+			if _, err := reader.ReadByte(); err != nil {
+				return nil, "", err
+			}
+			continue
+		case '{', '[':
+			line, err := reader.ReadBytes('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, "", err
+			}
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				if errors.Is(err, io.EOF) {
+					return nil, "", io.EOF
+				}
+				continue
+			}
+			return line, stdioModeLine, nil
+		default:
+			payload, err := readFramedPayload(reader)
+			return payload, stdioModeFramed, err
+		}
+	}
+}
+
 func (s *Server) handleLinePayload(line []byte) any {
 	if isRPCPayload(line) {
-		return s.handleRPCPayload(line)
+		resp := s.handleRPCPayload(line)
+		if resp == nil {
+			return nil
+		}
+		return resp
 	}
 	return s.handleLegacyLine(line)
 }
@@ -371,14 +397,14 @@ func (s *Server) handleToolsCall(req rpcRequest) (string, error) {
 	}
 	legacyReq := Request{
 		ID:     string(req.ID),
-		Method: name,
+		Method: canonicalToolName(name),
 		Params: args,
 	}
 	legacyResp := s.handleRequest(legacyReq)
 	if legacyResp.Error != "" {
-		return "", errors.New(toolErrorMessage(name, legacyResp.Error))
+		return "", errors.New(toolErrorMessage(canonicalToolName(name), legacyResp.Error))
 	}
-	return formatToolResult(name, legacyResp.Result)
+	return formatToolResult(canonicalToolName(name), legacyResp.Result)
 }
 
 func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
@@ -410,13 +436,13 @@ func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
 
 func (s *Server) toolsList() []map[string]any {
 	tools := []map[string]any{
-		{"name": "nomos.capabilities", "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "additionalProperties": false}},
-		{"name": "nomos.fs_read", "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": "nomos.fs_write", "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}},
-		{"name": "nomos.apply_patch", "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}},
-		{"name": "nomos.exec", "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}},
-		{"name": "nomos.http_request", "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": "repo.validate_change_set", "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}},
+		{"name": advertisedToolName("nomos.capabilities"), "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+		{"name": advertisedToolName("nomos.fs_read"), "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
+		{"name": advertisedToolName("nomos.fs_write"), "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}},
+		{"name": advertisedToolName("nomos.apply_patch"), "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}},
+		{"name": advertisedToolName("nomos.exec"), "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}},
+		{"name": advertisedToolName("nomos.http_request"), "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
+		{"name": advertisedToolName("repo.validate_change_set"), "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}},
 	}
 	for _, tool := range s.upstreamRegistry.tools {
 		tools = append(tools, map[string]any{
@@ -500,6 +526,7 @@ func parseRPCID(raw json.RawMessage) interface{} {
 }
 
 func (s *Server) handleRequest(req Request) Response {
+	req.Method = canonicalToolName(req.Method)
 	if req.Method != "nomos.fs_read" {
 		switch req.Method {
 		case "nomos.capabilities":

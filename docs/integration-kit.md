@@ -80,7 +80,9 @@ nomos mcp -c .\examples\quickstart\config.quickstart.json
 
 M41 shorthand note:
 
-- for `nomos.fs_read` and `nomos.fs_write`, common workspace-relative inputs such as `README.md`, `./README.md`, `.env`, or `src/app.py` are now accepted and adapted to canonical `file://workspace/...` resources
+- Nomos now advertises compatibility-safe MCP tool names such as `nomos_fs_read`, `nomos_fs_write`, `nomos_apply_patch`, `nomos_exec`, and `nomos_http_request`
+- legacy dotted names such as `nomos.fs_read` remain accepted for backward compatibility
+- for `nomos_fs_read` and `nomos_fs_write`, common workspace-relative inputs such as `README.md`, `./README.md`, `.env`, or `src/app.py` are now accepted and adapted to canonical `file://workspace/...` resources
 - policy, explain, and audit still operate on the canonical normalized resource
 - absolute host paths and traversal attempts remain rejected
 
@@ -162,7 +164,7 @@ What this mode does:
 
 - Nomos acts as the MCP server to the agent
 - Nomos acts as an MCP client to configured upstream `stdio` servers
-- forwarded upstream tools appear downstream as `upstream.<server>.<tool>`
+- forwarded upstream tools appear downstream as compatibility-safe names such as `upstream_<server>_<tool>`
 - upstream `stdio` compatibility is hardened for ecosystem-standard newline-delimited JSON MCP servers, while framed upstream responses are still accepted for compatibility
 - each forwarded call is evaluated as:
   - `action_type`: `mcp.call`
@@ -176,9 +178,9 @@ nomos mcp -c .\examples\configs\config.mcp-gateway.example.json
 
 In this example:
 
-- `upstream.retail.get_order_details` is allowed
-- `upstream.retail.request_refund` requires approval
-- `upstream.retail.issue_compensation` is denied
+- `upstream_retail_get_order_details` is allowed
+- `upstream_retail_request_refund` requires approval
+- `upstream_retail_issue_compensation` is denied
 
 ## MCP Runtime UX
 

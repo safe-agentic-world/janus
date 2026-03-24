@@ -26,7 +26,7 @@ func TestUpstreamGatewayToolsListIncludesForwardedTools(t *testing.T) {
 	tools := server.toolsList()
 	found := false
 	for _, tool := range tools {
-		if tool["name"] == "upstream.retail.refund.request" {
+		if tool["name"] == "upstream_retail_refund_request" {
 			found = true
 			if !strings.Contains(tool["description"].(string), "Governed by Nomos before forwarding") {
 				t.Fatalf("expected forwarded tool description marker, got %+v", tool)
@@ -46,7 +46,7 @@ func TestUpstreamGatewayToolsListIncludesForwardedTools(t *testing.T) {
 	if !ok || len(forwarded) != 1 {
 		t.Fatalf("expected one forwarded tool, got %+v", payload["forwarded_tools"])
 	}
-	if forwarded[0]["name"] != "upstream.retail.refund.request" || forwarded[0]["resource"] != "mcp://retail/refund.request" {
+	if forwarded[0]["name"] != "upstream_retail_refund_request" || forwarded[0]["resource"] != "mcp://retail/refund.request" {
 		t.Fatalf("unexpected forwarded tool descriptor: %+v", forwarded[0])
 	}
 }
@@ -58,7 +58,7 @@ func TestHandleForwardedToolAllow(t *testing.T) {
 
 	resp := server.handleRequest(Request{
 		ID:     "allow",
-		Method: "upstream.retail.refund.request",
+		Method: "upstream_retail_refund_request",
 		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
 	})
 	if resp.Error != "" {
@@ -86,7 +86,7 @@ func TestHandleForwardedToolDenySkipsUpstreamExecution(t *testing.T) {
 
 	resp := server.handleRequest(Request{
 		ID:     "deny",
-		Method: "upstream.retail.refund.request",
+		Method: "upstream_retail_refund_request",
 		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
 	})
 	if resp.Error != "" {
@@ -105,7 +105,7 @@ func TestHandleForwardedToolSupportsApprovalResume(t *testing.T) {
 
 	first := server.handleRequest(Request{
 		ID:     "first",
-		Method: "upstream.retail.refund.request",
+		Method: "upstream_retail_refund_request",
 		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
 	})
 	if first.Error != "" {
@@ -121,7 +121,7 @@ func TestHandleForwardedToolSupportsApprovalResume(t *testing.T) {
 
 	second := server.handleRequest(Request{
 		ID:     "second",
-		Method: "upstream.retail.refund.request",
+		Method: "upstream_retail_refund_request",
 		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged", "approval_id": firstResp.ApprovalID}),
 	})
 	if second.Error != "" {
@@ -197,7 +197,7 @@ func TestUpstreamGatewaySupportsFramedServerResponses(t *testing.T) {
 
 	resp := server.handleRequest(Request{
 		ID:     "allow-framed",
-		Method: "upstream.retail.refund.request",
+		Method: "upstream_retail_refund_request",
 		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
 	})
 	if resp.Error != "" {
@@ -206,6 +206,18 @@ func TestUpstreamGatewaySupportsFramedServerResponses(t *testing.T) {
 	result := resp.Result.(action.Response)
 	if result.Decision != "ALLOW" || result.ExecutionMode != "mcp_forwarded" {
 		t.Fatalf("expected framed forwarded ALLOW response, got %+v", result)
+	}
+}
+
+func TestDownstreamToolNameUsesCrossVendorSafeCharacters(t *testing.T) {
+	got := downstreamToolName("retail.api", "refund.request/v2")
+	if got != "upstream_retail_api_refund_request_v2" {
+		t.Fatalf("unexpected downstream tool name: %q", got)
+	}
+	for _, r := range got {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			t.Fatalf("unexpected unsafe character %q in %q", r, got)
+		}
 	}
 }
 

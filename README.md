@@ -54,6 +54,28 @@ With Nomos:
 - the same control model works across **MCP** and **HTTP** integrations
 - behavior stays flexible because you shape it with your own **policies** and **configs**
 
+## Demo - See Nomos in Action
+
+The fastest way to understand Nomos is to compare the same MCP-native retail support agent before and after governance.
+
+Before Nomos, the agent follows the customer request directly. A damaged-item refund plus extra compensation goes through with no execution boundary enforcing policy.
+
+<img src="docs/assets/before_nomos.png" alt="Retail support demo before Nomos where the agent approves refund and extra compensation" width="100%">
+
+After Nomos, the exact same agent is routed through Nomos over MCP. Order lookup is still allowed, but refund handling is policy-governed and extra compensation can be denied or approval-gated based on your policy bundle.
+
+<img src="docs/assets/after_nomos.png" alt="Retail support demo after Nomos where the same agent is governed by policy" width="100%">
+
+This is the product story in one comparison:
+
+- same agent
+- same user request
+- different outcome at the execution boundary
+
+If you want to run this yourself, use the companion demo repo and follow its before/after Nomos runbook:
+
+- [demo-langchain-nomos](https://github.com/safe-agentic-world/demo-langchain-nomos)
+
 ## Install
 
 ### Homebrew (macOS)
@@ -81,9 +103,9 @@ go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
 curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
 ```
 
-## Demo First
 
-### Try A Real Denial Yourself
+
+## Try A Real Denial Yourself
 
 Use the demo repo and Claude Code to see Nomos deny a sensitive file read:
 
@@ -163,11 +185,13 @@ Good fit for:
 
 Nomos exposes governed tools such as:
 
-- `nomos.fs_read`
-- `nomos.fs_write`
-- `nomos.apply_patch`
-- `nomos.exec`
-- `nomos.http_request`
+- `nomos_fs_read`
+- `nomos_fs_write`
+- `nomos_apply_patch`
+- `nomos_exec`
+- `nomos_http_request`
+
+Nomos advertises MCP tool names using a conservative cross-vendor-safe character set. Canonical policy and audit identity remains unchanged behind the tool surface, and legacy dotted tool names are still accepted for backward compatibility.
 
 For MCP file tools, Nomos accepts canonical resources like `file://workspace/README.md` and now also accepts common workspace-relative shorthands like `README.md` or `./README.md`, which are adapted safely into the canonical internal form.
 
