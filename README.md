@@ -30,7 +30,7 @@ Nomos is an **agent-agnostic** and **model-agnostic** firewall built based on ze
 - `DENY`
 - `REQUIRE_APPROVAL`
 
- You can put it in front of different agent frameworks, different model providers, and different tool runtimes, then shape its behavior with your own **policies** and **configs**.
+You can put it in front of different agent frameworks, different model providers, and different tool runtimes, then shape its behavior with your own **policies** and **configs**.
 
 
 ## Why Nomos Exists
@@ -76,36 +76,7 @@ If you want to run this yourself, use the companion demo repo and follow its bef
 
 - [demo-langchain-nomos](https://github.com/safe-agentic-world/demo-langchain-nomos)
 
-## Install
-
-### Homebrew (macOS)
-
-```bash
-brew install safe-agentic-world/nomos/nomos
-```
-
-### Scoop (Windows)
-
-```powershell
-scoop bucket add nomos https://github.com/safe-agentic-world/scoop-nomos
-scoop install nomos
-```
-
-### Build From Source (Go)
-
-```bash
-go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
-```
-
-### Shell Installer (macOS And Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
-```
-
-
-
-## Try A Real Denial Yourself
+### Try A Real Denial Yourself
 
 Use the demo repo and Claude Code to see Nomos deny a sensitive file read:
 
@@ -134,7 +105,32 @@ You can also prove:
 2. `git status` is allowed
 3. `git push` is denied
 
-### A customer-support action like a refund can be routed to `REQUIRE_APPROVAL`
+## Install
+
+### Homebrew (macOS)
+
+```bash
+brew install safe-agentic-world/nomos/nomos
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add nomos https://github.com/safe-agentic-world/scoop-nomos
+scoop install nomos
+```
+
+### Build From Source (Go)
+
+```bash
+go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
+```
+
+### Shell Installer (macOS And Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
+```
 
 
 ## Architecture In One Picture
@@ -248,7 +244,6 @@ See:
 - redaction: strip sensitive output before it reaches the agent, logs, or audit sinks
 - capability contract: surface what is immediately allowed, approval-gated, or unavailable
 - multi-bundle policy loading: compose layered policy packs with deterministic merge behavior
-
 
 ## What Nomos Governs
 
@@ -388,7 +383,6 @@ See:
 See:
 
 - [docs/use-cases.md](./docs/use-cases.md)
-
 
 ## Docs Map
 
