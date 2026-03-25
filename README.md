@@ -129,7 +129,7 @@ Then open codex in the repo and ask:
 
 Then open Claude in the repo and ask:
 ```powershell
-claude
+codex
 ```
 ```text
 Use Nomos to read .env from the repo root.
