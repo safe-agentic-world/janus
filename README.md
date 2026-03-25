@@ -82,7 +82,7 @@ If you want to run this yourself, use the companion demo repo and follow its bef
 
 - [demo-langchain-nomos](https://github.com/safe-agentic-world/demo-langchain-nomos)
 
-### Try A Real Denial Yourself
+## Quick Test You Can Do
 
 #### Using Cladue Code
 Use the demo repo and Claude Code to see Nomos deny a sensitive file read:
