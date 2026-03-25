@@ -60,9 +60,13 @@ The fastest way to understand Nomos is to compare the same MCP-native retail sup
 
 Before Nomos, the agent follows the customer request directly. A damaged-item refund plus extra compensation goes through with no execution boundary enforcing policy.
 
+<br>
+
 <img src="docs/assets/before_nomos.png" alt="Retail support demo before Nomos where the agent approves refund and extra compensation" width="100%">
 
 After Nomos, the exact same agent is routed through Nomos over MCP. Order lookup is still allowed, but refund handling is policy-governed and extra compensation can be denied or approval-gated based on your policy bundle.
+
+<br>
 
 <img src="docs/assets/after_nomos.png" alt="Retail support demo after Nomos where the same agent is governed by policy" width="100%">
 
@@ -78,6 +82,7 @@ If you want to run this yourself, use the companion demo repo and follow its bef
 
 ### Try A Real Denial Yourself
 
+#### Using Cladue Code
 Use the demo repo and Claude Code to see Nomos deny a sensitive file read:
 
 ```powershell
@@ -90,6 +95,10 @@ claude mcp list
 You should see `nomos-demo`.
 
 Then open Claude in the repo and ask:
+```powershell
+claude
+```
+
 
 ```text
 Use Nomos to read .env from the repo root.
@@ -104,6 +113,29 @@ You can also prove:
 1. a normal read succeeds through Nomos
 2. `git status` is allowed
 3. `git push` is denied
+
+
+#### Same test using Codex
+```powershell
+git clone git@github.com:safe-agentic-world/demo-langchain-nomos.git
+cd demo-langchain-nomos
+codex mcp add nomos-demo -- nomos mcp -c "nomos\config.demo.json"
+codex mcp list
+```
+
+You should see `nomos-demo`.
+
+Then open codex in the repo and ask:
+
+Then open Claude in the repo and ask:
+```powershell
+claude
+```
+```text
+Use Nomos to read .env from the repo root.
+```
+
+Nomos should deny the action.
 
 ## Install
 
