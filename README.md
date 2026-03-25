@@ -64,6 +64,8 @@ Before Nomos, the agent follows the customer request directly. A damaged-item re
 
 <img src="docs/assets/before_nomos.png" alt="Retail support demo before Nomos where the agent approves refund and extra compensation" width="100%">
 
+<br>
+<br>
 After Nomos, the exact same agent is routed through Nomos over MCP. Order lookup is still allowed, but refund handling is policy-governed and extra compensation can be denied or approval-gated based on your policy bundle.
 
 <br>
