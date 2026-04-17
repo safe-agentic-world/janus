@@ -265,11 +265,14 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	mode := os.Args[3]
-	if mode != "retail" && mode != "framed-retail" {
+	switch mode {
+	case "retail", "framed-retail", "stateful-retail":
+	default:
 		os.Exit(2)
 	}
 	reader := bufio.NewReader(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
+	listVersion := 0
 	for {
 		body, err := readMCPPayload(reader)
 		if err != nil {
@@ -300,26 +303,68 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 		case "notifications/initialized":
 			continue
 		case "tools/list":
-			writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
-				"tools": []map[string]any{{
-					"name":        "refund.request",
-					"description": "Submit a retail refund request.",
+			tools := []map[string]any{{
+				"name":        "refund.request",
+				"description": "Submit a retail refund request.",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"order_id": map[string]any{"type": "string"},
+						"reason":   map[string]any{"type": "string"},
+					},
+					"required":             []string{"order_id", "reason"},
+					"additionalProperties": true,
+				},
+			}}
+			if mode == "stateful-retail" && listVersion >= 1 {
+				tools = append(tools, map[string]any{
+					"name":        "refund.status",
+					"description": "Fetch refund status.",
 					"inputSchema": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"order_id": map[string]any{"type": "string"},
-							"reason":   map[string]any{"type": "string"},
 						},
-						"required":             []string{"order_id", "reason"},
+						"required":             []string{"order_id"},
 						"additionalProperties": true,
 					},
-				}},
+				})
+			}
+			writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
+				"tools": tools,
 			}, nil)
 		case "tools/call":
 			params, _ := req["params"].(map[string]any)
+			callName, _ := params["name"].(string)
 			args, _ := params["arguments"].(map[string]any)
 			orderID, _ := args["order_id"].(string)
 			reason, _ := args["reason"].(string)
+			if mode == "stateful-retail" {
+				switch {
+				case callName == "refund.request" && orderID == "KILL":
+					os.Exit(0)
+				case callName == "refund.request" && orderID == "LIST_CHANGED":
+					listVersion++
+					writeUpstreamHelperNotification(writer, mode, "notifications/tools/list_changed", map[string]any{})
+					writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
+						"content": []map[string]any{{
+							"type": "text",
+							"text": "list_changed emitted",
+						}},
+						"isError": false,
+					}, nil)
+					continue
+				case callName == "refund.status":
+					writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
+						"content": []map[string]any{{
+							"type": "text",
+							"text": fmt.Sprintf("status pending for %s", orderID),
+						}},
+						"isError": false,
+					}, nil)
+					continue
+				}
+			}
 			writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
 				"content": []map[string]any{{
 					"type": "text",
@@ -344,6 +389,23 @@ func writeUpstreamHelperResponse(writer *bufio.Writer, mode string, id any, resu
 		resp["result"] = result
 	}
 	data, _ := json.Marshal(resp)
+	if mode == "framed-retail" {
+		_, _ = fmt.Fprintf(writer, "Content-Length: %d\r\n\r\n", len(data))
+		_, _ = writer.Write(data)
+	} else {
+		_, _ = writer.Write(data)
+		_ = writer.WriteByte('\n')
+	}
+	_ = writer.Flush()
+}
+
+func writeUpstreamHelperNotification(writer *bufio.Writer, mode string, method string, params map[string]any) {
+	msg := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}
+	data, _ := json.Marshal(msg)
 	if mode == "framed-retail" {
 		_, _ = fmt.Fprintf(writer, "Content-Length: %d\r\n\r\n", len(data))
 		_, _ = writer.Write(data)

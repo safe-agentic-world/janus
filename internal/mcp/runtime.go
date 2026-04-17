@@ -34,12 +34,20 @@ type UpstreamRoute struct {
 }
 
 type UpstreamServerConfig struct {
-	Name      string
-	Transport string
-	Command   string
-	Args      []string
-	Env       map[string]string
-	Workdir   string
+	Name         string
+	Transport    string
+	Command      string
+	Args         []string
+	Env          map[string]string
+	Workdir      string
+	Endpoint     string
+	AllowedHosts []string
+	TLSInsecure  bool
+	AuthType     string
+	AuthToken    string
+	AuthHeader   string
+	AuthValue    string
+	AuthHeaders  map[string]string
 }
 
 type logLevel int

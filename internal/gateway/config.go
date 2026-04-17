@@ -128,12 +128,24 @@ type MCPConfig struct {
 }
 
 type MCPUpstreamServerConfig struct {
-	Name      string            `json:"name"`
-	Transport string            `json:"transport"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	Workdir   string            `json:"workdir,omitempty"`
+	Name         string                 `json:"name"`
+	Transport    string                 `json:"transport"`
+	Command      string                 `json:"command,omitempty"`
+	Args         []string               `json:"args,omitempty"`
+	Env          map[string]string      `json:"env,omitempty"`
+	Workdir      string                 `json:"workdir,omitempty"`
+	Endpoint     string                 `json:"endpoint,omitempty"`
+	AllowedHosts []string               `json:"allowed_hosts,omitempty"`
+	TLSInsecure  bool                   `json:"tls_insecure,omitempty"`
+	Auth         *MCPUpstreamAuthConfig `json:"auth,omitempty"`
+}
+
+type MCPUpstreamAuthConfig struct {
+	Type   string            `json:"type"`
+	Token  string            `json:"token,omitempty"`
+	Header string            `json:"header,omitempty"`
+	Value  string            `json:"value,omitempty"`
+	Values map[string]string `json:"values,omitempty"`
 }
 
 type UpstreamRoute struct {
@@ -533,11 +545,59 @@ func (c Config) Validate() error {
 				return errors.New("mcp.upstream_servers.name must be unique")
 			}
 			seen[name] = struct{}{}
-			if strings.TrimSpace(server.Transport) != "stdio" {
-				return errors.New("mcp.upstream_servers.transport must be \"stdio\"")
-			}
-			if strings.TrimSpace(server.Command) == "" {
-				return errors.New("mcp.upstream_servers.command is required")
+			transport := strings.TrimSpace(server.Transport)
+			switch transport {
+			case "stdio":
+				if strings.TrimSpace(server.Command) == "" {
+					return errors.New("mcp.upstream_servers.command is required for stdio transport")
+				}
+				if strings.TrimSpace(server.Endpoint) != "" {
+					return errors.New("mcp.upstream_servers.endpoint not valid for stdio transport")
+				}
+			case "streamable_http", "sse":
+				if strings.TrimSpace(server.Command) != "" {
+					return errors.New("mcp.upstream_servers.command not valid for http transports")
+				}
+				raw := strings.TrimSpace(server.Endpoint)
+				if raw == "" {
+					return errors.New("mcp.upstream_servers.endpoint is required for http transports")
+				}
+				parsed, err := neturl.Parse(raw)
+				if err != nil || parsed.Host == "" {
+					return errors.New("mcp.upstream_servers.endpoint must be an absolute URL")
+				}
+				switch parsed.Scheme {
+				case "https":
+				case "http":
+					if !server.TLSInsecure {
+						return errors.New("mcp.upstream_servers.endpoint must use https unless tls_insecure is set")
+					}
+				default:
+					return errors.New("mcp.upstream_servers.endpoint must use http or https scheme")
+				}
+				for _, host := range server.AllowedHosts {
+					if strings.TrimSpace(host) == "" {
+						return errors.New("mcp.upstream_servers.allowed_hosts entries must be non-empty")
+					}
+				}
+				if server.Auth != nil {
+					switch strings.TrimSpace(server.Auth.Type) {
+					case "bearer":
+						if strings.TrimSpace(server.Auth.Token) == "" {
+							return errors.New("mcp.upstream_servers.auth.token is required for bearer auth")
+						}
+					case "header":
+						if strings.TrimSpace(server.Auth.Header) == "" && len(server.Auth.Values) == 0 {
+							return errors.New("mcp.upstream_servers.auth.header or auth.values is required for header auth")
+						}
+					case "":
+						return errors.New("mcp.upstream_servers.auth.type is required")
+					default:
+						return errors.New("mcp.upstream_servers.auth.type must be bearer|header")
+					}
+				}
+			default:
+				return errors.New("mcp.upstream_servers.transport must be stdio|streamable_http|sse")
 			}
 			for key := range server.Env {
 				if strings.TrimSpace(key) == "" {

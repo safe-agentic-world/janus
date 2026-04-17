@@ -39,7 +39,7 @@ type Server struct {
 	policyBundleSources []string
 	assuranceLevel      string
 	upstreamRoutes      []UpstreamRoute
-	upstreamRegistry    *upstreamRegistry
+	upstream            *upstreamSupervisor
 	logger              *runtimeLogger
 	pid                 int
 }
@@ -165,7 +165,7 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	svc := service.New(engine, reader, writerExec, patcher, execRunner, httpRunner, recorder, logger.redactor, approvalStore, nil, sandboxProfile, nil)
 	svc.SetSandboxEvidence(runtimeOptions.SandboxEvidence, []string{workspaceRoot})
 	svc.SetExecCompatibilityMode(runtimeOptions.ExecCompatibilityMode)
-	upstreamRegistry, err := loadUpstreamRegistry(runtimeOptions.UpstreamServers)
+	upstream, err := newUpstreamSupervisor(runtimeOptions.UpstreamServers, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		policyBundleSources: policy.BundleSourceLabels(bundle),
 		assuranceLevel:      "NONE",
 		upstreamRoutes:      append([]UpstreamRoute(nil), runtimeOptions.UpstreamRoutes...),
-		upstreamRegistry:    upstreamRegistry,
+		upstream:            upstream,
 		logger:              logger,
 		pid:                 os.Getpid(),
 	}, nil
@@ -200,7 +200,14 @@ func (s *Server) SetAssuranceLevel(level string) {
 }
 
 func (s *Server) Close() error {
-	if s == nil || s.approvals == nil {
+	if s == nil {
+		return nil
+	}
+	if s.upstream != nil {
+		s.upstream.close()
+		s.upstream = nil
+	}
+	if s.approvals == nil {
 		return nil
 	}
 	err := s.approvals.Close()
@@ -444,12 +451,14 @@ func (s *Server) toolsList() []map[string]any {
 		{"name": advertisedToolName("nomos.http_request"), "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
 		{"name": advertisedToolName("repo.validate_change_set"), "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}},
 	}
-	for _, tool := range s.upstreamRegistry.tools {
-		tools = append(tools, map[string]any{
-			"name":        tool.DownstreamName,
-			"description": forwardedToolDescription(tool),
-			"inputSchema": tool.InputSchema,
-		})
+	if s.upstream != nil {
+		for _, tool := range s.upstream.snapshotTools() {
+			tools = append(tools, map[string]any{
+				"name":        tool.DownstreamName,
+				"description": forwardedToolDescription(tool),
+				"inputSchema": tool.InputSchema,
+			})
+		}
 	}
 	return tools
 }
@@ -579,15 +588,18 @@ func (s *Server) handleRequest(req Request) Response {
 }
 
 func (s *Server) isForwardedTool(name string) bool {
-	if s == nil || s.upstreamRegistry == nil {
+	if s == nil || s.upstream == nil {
 		return false
 	}
-	_, ok := s.upstreamRegistry.toolsByName[name]
+	_, ok := s.upstream.toolByName(name)
 	return ok
 }
 
 func (s *Server) handleForwardedTool(req Request) Response {
-	tool, ok := s.upstreamRegistry.toolsByName[req.Method]
+	if s.upstream == nil {
+		return Response{ID: req.ID, Error: "method_not_found"}
+	}
+	tool, ok := s.upstream.toolByName(req.Method)
 	if !ok {
 		return Response{ID: req.ID, Error: "method_not_found"}
 	}
@@ -628,10 +640,9 @@ func (s *Server) handleForwardedTool(req Request) Response {
 	if resp.Decision != policy.DecisionAllow {
 		return Response{ID: req.ID, Result: resp}
 	}
-	config := s.upstreamRegistry.serversByName[tool.ServerName]
-	output, err := callUpstreamTool(config, tool.ToolName, sanitizedArgs)
+	output, err := s.upstream.callTool(tool.ServerName, tool.ToolName, sanitizedArgs)
 	if err != nil {
-		return Response{ID: req.ID, Error: "execution_error"}
+		return Response{ID: req.ID, Error: classifyForwardedToolError(err)}
 	}
 	resp.ExecutionMode = "mcp_forwarded"
 	resp.ReportPath = ""
@@ -790,11 +801,12 @@ func (s *Server) handleCapabilities(req Request) Response {
 	result.AssuranceLevel = s.assuranceLevel
 	result.MediationNotice = capabilityMediationNotice(s.assuranceLevel)
 	result = service.FinalizeCapabilityEnvelope(result, s.identity, s.policyBundleHash)
-	if len(s.upstreamRegistry.tools) == 0 {
+	if s.upstream == nil || !s.upstream.hasTools() {
 		return Response{ID: req.ID, Result: result}
 	}
-	forwarded := make([]map[string]any, 0, len(s.upstreamRegistry.tools))
-	for _, tool := range s.upstreamRegistry.tools {
+	toolsSnapshot := s.upstream.snapshotTools()
+	forwarded := make([]map[string]any, 0, len(toolsSnapshot))
+	for _, tool := range toolsSnapshot {
 		forwarded = append(forwarded, map[string]any{
 			"name":            tool.DownstreamName,
 			"upstream_server": tool.ServerName,
@@ -976,6 +988,19 @@ func classifyToolError(err error) string {
 	default:
 		return "execution_error"
 	}
+}
+
+func classifyForwardedToolError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, errUpstreamUnavailable):
+		return "upstream_unavailable"
+	case errors.Is(err, errUpstreamClosed):
+		return "upstream_unavailable"
+	}
+	return "execution_error"
 }
 
 func toolErrorMessage(method, code string) string {
