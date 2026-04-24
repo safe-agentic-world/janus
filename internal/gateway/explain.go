@@ -10,6 +10,8 @@ import (
 type explainResponse struct {
 	ActionID              string         `json:"action_id"`
 	TraceID               string         `json:"trace_id"`
+	ActionType            string         `json:"action_type"`
+	Resource              string         `json:"resource"`
 	Decision              string         `json:"decision"`
 	ReasonCode            string         `json:"reason_code"`
 	MatchedRuleIDs        []string       `json:"matched_rule_ids"`

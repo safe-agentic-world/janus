@@ -43,11 +43,12 @@ type upstreamHTTPConn struct {
 	lastEventID  atomic.Value // string
 	retryDelayMS atomic.Int64
 
-	mu      sync.Mutex
-	pending map[string]chan rpcMessage
-	nextID  int64
-	closed  bool
-	err     error
+	mu             sync.Mutex
+	pending        map[string]chan rpcMessage
+	nextID         int64
+	closed         bool
+	err            error
+	requestHandler upstreamRequestHandler
 
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -193,6 +194,12 @@ func upstreamTLSConfig(config UpstreamServerConfig) (*tls.Config, error) {
 }
 
 func (c *upstreamHTTPConn) doneCh() <-chan struct{} { return c.done }
+
+func (c *upstreamHTTPConn) setRequestHandler(handler upstreamRequestHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requestHandler = handler
+}
 
 func (c *upstreamHTTPConn) isClosed() bool {
 	c.mu.Lock()
@@ -473,16 +480,22 @@ func (c *upstreamHTTPConn) processSSEMessage(raw []byte, wantID string) (*rpcRes
 	if err := json.Unmarshal(trimmed, &envelope); err != nil {
 		return nil, false, fmt.Errorf("invalid upstream sse payload: %w", err)
 	}
-	if envelope.Method != "" && !hasJSONID(envelope.ID) {
-		if c.notifyFn != nil {
-			var note struct {
-				Params json.RawMessage `json:"params"`
+	if envelope.Method != "" {
+		if !hasJSONID(envelope.ID) {
+			if c.notifyFn != nil {
+				var note struct {
+					Params json.RawMessage `json:"params"`
+				}
+				if err := json.Unmarshal(trimmed, &note); err == nil {
+					c.notifyFn(envelope.Method, note.Params)
+				} else {
+					c.notifyFn(envelope.Method, nil)
+				}
 			}
-			if err := json.Unmarshal(trimmed, &note); err == nil {
-				c.notifyFn(envelope.Method, note.Params)
-			} else {
-				c.notifyFn(envelope.Method, nil)
-			}
+			return nil, false, nil
+		}
+		if err := c.handleServerRequest(trimmed); err != nil {
+			return nil, false, err
 		}
 		return nil, false, nil
 	}
@@ -507,6 +520,48 @@ func (c *upstreamHTTPConn) processSSEMessage(raw []byte, wantID string) (*rpcRes
 		ch <- rpcMessage{resp: resp}
 	}
 	return nil, false, nil
+}
+
+func (c *upstreamHTTPConn) handleServerRequest(raw []byte) error {
+	var req rpcRequest
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&req); err != nil {
+		return fmt.Errorf("invalid upstream request: %w", err)
+	}
+	c.mu.Lock()
+	handler := c.requestHandler
+	c.mu.Unlock()
+	resp := &rpcResponse{
+		JSONRPC: "2.0",
+		ID:      parseRPCID(req.ID),
+		Error:   &rpcError{Code: -32601, Message: "method not found"},
+	}
+	if handler != nil {
+		if handled := handler(req); handled != nil {
+			resp = handled
+			resp.JSONRPC = "2.0"
+			if resp.ID == nil {
+				resp.ID = parseRPCID(req.ID)
+			}
+		}
+	}
+	return c.sendResponseRaw(resp)
+}
+
+func (c *upstreamHTTPConn) sendResponseRaw(resp *rpcResponse) error {
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	httpResp, err := c.doPOST(body, false)
+	if err != nil {
+		return err
+	}
+	if httpResp != nil {
+		_ = httpResp.Body.Close()
+	}
+	return nil
 }
 
 func decodeRPCResponse(body []byte) (*rpcResponse, error) {

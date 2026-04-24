@@ -109,6 +109,8 @@ func normalizeResource(raw string) (string, error) {
 		return normalizeURLResource(parsed)
 	case "secret":
 		return normalizeSecretResource(parsed)
+	case "mcp":
+		return normalizeMCPResource(parsed)
 	default:
 		return "", fmt.Errorf("unsupported resource scheme %q", parsed.Scheme)
 	}
@@ -186,6 +188,78 @@ func normalizeCustomResource(parsed *url.URL) (string, error) {
 		return "", err
 	}
 	return scheme + "://" + host + cleaned, nil
+}
+
+func normalizeMCPResource(parsed *url.URL) (string, error) {
+	if parsed.User != nil {
+		return "", errors.New("mcp userinfo is not allowed")
+	}
+	if parsed.RawQuery != "" {
+		return "", errors.New("mcp query is not allowed")
+	}
+	if parsed.Fragment != "" {
+		return "", errors.New("mcp fragment is not allowed")
+	}
+	host, err := normalizeHostPort(parsed.Host)
+	if err != nil {
+		return "", fmt.Errorf("invalid mcp host: %w", err)
+	}
+	trimmed := strings.TrimPrefix(parsed.EscapedPath(), "/")
+	if trimmed == "" {
+		return "", errors.New("mcp path is required")
+	}
+	parts := strings.Split(trimmed, "/")
+	decodeTail := func(raw string) (string, error) {
+		value, err := url.PathUnescape(raw)
+		if err != nil {
+			return "", errors.New("invalid mcp path encoding")
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", errors.New("mcp path is required")
+		}
+		return value, nil
+	}
+	switch parts[0] {
+	case "resource":
+		if len(parts) < 2 {
+			return "", errors.New("mcp resource uri is required")
+		}
+		uri, err := decodeTail(strings.Join(parts[1:], "/"))
+		if err != nil {
+			return "", err
+		}
+		return "mcp://" + host + "/resource/" + uri, nil
+	case "prompt":
+		if len(parts) < 2 {
+			return "", errors.New("mcp prompt name is required")
+		}
+		name, err := decodeTail(strings.Join(parts[1:], "/"))
+		if err != nil {
+			return "", err
+		}
+		return "mcp://" + host + "/prompt/" + name, nil
+	case "sample":
+		if len(parts) != 1 {
+			return "", errors.New("mcp sample path is invalid")
+		}
+		return "mcp://" + host + "/sample", nil
+	case "completion":
+		if len(parts) < 2 {
+			return "", errors.New("mcp completion ref is required")
+		}
+		ref, err := decodeTail(strings.Join(parts[1:], "/"))
+		if err != nil {
+			return "", err
+		}
+		return "mcp://" + host + "/completion/" + ref, nil
+	default:
+		name, err := decodeTail(strings.Join(parts, "/"))
+		if err != nil {
+			return "", err
+		}
+		return "mcp://" + host + "/" + name, nil
+	}
 }
 
 func normalizeNetworkLocation(rawHost, rawPath string) (string, error) {

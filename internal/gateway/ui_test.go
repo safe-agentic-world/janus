@@ -14,6 +14,8 @@ import (
 
 	"github.com/safe-agentic-world/nomos/internal/approval"
 	"github.com/safe-agentic-world/nomos/internal/audit"
+	"github.com/safe-agentic-world/nomos/internal/normalize"
+	"github.com/safe-agentic-world/nomos/internal/policy"
 )
 
 func TestUIApprovalsRejectsAnonymousAccess(t *testing.T) {
@@ -306,6 +308,45 @@ func TestBuildUIReadinessResponseSupportsNotReadyFixtures(t *testing.T) {
 	}
 	if resp.OperatorPrincipal != "operator" {
 		t.Fatalf("expected operator principal, got %+v", resp)
+	}
+}
+
+func TestExplainResponseIdentifiesNewMCPSurfaces(t *testing.T) {
+	cases := []struct {
+		actionType string
+		resource   string
+		hint       string
+	}{
+		{actionType: "mcp.resource_read", resource: "mcp://retail/resource/note:%2F%2Fretail%2Fcustomer-42", hint: "MCP resource"},
+		{actionType: "mcp.prompt_get", resource: "mcp://retail/prompt/incident.summary", hint: "MCP prompt"},
+		{actionType: "mcp.completion", resource: "mcp://retail/completion/ref/prompt/incident.summary", hint: "MCP completion"},
+		{actionType: "mcp.sample", resource: "mcp://retail/sample", hint: "sampling"},
+	}
+	for _, tc := range cases {
+		resp := buildExplainResponse(policy.ExplainDetails{
+			Decision: policy.Decision{
+				Decision:       policy.DecisionDeny,
+				ReasonCode:     "deny_by_default",
+				MatchedRuleIDs: []string{},
+				Obligations:    map[string]any{},
+			},
+			ObligationsPreview: map[string]any{},
+		}, normalize.NormalizedAction{
+			ActionID:   "act-" + tc.actionType,
+			TraceID:    "trace-" + tc.actionType,
+			ActionType: tc.actionType,
+			Resource:   tc.resource,
+		}, Config{}, "BEST_EFFORT")
+		if resp.ActionType != tc.actionType || resp.Resource != tc.resource {
+			t.Fatalf("expected explain response to preserve MCP surface identity, got %+v", resp)
+		}
+		whyDenied, _ := resp.WhyDenied["remediation_hint"].(string)
+		if !strings.Contains(strings.ToLower(whyDenied), strings.ToLower(tc.hint)) {
+			t.Fatalf("expected remediation hint for %s, got %+v", tc.actionType, resp.WhyDenied)
+		}
+		if resp.MinimalAllowingChange == "" {
+			t.Fatalf("expected remediation suggestion for %s", tc.actionType)
+		}
 	}
 }
 

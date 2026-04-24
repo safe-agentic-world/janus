@@ -258,3 +258,7 @@
 {"resource":"file://workspace//mix18//child%20name.txt","normalized":"file://workspace/mix18/child name.txt","name":"file_mixed_18"}
 {"resource":"file://workspace//mix19//child%20name.txt","normalized":"file://workspace/mix19/child name.txt","name":"file_mixed_19"}
 {"resource":"file://workspace//mix20//child%20name.txt","normalized":"file://workspace/mix20/child name.txt","name":"file_mixed_20"}
+{"resource":"mcp://Retail/resource/note:%2F%2Fretail%2Fcustomer-42","normalized":"mcp://retail/resource/note://retail/customer-42","name":"mcp_resource_read_1"}
+{"resource":"mcp://Retail/prompt/Incident.Summary","normalized":"mcp://retail/prompt/Incident.Summary","name":"mcp_prompt_get_1"}
+{"resource":"mcp://Retail/sample","normalized":"mcp://retail/sample","name":"mcp_sample_1"}
+{"resource":"mcp://Retail/completion/ref%2Fprompt%2Fincident.summary","normalized":"mcp://retail/completion/ref/prompt/incident.summary","name":"mcp_completion_1"}

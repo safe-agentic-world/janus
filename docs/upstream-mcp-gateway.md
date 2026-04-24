@@ -30,6 +30,11 @@ This is the 2026 MCP-native architecture path where:
 - policy-visible forwarded action identity:
   - `action_type`: `mcp.call`
   - `resource`: `mcp://<server>/<tool>`
+- governed non-tool MCP surfaces:
+  - `mcp.resource_read`
+  - `mcp.prompt_get`
+  - `mcp.completion`
+  - `mcp.sample` (default deny unless policy explicitly allows it)
 - approval-gated forwarded calls using the same `approval_id` retry model as direct Nomos tools
 
 Out of scope for this first gateway mode:
@@ -76,6 +81,15 @@ Nomos can also front remote, managed, or containerized MCP servers over HTTP. Tw
 For `streamable_http`, Nomos speaks the current MCP HTTP transport version (`MCP-Protocol-Version: 2025-11-25`), carries forward `MCP-Session-Id` when assigned by the upstream, listens on the optional GET event stream for server-initiated notifications, and sends a best-effort `DELETE` when closing a stateful HTTP session.
 
 Both transports plug into the same long-lived session supervisor as `stdio`, so policy identity, approval semantics, forwarded tool naming, and audit records are identical across transports. A bundle that governs `mcp://retail/refund.request` does not need to change when the upstream `retail` server migrates from `stdio` to `streamable_http`.
+
+Remote upstreams can also expose MCP resources, prompts, completions, and upstream-initiated sampling. Nomos governs those surfaces through the same normalization, policy, approval, redaction, and audit path used for tools:
+
+- `resources/read` -> `mcp.resource_read`
+- `prompts/get` -> `mcp.prompt_get`
+- `completion/complete` -> `mcp.completion`
+- `sampling/createMessage` -> `mcp.sample`
+
+`mcp.sample` is intentionally fail-closed. If no rule matches, the downstream client's model is not invoked.
 
 ### HTTP Upstream Config Shape
 
@@ -212,3 +226,4 @@ Nomos then re-evaluates and only forwards on a valid approved retry.
 - Upstream child processes are terminated on Nomos shutdown. Supervised deployments should additionally parent the Nomos process to a process manager that reaps orphans on a host crash.
 - Upstream stderr is continuously drained; the tail of stderr is attached to stage-aware error messages when an upstream process fails to launch or handshake.
 - `nomos.capabilities` includes a `forwarded_tools` section when upstream MCP servers are configured.
+- `nomos.capabilities` also includes an `mcp_surfaces` section describing policy state for `resource_read`, `prompt_get`, `completion`, and `sample`.

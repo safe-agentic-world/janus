@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const normalizationCorpusDigest = "c6030b64a6264cf71129d6d29e28119a6c3dee34e45bfde5fb61cd3342530234"
+const normalizationCorpusDigest = "308d66844a51a7506d1ff287acc435a7f8a12f23e073c727a609dca0bf5b4f60"
 
 type corpusEntry struct {
 	Name          string `json:"name"`
@@ -26,7 +26,7 @@ func TestNormalizationGoldenCorpus(t *testing.T) {
 		t.Fatalf("expected at least 250 corpus entries, got %d", len(entries))
 	}
 	for _, entry := range entries {
-		got, err := NormalizeResource(entry.Resource)
+		got, err := normalizeCorpusResource(entry.Resource)
 		if err != nil {
 			t.Fatalf("%s: normalize: %v", entry.Name, err)
 		}
@@ -42,7 +42,7 @@ func TestNormalizationBypassCorpus(t *testing.T) {
 		t.Fatal("expected bypass corpus entries")
 	}
 	for _, entry := range entries {
-		got, err := NormalizeResource(entry.Resource)
+		got, err := normalizeCorpusResource(entry.Resource)
 		if entry.ErrorContains != "" {
 			if err == nil {
 				t.Fatalf("%s: expected error containing %q, got normalized %s", entry.Name, entry.ErrorContains, got)
@@ -69,7 +69,7 @@ func TestNormalizationCorpusDigestStable(t *testing.T) {
 	for _, fileName := range []string{"corpus.jsonl", "bypass_attempts.jsonl"} {
 		entries := loadCorpusEntries(t, fileName)
 		for _, entry := range entries {
-			got, err := NormalizeResource(entry.Resource)
+			got, err := normalizeCorpusResource(entry.Resource)
 			if entry.ErrorContains != "" {
 				if err == nil {
 					t.Fatalf("%s: expected error", entry.Name)
@@ -87,6 +87,10 @@ func TestNormalizationCorpusDigestStable(t *testing.T) {
 	if gotDigest != normalizationCorpusDigest {
 		t.Fatalf("expected digest %s, got %s", normalizationCorpusDigest, gotDigest)
 	}
+}
+
+func normalizeCorpusResource(raw string) (string, error) {
+	return NormalizeResource(raw)
 }
 
 func loadCorpusEntries(t *testing.T, fileName string) []corpusEntry {
