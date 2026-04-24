@@ -54,7 +54,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6.3.0
         with:
-          go-version: "1.25.8"
+          go-version: "1.25.9"
           cache: true
 
       - name: Build release artifacts
@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -c "exec(\"import glob, hashlib, json, os\\nfiles = []\\nfor path in sorted(glob.glob('dist/nomos-*')):\\n    name = os.path.basename(path)\\n    if name.endswith('.sig') or name.endswith('.pem'):\\n        continue\\n    digest = hashlib.sha256()\\n    with open(path, 'rb') as handle:\\n        digest.update(handle.read())\\n    files.append({'name': name, 'digest': {'sha256': digest.hexdigest()}})\\nstatement = {'_type': 'https://in-toto.io/Statement/v0.1', 'predicateType': 'https://slsa.dev/provenance/v1', 'subject': files, 'predicate': {'buildDefinition': {'buildType': 'https://github.com/safe-agentic-world/nomos/.github/workflows/release.yml', 'externalParameters': {'tag': '${{ steps.meta.outputs.tag }}'}, 'internalParameters': {'go_version': '1.25.8'}, 'resolvedDependencies': [{'uri': 'git+https://github.com/${{ github.repository }}@${{ github.sha }}'}]}, 'runDetails': {'builder': {'id': 'https://github.com/${{ github.repository }}/.github/workflows/release.yml'}, 'metadata': {'invocationId': '${{ github.run_id }}', 'sourceRepositoryDigest': '${{ github.sha }}'}}}}\\nwith open('dist/nomos-provenance.intoto.jsonl', 'w', encoding='utf-8') as handle:\\n    handle.write(json.dumps(statement, sort_keys=True, separators=(',', ':')) + '\\\\n')\")"
+          python -c "exec(\"import glob, hashlib, json, os\\nfiles = []\\nfor path in sorted(glob.glob('dist/nomos-*')):\\n    name = os.path.basename(path)\\n    if name.endswith('.sig') or name.endswith('.pem'):\\n        continue\\n    digest = hashlib.sha256()\\n    with open(path, 'rb') as handle:\\n        digest.update(handle.read())\\n    files.append({'name': name, 'digest': {'sha256': digest.hexdigest()}})\\nstatement = {'_type': 'https://in-toto.io/Statement/v0.1', 'predicateType': 'https://slsa.dev/provenance/v1', 'subject': files, 'predicate': {'buildDefinition': {'buildType': 'https://github.com/safe-agentic-world/nomos/.github/workflows/release.yml', 'externalParameters': {'tag': '${{ steps.meta.outputs.tag }}'}, 'internalParameters': {'go_version': '1.25.9'}, 'resolvedDependencies': [{'uri': 'git+https://github.com/${{ github.repository }}@${{ github.sha }}'}]}, 'runDetails': {'builder': {'id': 'https://github.com/${{ github.repository }}/.github/workflows/release.yml'}, 'metadata': {'invocationId': '${{ github.run_id }}', 'sourceRepositoryDigest': '${{ github.sha }}'}}}}\\nwith open('dist/nomos-provenance.intoto.jsonl', 'w', encoding='utf-8') as handle:\\n    handle.write(json.dumps(statement, sort_keys=True, separators=(',', ':')) + '\\\\n')\")"
 
       - name: Sign release assets
         shell: bash
