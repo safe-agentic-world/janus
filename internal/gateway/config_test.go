@@ -874,7 +874,7 @@ func TestLoadConfigRejectsInvalidMCPUpstreamServer(t *testing.T) {
 	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), `mcp.upstream_servers.transport must be "stdio"`) {
+	if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), "mcp.upstream_servers.transport must be stdio|streamable_http|sse") {
 		t.Fatalf("expected invalid upstream transport error, got %v", err)
 	}
 }

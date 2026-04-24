@@ -817,14 +817,30 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 		for key, value := range server.Env {
 			env[key] = value
 		}
-		out = append(out, mcp.UpstreamServerConfig{
-			Name:      server.Name,
-			Transport: server.Transport,
-			Command:   server.Command,
-			Args:      append([]string(nil), server.Args...),
-			Env:       env,
-			Workdir:   server.Workdir,
-		})
+		mapped := mcp.UpstreamServerConfig{
+			Name:         server.Name,
+			Transport:    server.Transport,
+			Command:      server.Command,
+			Args:         append([]string(nil), server.Args...),
+			Env:          env,
+			Workdir:      server.Workdir,
+			Endpoint:     server.Endpoint,
+			AllowedHosts: append([]string(nil), server.AllowedHosts...),
+			TLSInsecure:  server.TLSInsecure,
+		}
+		if server.Auth != nil {
+			mapped.AuthType = server.Auth.Type
+			mapped.AuthToken = server.Auth.Token
+			mapped.AuthHeader = server.Auth.Header
+			mapped.AuthValue = server.Auth.Value
+			if len(server.Auth.Values) > 0 {
+				mapped.AuthHeaders = map[string]string{}
+				for k, v := range server.Auth.Values {
+					mapped.AuthHeaders[k] = v
+				}
+			}
+		}
+		out = append(out, mapped)
 	}
 	return out
 }
