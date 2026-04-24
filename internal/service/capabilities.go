@@ -48,6 +48,8 @@ type CapabilityEnvelope struct {
 	ApprovalsEnabled      bool                      `json:"approvals_enabled"`
 	AssuranceLevel        string                    `json:"assurance_level,omitempty"`
 	MediationNotice       string                    `json:"mediation_notice,omitempty"`
+	ForwardedTools        []map[string]any          `json:"forwarded_tools,omitempty"`
+	MCPSurfaces           map[string]ToolCapability `json:"mcp_surfaces,omitempty"`
 }
 
 type CapabilityConstraints struct {
@@ -106,6 +108,22 @@ func toolCapabilityState(def toolDefinition, actionCapability policy.ActionCapab
 	}
 }
 
+func actionCapabilityState(actionType string, actionCapability policy.ActionCapability) ToolCapability {
+	return ToolCapability{
+		ActionType:          actionType,
+		State:               actionCapability.State(),
+		ImmediatelyCallable: actionCapability.Allow,
+		ApprovalRequired:    actionCapability.RequireApproval,
+		Advertised:          actionCapability.Available(),
+		Constraints: CapabilityConstraints{
+			ResourceClasses: append([]string{}, actionCapability.ResourceClasses...),
+			HostClasses:     append([]string{}, actionCapability.HostClasses...),
+			ExecClasses:     append([]string{}, actionCapability.ExecClasses...),
+			ApprovalScopes:  append([]string{}, actionCapability.ApprovalScopes...),
+		},
+	}
+}
+
 func (s *Service) ToolCapabilities(id identity.VerifiedIdentity) map[string]ToolCapability {
 	capabilities := make(map[string]ToolCapability, len(capabilityToolDefinitions()))
 	for _, def := range capabilityToolDefinitions() {
@@ -113,6 +131,11 @@ func (s *Service) ToolCapabilities(id identity.VerifiedIdentity) map[string]Tool
 		capabilities[def.Name] = toolCapabilityState(def, actionCapability)
 	}
 	return capabilities
+}
+
+func (s *Service) ActionCapability(actionType string, id identity.VerifiedIdentity) ToolCapability {
+	actionCapability := s.policy.CapabilityForActionType(actionType, id.Principal, id.Agent, id.Environment)
+	return actionCapabilityState(actionType, actionCapability)
 }
 
 func (s *Service) EnabledTools(id identity.VerifiedIdentity) []string {
@@ -192,6 +215,8 @@ func FinalizeCapabilityEnvelope(envelope CapabilityEnvelope, id identity.Verifie
 		"approvals_enabled":       envelope.ApprovalsEnabled,
 		"assurance_level":         envelope.AssuranceLevel,
 		"mediation_notice":        envelope.MediationNotice,
+		"forwarded_tools":         envelope.ForwardedTools,
+		"mcp_surfaces":            envelope.MCPSurfaces,
 	}
 	data, err := json.Marshal(hashInput)
 	if err != nil {

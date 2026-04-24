@@ -470,6 +470,8 @@ func buildExplainResponse(explanation policy.ExplainDetails, normalized normaliz
 	resp := explainResponse{
 		ActionID:           normalized.ActionID,
 		TraceID:            normalized.TraceID,
+		ActionType:         normalized.ActionType,
+		Resource:           normalized.Resource,
 		Decision:           explanation.Decision.Decision,
 		ReasonCode:         explanation.Decision.ReasonCode,
 		MatchedRuleIDs:     append([]string{}, explanation.Decision.MatchedRuleIDs...),
@@ -547,6 +549,14 @@ func uiRemediationHint(explanation policy.ExplainDetails, normalized normalize.N
 			return "This command is not currently allowed."
 		case "fs.write", "repo.apply_patch":
 			return "This write target is not currently allowed."
+		case "mcp.resource_read":
+			return "This MCP resource is not currently allowed."
+		case "mcp.prompt_get":
+			return "This MCP prompt is not currently allowed."
+		case "mcp.completion":
+			return "This MCP completion surface is not currently allowed."
+		case "mcp.sample":
+			return "This upstream-initiated sampling request is blocked unless policy explicitly allows it."
 		default:
 			return "No matching allow rule was found for this action."
 		}
@@ -565,6 +575,14 @@ func uiRemediationSuggestion(explanation policy.ExplainDetails, normalized norma
 		return "Exec is restricted; use an allowlisted command or request approval."
 	case "fs.write", "repo.apply_patch":
 		return "Write access is restricted for this resource; use an allowed path or request approval."
+	case "mcp.resource_read":
+		return "Add an allow or approval rule for this MCP resource URI if this upstream resource should be readable."
+	case "mcp.prompt_get":
+		return "Add an allow or approval rule for this MCP prompt if this upstream prompt should be callable."
+	case "mcp.completion":
+		return "Add an allow or approval rule for this MCP completion reference if this upstream completion surface should be callable."
+	case "mcp.sample":
+		return "Sampling defaults to deny; add an explicit allow or approval rule for this upstream server only if downstream LLM use is intended."
 	default:
 		if explanation.Decision.ReasonCode == "require_approval_by_rule" {
 			return "Request approval for this action."

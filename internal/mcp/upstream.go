@@ -58,6 +58,20 @@ func writeUpstreamRPCNotification(writer *bufio.Writer, method string, params ma
 	return writer.Flush()
 }
 
+func writeUpstreamRPCResponse(writer *bufio.Writer, resp *rpcResponse) error {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(data); err != nil {
+		return err
+	}
+	if err := writer.WriteByte('\n'); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
 func readUpstreamRPCResponse(reader *bufio.Reader) (*rpcResponse, error) {
 	body, err := readMCPPayload(reader)
 	if err != nil {

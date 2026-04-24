@@ -254,3 +254,62 @@ rules:
 ```
 
 This matching model remains generic and works for any CLI with normalized argv tokens.
+
+## MCP Gateway Action Types
+
+Nomos also uses canonical `mcp://...` resources for governed MCP gateway surfaces beyond `tools/call`.
+
+Current action types:
+
+- `mcp.call` -> `mcp://<server>/<tool>`
+- `mcp.resource_read` -> `mcp://<server>/resource/<uri>`
+- `mcp.prompt_get` -> `mcp://<server>/prompt/<name>`
+- `mcp.completion` -> `mcp://<server>/completion/<ref>`
+- `mcp.sample` -> `mcp://<server>/sample`
+
+Notes:
+
+- `<server>` is lowercased during normalization.
+- resource URIs are normalized as opaque MCP resource identities, so `mcp://retail/resource/note://retail/customer-42` is the canonical policy form.
+- prompt names and completion refs are matched exactly after deterministic normalization.
+- `mcp.sample` is intentionally high-friction: if no rule matches, Nomos denies it by default.
+
+Example:
+
+```yaml
+version: v1
+rules:
+  - id: allow-retail-resource
+    action_type: mcp.resource_read
+    resource: mcp://retail/resource/note://retail/customer-42
+    decision: ALLOW
+
+  - id: allow-retail-prompt
+    action_type: mcp.prompt_get
+    resource: mcp://retail/prompt/incident.summary
+    decision: ALLOW
+
+  - id: allow-retail-completion
+    action_type: mcp.completion
+    resource: mcp://retail/completion/ref/prompt/incident.summary
+    decision: ALLOW
+
+  - id: require-approval-retail-sampling
+    action_type: mcp.sample
+    resource: mcp://retail/sample
+    decision: REQUIRE_APPROVAL
+```
+
+## Sampling Trust Inversion
+
+`sampling/createMessage` is not just another MCP helper surface.
+
+An upstream MCP server can use sampling to ask the downstream client's LLM to generate text on its behalf. That reverses the usual trust direction: the upstream tool server is now trying to drive the client model.
+
+Nomos treats that as a governed action:
+
+- upstream sampling is evaluated as `mcp.sample`
+- default behavior is deny unless policy explicitly allows or approval grants it
+- the sampling fingerprint includes the upstream server plus normalized model hints, token limits, stop conditions, and a canonicalized digest of the requested messages
+
+Operators should only allow `mcp.sample` for upstreams they explicitly trust to consume downstream model capacity and context.

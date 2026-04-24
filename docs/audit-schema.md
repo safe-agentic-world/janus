@@ -47,6 +47,14 @@ Optional replay/safety fields:
 - `prev_event_hash`
 - `event_hash`
 
+`action_type` remains an open string, but current MCP gateway values now include:
+
+- `mcp.call`
+- `mcp.resource_read`
+- `mcp.prompt_get`
+- `mcp.completion`
+- `mcp.sample`
+
 ## Result Classification
 
 Current set:

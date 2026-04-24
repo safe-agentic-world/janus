@@ -66,6 +66,7 @@ type rpcRequest struct {
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 type rpcResponse struct {
@@ -216,39 +217,8 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
-	reader := bufio.NewReader(in)
-	writer := bufio.NewWriter(out)
-	defer writer.Flush()
-	s.logger.ReadyBanner(s.identity.Environment, s.policyBundleHash, s.policyBundleSources, version.Current().Version, s.pid)
-	for {
-		payload, mode, readErr := readStdioPayload(reader)
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return nil
-			}
-			s.logger.Error("mcp stdio read failure: " + readErr.Error())
-			return readErr
-		}
-		if mode == stdioModeLine {
-			resp := s.handleLinePayload(payload)
-			if resp == nil {
-				continue
-			}
-			if writeErr := writeJSONLine(writer, resp); writeErr != nil {
-				s.logger.Error("mcp stdio line write failure: " + writeErr.Error())
-				return writeErr
-			}
-			continue
-		}
-		resp := s.handleRPCPayload(payload)
-		if resp == nil {
-			continue
-		}
-		if writeErr := writeFramedPayload(writer, resp); writeErr != nil {
-			s.logger.Error("mcp stdio framed write failure: " + writeErr.Error())
-			return writeErr
-		}
-	}
+	session := newDownstreamSession(s, in, out)
+	return session.serve()
 }
 
 type stdioMode string
@@ -332,11 +302,18 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 	if err := dec.Decode(&req); err != nil {
 		return &rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}}
 	}
+	return s.handleRPCRequest(req, nil)
+}
+
+func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *rpcResponse {
 	if req.Method == "" {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32600, Message: "invalid request"}}
 	}
 	switch req.Method {
 	case "initialize":
+		if session != nil {
+			session.clientSampling = downstreamClientSupportsSampling(req.Params)
+		}
 		return &rpcResponse{
 			JSONRPC: "2.0",
 			ID:      parseRPCID(req.ID),
@@ -346,6 +323,13 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 					"tools": map[string]any{
 						"listChanged": false,
 					},
+					"resources": map[string]any{
+						"listChanged": false,
+					},
+					"prompts": map[string]any{
+						"listChanged": false,
+					},
+					"completions": map[string]any{},
 				},
 				"serverInfo": map[string]any{
 					"name":    "nomos",
@@ -370,7 +354,7 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 			},
 		}
 	case "tools/call":
-		resp, err := s.handleToolsCall(req)
+		resp, err := s.handleToolsCall(req, session)
 		if err != nil {
 			return &rpcResponse{
 				JSONRPC: "2.0",
@@ -389,15 +373,36 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 				"isError": false,
 			},
 		}
+	case "resources/list":
+		return s.handleResourcesListRPC(req)
+	case "resources/read":
+		return s.handleResourcesReadRPC(req, session)
+	case "prompts/list":
+		return s.handlePromptsListRPC(req)
+	case "prompts/get":
+		return s.handlePromptsGetRPC(req, session)
+	case "completion/complete":
+		return s.handleCompletionRPC(req, session)
 	default:
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32601, Message: "method not found"}}
 	}
 }
 
-func (s *Server) handleToolsCall(req rpcRequest) (string, error) {
+func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (string, error) {
 	name, args, err := parseToolCallParams(req.Params)
 	if err != nil {
 		return "", errors.New("invalid params")
+	}
+	if session != nil && s.isForwardedTool(canonicalToolName(name)) {
+		resp := s.handleForwardedToolWithSession(Request{
+			ID:     rpcIDKey(parseRPCID(req.ID)),
+			Method: canonicalToolName(name),
+			Params: args,
+		}, session)
+		if resp.Error != "" {
+			return "", errors.New(toolErrorMessage(canonicalToolName(name), resp.Error))
+		}
+		return formatToolResult(canonicalToolName(name), resp.Result)
 	}
 	if len(args) == 0 {
 		args = []byte(`{}`)
@@ -596,6 +601,10 @@ func (s *Server) isForwardedTool(name string) bool {
 }
 
 func (s *Server) handleForwardedTool(req Request) Response {
+	return s.handleForwardedToolWithSession(req, nil)
+}
+
+func (s *Server) handleForwardedToolWithSession(req Request, session *downstreamSession) Response {
 	if s.upstream == nil {
 		return Response{ID: req.ID, Error: "method_not_found"}
 	}
@@ -640,7 +649,7 @@ func (s *Server) handleForwardedTool(req Request) Response {
 	if resp.Decision != policy.DecisionAllow {
 		return Response{ID: req.ID, Result: resp}
 	}
-	output, err := s.upstream.callTool(tool.ServerName, tool.ToolName, sanitizedArgs)
+	output, err := s.upstream.callToolWithRequests(tool.ServerName, tool.ToolName, sanitizedArgs, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
 	if err != nil {
 		return Response{ID: req.ID, Error: classifyForwardedToolError(err)}
 	}
@@ -800,43 +809,32 @@ func (s *Server) handleCapabilities(req Request) Response {
 	result.ApprovalsEnabled = s.approvalsEnabled
 	result.AssuranceLevel = s.assuranceLevel
 	result.MediationNotice = capabilityMediationNotice(s.assuranceLevel)
+	resourceCapability := s.service.ActionCapability("mcp.resource_read", s.identity)
+	promptCapability := s.service.ActionCapability("mcp.prompt_get", s.identity)
+	completionCapability := s.service.ActionCapability("mcp.completion", s.identity)
+	samplingCapability := s.service.ActionCapability("mcp.sample", s.identity)
+	result.MCPSurfaces = map[string]service.ToolCapability{
+		"resource_read": resourceCapability,
+		"prompt_get":    promptCapability,
+		"completion":    completionCapability,
+		"sample":        samplingCapability,
+	}
+	if s.upstream != nil && s.upstream.hasTools() {
+		toolsSnapshot := s.upstream.snapshotTools()
+		forwarded := make([]map[string]any, 0, len(toolsSnapshot))
+		for _, tool := range toolsSnapshot {
+			forwarded = append(forwarded, map[string]any{
+				"name":            tool.DownstreamName,
+				"upstream_server": tool.ServerName,
+				"upstream_tool":   tool.ToolName,
+				"action_type":     "mcp.call",
+				"resource":        "mcp://" + tool.ServerName + "/" + tool.ToolName,
+			})
+		}
+		result.ForwardedTools = forwarded
+	}
 	result = service.FinalizeCapabilityEnvelope(result, s.identity, s.policyBundleHash)
-	if s.upstream == nil || !s.upstream.hasTools() {
-		return Response{ID: req.ID, Result: result}
-	}
-	toolsSnapshot := s.upstream.snapshotTools()
-	forwarded := make([]map[string]any, 0, len(toolsSnapshot))
-	for _, tool := range toolsSnapshot {
-		forwarded = append(forwarded, map[string]any{
-			"name":            tool.DownstreamName,
-			"upstream_server": tool.ServerName,
-			"upstream_tool":   tool.ToolName,
-			"action_type":     "mcp.call",
-			"resource":        "mcp://" + tool.ServerName + "/" + tool.ToolName,
-		})
-	}
-	return Response{ID: req.ID, Result: map[string]any{
-		"contract_version":        result.ContractVersion,
-		"capability_set_hash":     result.CapabilitySetHash,
-		"advisory_only":           result.AdvisoryOnly,
-		"authorization_notice":    result.AuthorizationNotice,
-		"enabled_tools":           result.EnabledTools,
-		"immediate_tools":         result.ImmediateTools,
-		"approval_gated_tools":    result.ApprovalGatedTools,
-		"mixed_tools":             result.MixedTools,
-		"unavailable_tools":       result.UnavailableTools,
-		"advertised_tools":        result.AdvertisedTools,
-		"tool_states":             result.ToolStates,
-		"tool_advertisement_mode": result.ToolAdvertisementMode,
-		"sandbox_modes":           result.SandboxModes,
-		"network_mode":            result.NetworkMode,
-		"output_max_bytes":        result.OutputMaxBytes,
-		"output_max_lines":        result.OutputMaxLines,
-		"approvals_enabled":       result.ApprovalsEnabled,
-		"assurance_level":         result.AssuranceLevel,
-		"mediation_notice":        result.MediationNotice,
-		"forwarded_tools":         forwarded,
-	}}
+	return Response{ID: req.ID, Result: result}
 }
 
 func (s *Server) handleValidateChangeSet(req Request) Response {

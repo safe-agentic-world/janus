@@ -23,10 +23,13 @@ var (
 
 type upstreamTransport interface {
 	callMethod(method string, params map[string]any) (any, error)
+	setRequestHandler(handler upstreamRequestHandler)
 	isClosed() bool
 	close()
 	doneCh() <-chan struct{}
 }
+
+type upstreamRequestHandler func(req rpcRequest) *rpcResponse
 
 func startUpstreamTransport(config UpstreamServerConfig, notify func(method string, params json.RawMessage)) (upstreamTransport, error) {
 	switch strings.TrimSpace(config.Transport) {
@@ -67,17 +70,24 @@ type upstreamConn struct {
 
 	writeMu sync.Mutex
 
-	mu      sync.Mutex
-	pending map[string]chan rpcMessage
-	nextID  int64
-	closed  bool
-	err     error
+	mu             sync.Mutex
+	pending        map[string]chan rpcMessage
+	nextID         int64
+	closed         bool
+	err            error
+	requestHandler upstreamRequestHandler
 
 	stderrMu  sync.Mutex
 	stderrBuf bytes.Buffer
 }
 
 func (c *upstreamConn) doneCh() <-chan struct{} { return c.done }
+
+func (c *upstreamConn) setRequestHandler(handler upstreamRequestHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requestHandler = handler
+}
 
 func startUpstreamConn(config UpstreamServerConfig, notify func(method string, params json.RawMessage)) (*upstreamConn, error) {
 	cmd := exec.Command(config.Command, config.Args...)
@@ -192,18 +202,21 @@ func (c *upstreamConn) dispatch(body []byte) error {
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return fmt.Errorf("invalid upstream payload: %w", err)
 	}
-	if envelope.Method != "" && !hasJSONID(envelope.ID) {
-		if c.notifyFn != nil {
-			var note struct {
-				Params json.RawMessage `json:"params"`
+	if envelope.Method != "" {
+		if !hasJSONID(envelope.ID) {
+			if c.notifyFn != nil {
+				var note struct {
+					Params json.RawMessage `json:"params"`
+				}
+				if err := json.Unmarshal(body, &note); err == nil {
+					c.notifyFn(envelope.Method, note.Params)
+				} else {
+					c.notifyFn(envelope.Method, nil)
+				}
 			}
-			if err := json.Unmarshal(body, &note); err == nil {
-				c.notifyFn(envelope.Method, note.Params)
-			} else {
-				c.notifyFn(envelope.Method, nil)
-			}
+			return nil
 		}
-		return nil
+		return c.handleServerRequest(body)
 	}
 	var resp rpcResponse
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -222,6 +235,36 @@ func (c *upstreamConn) dispatch(body []byte) error {
 		ch <- rpcMessage{resp: &resp}
 	}
 	return nil
+}
+
+func (c *upstreamConn) handleServerRequest(body []byte) error {
+	var req rpcRequest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&req); err != nil {
+		return fmt.Errorf("invalid upstream request: %w", err)
+	}
+	c.mu.Lock()
+	handler := c.requestHandler
+	c.mu.Unlock()
+	resp := &rpcResponse{
+		JSONRPC: "2.0",
+		ID:      parseRPCID(req.ID),
+		Error:   &rpcError{Code: -32601, Message: "method not found"},
+	}
+	if handler != nil {
+		if handled := handler(req); handled != nil {
+			resp = handled
+			resp.JSONRPC = "2.0"
+			if resp.ID == nil {
+				resp.ID = parseRPCID(req.ID)
+			}
+		}
+	}
+	c.writeMu.Lock()
+	err := writeUpstreamRPCResponse(c.writer, resp)
+	c.writeMu.Unlock()
+	return err
 }
 
 func (c *upstreamConn) terminate(err error) {
@@ -352,6 +395,7 @@ type upstreamSession struct {
 	onNotification func(config UpstreamServerConfig, method string, params json.RawMessage)
 
 	mu             sync.Mutex
+	callMu         sync.Mutex
 	conn           upstreamTransport
 	starting       bool
 	closed         bool
@@ -473,10 +517,18 @@ func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
 }
 
 func (s *upstreamSession) call(method string, params map[string]any) (any, error) {
+	return s.callWithRequests(method, params, nil)
+}
+
+func (s *upstreamSession) callWithRequests(method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
+	s.callMu.Lock()
+	defer s.callMu.Unlock()
 	conn, err := s.ensureConn()
 	if err != nil {
 		return nil, err
 	}
+	conn.setRequestHandler(handler)
+	defer conn.setRequestHandler(nil)
 	result, callErr := conn.callMethod(method, params)
 	if callErr == nil {
 		return result, nil
@@ -711,6 +763,10 @@ func parseUpstreamTools(config UpstreamServerConfig, result any) ([]upstreamTool
 }
 
 func (s *upstreamSupervisor) callTool(serverName, toolName string, rawArgs json.RawMessage) (string, error) {
+	return s.callToolWithRequests(serverName, toolName, rawArgs, nil)
+}
+
+func (s *upstreamSupervisor) callToolWithRequests(serverName, toolName string, rawArgs json.RawMessage, handler upstreamRequestHandler) (string, error) {
 	s.mu.RLock()
 	session, ok := s.sessions[serverName]
 	s.mu.RUnlock()
@@ -725,14 +781,190 @@ func (s *upstreamSupervisor) callTool(serverName, toolName string, rawArgs json.
 			return "", fmt.Errorf("invalid forwarded tool arguments: %w", err)
 		}
 	}
-	result, err := session.call("tools/call", map[string]any{
+	result, err := session.callWithRequests("tools/call", map[string]any{
 		"name":      toolName,
 		"arguments": arguments,
-	})
+	}, handler)
 	if err != nil {
 		return "", err
 	}
 	return stringifyUpstreamCallResult(result)
+}
+
+func (s *upstreamSupervisor) listResources() ([]map[string]any, error) {
+	s.mu.RLock()
+	servers := make([]string, 0, len(s.sessions))
+	for name := range s.sessions {
+		servers = append(servers, name)
+	}
+	s.mu.RUnlock()
+	out := make([]map[string]any, 0)
+	for _, serverName := range servers {
+		items, err := s.listResourcesForServer(serverName)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
+}
+
+func (s *upstreamSupervisor) listResourcesForServer(serverName string) ([]map[string]any, error) {
+	result, err := s.call(serverName, "resources/list", map[string]any{})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "method not found") {
+			return []map[string]any{}, nil
+		}
+		return nil, err
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		return nil, errors.New("invalid upstream resources/list result")
+	}
+	rawItems, _ := payload["resources"].([]any)
+	out := make([]map[string]any, 0, len(rawItems))
+	for _, item := range rawItems {
+		raw, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		upstreamURI, _ := raw["uri"].(string)
+		if strings.TrimSpace(upstreamURI) == "" {
+			continue
+		}
+		entry := cloneMap(raw)
+		entry["uri"] = downstreamResourceURI(serverName, upstreamURI)
+		entry["_meta"] = map[string]any{
+			"upstream_server": serverName,
+			"upstream_uri":    upstreamURI,
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+func (s *upstreamSupervisor) readResource(serverName, uri string) (map[string]any, error) {
+	return s.readResourceWithRequests(serverName, uri, nil)
+}
+
+func (s *upstreamSupervisor) readResourceWithRequests(serverName, uri string, handler upstreamRequestHandler) (map[string]any, error) {
+	result, err := s.callWithRequests(serverName, "resources/read", map[string]any{"uri": uri}, handler)
+	if err != nil {
+		return nil, err
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		return nil, errors.New("invalid upstream resources/read result")
+	}
+	return cloneMap(payload), nil
+}
+
+func (s *upstreamSupervisor) listPrompts() ([]map[string]any, error) {
+	s.mu.RLock()
+	servers := make([]string, 0, len(s.sessions))
+	for name := range s.sessions {
+		servers = append(servers, name)
+	}
+	s.mu.RUnlock()
+	out := make([]map[string]any, 0)
+	for _, serverName := range servers {
+		items, err := s.listPromptsForServer(serverName)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
+}
+
+func (s *upstreamSupervisor) listPromptsForServer(serverName string) ([]map[string]any, error) {
+	result, err := s.call(serverName, "prompts/list", map[string]any{})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "method not found") {
+			return []map[string]any{}, nil
+		}
+		return nil, err
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		return nil, errors.New("invalid upstream prompts/list result")
+	}
+	rawItems, _ := payload["prompts"].([]any)
+	out := make([]map[string]any, 0, len(rawItems))
+	for _, item := range rawItems {
+		raw, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		upstreamName, _ := raw["name"].(string)
+		if strings.TrimSpace(upstreamName) == "" {
+			continue
+		}
+		entry := cloneMap(raw)
+		entry["name"] = downstreamPromptName(serverName, upstreamName)
+		entry["_meta"] = map[string]any{
+			"upstream_server": serverName,
+			"upstream_prompt": upstreamName,
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+func (s *upstreamSupervisor) getPrompt(serverName, name string, arguments map[string]any) (map[string]any, error) {
+	return s.getPromptWithRequests(serverName, name, arguments, nil)
+}
+
+func (s *upstreamSupervisor) getPromptWithRequests(serverName, name string, arguments map[string]any, handler upstreamRequestHandler) (map[string]any, error) {
+	result, err := s.callWithRequests(serverName, "prompts/get", map[string]any{
+		"name":      name,
+		"arguments": arguments,
+	}, handler)
+	if err != nil {
+		return nil, err
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		return nil, errors.New("invalid upstream prompts/get result")
+	}
+	return cloneMap(payload), nil
+}
+
+func (s *upstreamSupervisor) complete(serverName string, ref map[string]any, argument map[string]any, context map[string]any) (map[string]any, error) {
+	return s.completeWithRequests(serverName, ref, argument, context, nil)
+}
+
+func (s *upstreamSupervisor) completeWithRequests(serverName string, ref map[string]any, argument map[string]any, context map[string]any, handler upstreamRequestHandler) (map[string]any, error) {
+	params := map[string]any{
+		"ref":      ref,
+		"argument": argument,
+	}
+	if len(context) > 0 {
+		params["context"] = context
+	}
+	result, err := s.callWithRequests(serverName, "completion/complete", params, handler)
+	if err != nil {
+		return nil, err
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		return nil, errors.New("invalid upstream completion/complete result")
+	}
+	return cloneMap(payload), nil
+}
+
+func (s *upstreamSupervisor) call(serverName, method string, params map[string]any) (any, error) {
+	return s.callWithRequests(serverName, method, params, nil)
+}
+
+func (s *upstreamSupervisor) callWithRequests(serverName, method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
+	s.mu.RLock()
+	session, ok := s.sessions[serverName]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("upstream mcp server %q not configured", serverName)
+	}
+	return session.callWithRequests(method, params, handler)
 }
 
 func (s *upstreamSupervisor) snapshotTools() []upstreamTool {
