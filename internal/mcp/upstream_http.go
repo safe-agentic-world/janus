@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,10 +21,12 @@ import (
 )
 
 const (
-	upstreamHTTPRequestTimeout = 30 * time.Second
-	upstreamHTTPHandshakeID    = "initialize"
-	upstreamHTTPUserAgent      = "nomos-upstream-gateway/v1"
-	upstreamSSEReadCap         = 4 * 1024 * 1024
+	upstreamHTTPRequestTimeout  = 30 * time.Second
+	upstreamHTTPHandshakeID     = "initialize"
+	upstreamHTTPUserAgent       = "nomos-upstream-gateway/v1"
+	upstreamSSEReadCap          = 4 * 1024 * 1024
+	upstreamHTTPProtocolVersion = "2025-11-25"
+	defaultSSEReconnectDelay    = time.Second
 )
 
 type upstreamHTTPConn struct {
@@ -34,8 +38,10 @@ type upstreamHTTPConn struct {
 	notifyFn     func(method string, params json.RawMessage)
 	authHeaders  map[string]string
 
-	sessionID atomic.Value // string
-	postURL   atomic.Value // *neturl.URL
+	sessionID    atomic.Value // string
+	postURL      atomic.Value // *neturl.URL
+	lastEventID  atomic.Value // string
+	retryDelayMS atomic.Int64
 
 	mu      sync.Mutex
 	pending map[string]chan rpcMessage
@@ -82,9 +88,9 @@ func startUpstreamHTTPConn(config UpstreamServerConfig, notify func(method strin
 		}
 	}
 
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if config.TLSInsecure {
-		tlsCfg.InsecureSkipVerify = true
+	tlsCfg, err := upstreamTLSConfig(config)
+	if err != nil {
+		return nil, err
 	}
 	transport := &http.Transport{
 		TLSClientConfig:       tlsCfg,
@@ -136,21 +142,54 @@ func startUpstreamHTTPConn(config UpstreamServerConfig, notify func(method strin
 		streamDone:   make(chan struct{}),
 	}
 	conn.postURL.Store(endpoint)
+	conn.retryDelayMS.Store(int64(defaultSSEReconnectDelay / time.Millisecond))
 
 	if legacySSE {
 		if err := conn.startLegacySSE(); err != nil {
 			conn.shutdown(err)
 			return nil, upstreamStageError(config, "sse_connect", err, "")
 		}
-	} else {
-		close(conn.streamDone)
 	}
 
 	if err := conn.handshake(); err != nil {
 		conn.shutdown(err)
 		return nil, upstreamStageError(config, "initialize", err, "")
 	}
+	if !legacySSE {
+		go conn.streamableHTTPReadLoop()
+	}
 	return conn, nil
+}
+
+func upstreamTLSConfig(config UpstreamServerConfig) (*tls.Config, error) {
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if config.TLSInsecure {
+		tlsCfg.InsecureSkipVerify = true
+	}
+	if caPath := strings.TrimSpace(config.TLSCAFile); caPath != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		pem, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read upstream tls_ca_file: %w", err)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, errors.New("upstream tls_ca_file does not contain a valid certificate")
+		}
+		tlsCfg.RootCAs = pool
+	}
+	certFile := strings.TrimSpace(config.TLSCertFile)
+	keyFile := strings.TrimSpace(config.TLSKeyFile)
+	if certFile != "" || keyFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load upstream client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	return tlsCfg, nil
 }
 
 func (c *upstreamHTTPConn) doneCh() <-chan struct{} { return c.done }
@@ -188,6 +227,7 @@ func (c *upstreamHTTPConn) shutdown(err error) {
 }
 
 func (c *upstreamHTTPConn) close() {
+	c.closeSession()
 	c.shutdown(errUpstreamClosed)
 	<-c.streamDone
 }
@@ -199,7 +239,7 @@ func (c *upstreamHTTPConn) allocateRequestID() string {
 
 func (c *upstreamHTTPConn) handshake() error {
 	resp, err := c.sendRequestRaw(upstreamHTTPHandshakeID, "initialize", map[string]any{
-		"protocolVersion": SupportedProtocolVersion,
+		"protocolVersion": upstreamHTTPProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    "nomos-upstream-gateway",
@@ -297,24 +337,14 @@ func (c *upstreamHTTPConn) doPOST(body []byte, notification bool) (*http.Respons
 	if err != nil {
 		return nil, err
 	}
+	c.applyRequestHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
-	if notification {
-		req.Header.Set("Accept", "application/json, text/event-stream")
-	} else {
-		req.Header.Set("Accept", "application/json, text/event-stream")
-	}
-	req.Header.Set("User-Agent", upstreamHTTPUserAgent)
-	for k, v := range c.authHeaders {
-		req.Header.Set(k, v)
-	}
-	if sid, _ := c.sessionID.Load().(string); sid != "" {
-		req.Header.Set("Mcp-Session-Id", sid)
-	}
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+	if sid := resp.Header.Get("MCP-Session-Id"); sid != "" {
 		c.sessionID.Store(sid)
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -331,6 +361,17 @@ func (c *upstreamHTTPConn) doPOST(body []byte, notification bool) (*http.Respons
 		return nil, fmt.Errorf("upstream http %s: %s", resp.Status, bytes.TrimSpace(snippet))
 	}
 	return resp, nil
+}
+
+func (c *upstreamHTTPConn) applyRequestHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", upstreamHTTPUserAgent)
+	req.Header.Set("MCP-Protocol-Version", upstreamHTTPProtocolVersion)
+	for k, v := range c.authHeaders {
+		req.Header.Set(k, v)
+	}
+	if sid, _ := c.sessionID.Load().(string); sid != "" {
+		req.Header.Set("MCP-Session-Id", sid)
+	}
 }
 
 func (c *upstreamHTTPConn) postStreamableHTTPRequest(id string, body []byte) (*rpcResponse, error) {
@@ -397,6 +438,7 @@ func (c *upstreamHTTPConn) readResponseFromSSE(body io.Reader, wantID string) (*
 			}
 			return nil, err
 		}
+		c.recordSSEEventMetadata(evt)
 		if evt.data == "" {
 			continue
 		}
@@ -407,6 +449,15 @@ func (c *upstreamHTTPConn) readResponseFromSSE(body io.Reader, wantID string) (*
 		if matched {
 			return resp, nil
 		}
+	}
+}
+
+func (c *upstreamHTTPConn) recordSSEEventMetadata(evt sseEvent) {
+	if evt.id != "" {
+		c.lastEventID.Store(evt.id)
+	}
+	if evt.retry > 0 {
+		c.retryDelayMS.Store(int64(evt.retry / time.Millisecond))
 	}
 }
 
@@ -446,16 +497,14 @@ func (c *upstreamHTTPConn) processSSEMessage(raw []byte, wantID string) (*rpcRes
 	if wantID != "" && idKey == wantID {
 		return resp, true, nil
 	}
-	if c.legacySSE {
-		c.mu.Lock()
-		ch, ok := c.pending[idKey]
-		if ok {
-			delete(c.pending, idKey)
-		}
-		c.mu.Unlock()
-		if ok {
-			ch <- rpcMessage{resp: resp}
-		}
+	c.mu.Lock()
+	ch, ok := c.pending[idKey]
+	if ok {
+		delete(c.pending, idKey)
+	}
+	c.mu.Unlock()
+	if ok {
+		ch <- rpcMessage{resp: resp}
 	}
 	return nil, false, nil
 }
@@ -476,6 +525,8 @@ func decodeRPCResponse(body []byte) (*rpcResponse, error) {
 type sseEvent struct {
 	event string
 	data  string
+	id    string
+	retry time.Duration
 }
 
 func readSSEEvent(reader *bufio.Reader) (sseEvent, error) {
@@ -527,6 +578,12 @@ func readSSEEvent(reader *bufio.Reader) (sseEvent, error) {
 				dataBuf.WriteByte('\n')
 			}
 			dataBuf.WriteString(value)
+		case "id":
+			evt.id = value
+		case "retry":
+			if millis, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && millis > 0 {
+				evt.retry = time.Duration(millis) * time.Millisecond
+			}
 		}
 	}
 }
@@ -537,10 +594,7 @@ func (c *upstreamHTTPConn) startLegacySSE() error {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", upstreamHTTPUserAgent)
-	for k, v := range c.authHeaders {
-		req.Header.Set(k, v)
-	}
+	c.applyRequestHeaders(req)
 	if err := c.checkAllowlist(c.endpoint.Hostname()); err != nil {
 		return err
 	}
@@ -597,6 +651,7 @@ func (c *upstreamHTTPConn) legacySSEReadLoop(resp *http.Response) {
 			c.shutdown(err)
 			return
 		}
+		c.recordSSEEventMetadata(evt)
 		if evt.data == "" {
 			continue
 		}
@@ -605,4 +660,129 @@ func (c *upstreamHTTPConn) legacySSEReadLoop(resp *http.Response) {
 			return
 		}
 	}
+}
+
+func (c *upstreamHTTPConn) streamableHTTPReadLoop() {
+	defer close(c.streamDone)
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+		}
+		resp, supported, err := c.openStreamableHTTPEventStream()
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, errUpstreamClosed) {
+				return
+			}
+			c.shutdown(err)
+			return
+		}
+		if !supported {
+			return
+		}
+		err = c.consumeBackgroundSSE(resp.Body)
+		_ = resp.Body.Close()
+		if err == nil || errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-time.After(c.currentRetryDelay()):
+				continue
+			}
+		}
+		c.shutdown(err)
+		return
+	}
+}
+
+func (c *upstreamHTTPConn) openStreamableHTTPEventStream() (*http.Response, bool, error) {
+	if err := c.checkAllowlist(c.endpoint.Hostname()); err != nil {
+		return nil, false, err
+	}
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, c.endpoint.String(), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	c.applyRequestHeaders(req)
+	req.Header.Set("Accept", "text/event-stream")
+	if lastID, _ := c.lastEventID.Load().(string); lastID != "" {
+		req.Header.Set("Last-Event-ID", lastID)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	if resp.StatusCode == http.StatusMethodNotAllowed {
+		_ = resp.Body.Close()
+		return nil, false, nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		_ = resp.Body.Close()
+		return nil, false, fmt.Errorf("upstream auth failed: %s", resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		_ = resp.Body.Close()
+		return nil, false, fmt.Errorf("upstream http %s: %s", resp.Status, bytes.TrimSpace(snippet))
+	}
+	if sid := resp.Header.Get("MCP-Session-Id"); sid != "" {
+		c.sessionID.Store(sid)
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if !strings.HasPrefix(ct, "text/event-stream") {
+		_ = resp.Body.Close()
+		return nil, false, fmt.Errorf("upstream GET unexpected content-type %q", ct)
+	}
+	return resp, true, nil
+}
+
+func (c *upstreamHTTPConn) consumeBackgroundSSE(body io.Reader) error {
+	reader := bufio.NewReader(body)
+	for {
+		evt, err := readSSEEvent(reader)
+		if err != nil {
+			return err
+		}
+		c.recordSSEEventMetadata(evt)
+		if evt.data == "" {
+			continue
+		}
+		if _, _, err := c.processSSEMessage([]byte(evt.data), ""); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *upstreamHTTPConn) currentRetryDelay() time.Duration {
+	if millis := c.retryDelayMS.Load(); millis > 0 {
+		return time.Duration(millis) * time.Millisecond
+	}
+	return defaultSSEReconnectDelay
+}
+
+func (c *upstreamHTTPConn) closeSession() {
+	if c.legacySSE {
+		return
+	}
+	postURL, _ := c.postURL.Load().(*neturl.URL)
+	sid, _ := c.sessionID.Load().(string)
+	if postURL == nil || sid == "" {
+		return
+	}
+	if err := c.checkAllowlist(postURL.Hostname()); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, postURL.String(), nil)
+	if err != nil {
+		return
+	}
+	c.applyRequestHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
 }
