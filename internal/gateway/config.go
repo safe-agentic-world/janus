@@ -137,6 +137,9 @@ type MCPUpstreamServerConfig struct {
 	Endpoint     string                 `json:"endpoint,omitempty"`
 	AllowedHosts []string               `json:"allowed_hosts,omitempty"`
 	TLSInsecure  bool                   `json:"tls_insecure,omitempty"`
+	TLSCAFile    string                 `json:"tls_ca_file,omitempty"`
+	TLSCertFile  string                 `json:"tls_cert_file,omitempty"`
+	TLSKeyFile   string                 `json:"tls_key_file,omitempty"`
 	Auth         *MCPUpstreamAuthConfig `json:"auth,omitempty"`
 }
 
@@ -580,6 +583,25 @@ func (c Config) Validate() error {
 						return errors.New("mcp.upstream_servers.allowed_hosts entries must be non-empty")
 					}
 				}
+				if (strings.TrimSpace(server.TLSCertFile) == "") != (strings.TrimSpace(server.TLSKeyFile) == "") {
+					return errors.New("mcp.upstream_servers.tls_cert_file and tls_key_file must be provided together")
+				}
+				for _, path := range []struct {
+					value string
+					label string
+				}{
+					{server.TLSCAFile, "mcp.upstream_servers.tls_ca_file"},
+					{server.TLSCertFile, "mcp.upstream_servers.tls_cert_file"},
+					{server.TLSKeyFile, "mcp.upstream_servers.tls_key_file"},
+				} {
+					if strings.TrimSpace(path.value) == "" {
+						continue
+					}
+					info, err := os.Stat(path.value)
+					if err != nil || info.IsDir() {
+						return errors.New(path.label + " must be an existing file")
+					}
+				}
 				if server.Auth != nil {
 					switch strings.TrimSpace(server.Auth.Type) {
 					case "bearer":
@@ -906,6 +928,9 @@ func (c *Config) ResolveRelativePaths(baseDir string) error {
 			c.MCP.UpstreamServers[idx].Command = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].Command)
 		}
 		c.MCP.UpstreamServers[idx].Workdir = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].Workdir)
+		c.MCP.UpstreamServers[idx].TLSCAFile = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].TLSCAFile)
+		c.MCP.UpstreamServers[idx].TLSCertFile = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].TLSCertFile)
+		c.MCP.UpstreamServers[idx].TLSKeyFile = resolveRelativePath(absBase, c.MCP.UpstreamServers[idx].TLSKeyFile)
 	}
 	return nil
 }

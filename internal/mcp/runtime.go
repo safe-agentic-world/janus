@@ -43,6 +43,9 @@ type UpstreamServerConfig struct {
 	Endpoint     string
 	AllowedHosts []string
 	TLSInsecure  bool
+	TLSCAFile    string
+	TLSCertFile  string
+	TLSKeyFile   string
 	AuthType     string
 	AuthToken    string
 	AuthHeader   string

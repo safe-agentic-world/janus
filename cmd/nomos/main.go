@@ -827,6 +827,9 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 			Endpoint:     server.Endpoint,
 			AllowedHosts: append([]string(nil), server.AllowedHosts...),
 			TLSInsecure:  server.TLSInsecure,
+			TLSCAFile:    server.TLSCAFile,
+			TLSCertFile:  server.TLSCertFile,
+			TLSKeyFile:   server.TLSKeyFile,
 		}
 		if server.Auth != nil {
 			mapped.AuthType = server.Auth.Type

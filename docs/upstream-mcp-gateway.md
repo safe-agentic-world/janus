@@ -43,6 +43,7 @@ Out of scope for this first gateway mode:
 Use the checked-in example:
 
 - [examples/configs/config.mcp-gateway.example.json](../examples/configs/config.mcp-gateway.example.json)
+- [examples/configs/config.mcp-gateway.remote-http.example.json](../examples/configs/config.mcp-gateway.remote-http.example.json)
 - [examples/policies/mcp-gateway.example.yaml](../examples/policies/mcp-gateway.example.yaml)
 
 Config shape:
@@ -72,9 +73,13 @@ Nomos can also front remote, managed, or containerized MCP servers over HTTP. Tw
 - `streamable_http` — the current MCP Streamable HTTP transport. Nomos POSTs JSON-RPC messages to the configured endpoint and accepts either an `application/json` single response or a `text/event-stream` server-sent stream of JSON-RPC messages.
 - `sse` — the legacy two-endpoint SSE transport. Nomos opens a `GET` SSE channel, receives the `endpoint` event, and POSTs subsequent messages to the advertised URL. Responses arrive back on the open SSE stream.
 
+For `streamable_http`, Nomos speaks the current MCP HTTP transport version (`MCP-Protocol-Version: 2025-11-25`), carries forward `MCP-Session-Id` when assigned by the upstream, listens on the optional GET event stream for server-initiated notifications, and sends a best-effort `DELETE` when closing a stateful HTTP session.
+
 Both transports plug into the same long-lived session supervisor as `stdio`, so policy identity, approval semantics, forwarded tool naming, and audit records are identical across transports. A bundle that governs `mcp://retail/refund.request` does not need to change when the upstream `retail` server migrates from `stdio` to `streamable_http`.
 
 ### HTTP Upstream Config Shape
+
+The remote HTTP example above is a working template for `streamable_http` upstreams. The minimal shape is:
 
 ```json
 {
@@ -98,6 +103,8 @@ Both transports plug into the same long-lived session supervisor as `stdio`, so 
 
 - `endpoint` is required for `streamable_http` and `sse`. It must use `https` unless `tls_insecure` is set to `true`. `tls_insecure` is a dev-only escape hatch and MUST NOT be used in controlled runtimes.
 - `allowed_hosts` is an optional host allowlist. When set, the upstream endpoint host (and, for legacy SSE, the advertised POST URL host) MUST match one of the listed hosts or startup fails closed before any RPC is sent.
+- `tls_ca_file` is optional and adds a custom CA bundle for upstream TLS verification.
+- `tls_cert_file` and `tls_key_file` are optional and enable mutual TLS to the upstream MCP server. They must be configured together.
 - `auth` is an optional static auth injection hook. Supported shapes:
   - `{ "type": "bearer", "token": "..." }` → adds `Authorization: Bearer <token>`.
   - `{ "type": "header", "header": "X-Api-Key", "value": "..." }` → adds a single static header.
@@ -108,6 +115,7 @@ Auth material passed through the config is injected only into upstream HTTP requ
 ### Security Expectations
 
 - TLS verification is on by default and uses the host's system root store. TLS verification failures during handshake, session startup, or call time cause the upstream session to fail closed — forwarded calls return `upstream_unavailable` rather than silently downgrading.
+- When `tls_ca_file` is set, Nomos extends the trust store with that CA bundle rather than disabling verification. When `tls_cert_file` and `tls_key_file` are set, Nomos presents that client certificate to upstream servers requiring mTLS.
 - Upstream host allowlists are enforced **before** any JSON-RPC payload is sent. An allowlist violation prevents the upstream request entirely.
 - Upstream auth failures (HTTP `401`/`403`) surface as deterministic `upstream_unavailable` errors. Nomos does NOT retry with alternate credentials.
 - Streamed responses are read through the normal redaction and per-rule `output_max_bytes` / `output_max_lines` caps before they leave Nomos to the agent, logs, or audit sinks. A streamed secret in a tool result is redacted the same as a buffered secret.
@@ -115,6 +123,7 @@ Auth material passed through the config is injected only into upstream HTTP requ
 ### Operator Guidance
 
 - Prefer `https` endpoints with a trusted certificate chain. Reserve `tls_insecure` for local smoke tests against development servers.
+- Prefer a private CA plus `tls_ca_file` over `tls_insecure` for internal upstreams, and use `tls_cert_file` plus `tls_key_file` only for upstreams that require client-authenticated TLS.
 - Set `allowed_hosts` to the exact hostnames you intend to forward to. This is a transport-layer allowlist, not a substitute for a policy rule — the policy bundle is still the only authorization source.
 - Store upstream auth tokens outside the config file when possible (templated in at deploy time, or brokered via the M54 credential flow in future revisions). The v1 `auth` block is a stable injection point for that integration.
 - Policy bundles do not need any changes to move an upstream from `stdio` to `streamable_http`: `mcp.call` resource identity is `mcp://<server>/<tool>` regardless of transport.
