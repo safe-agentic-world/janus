@@ -224,6 +224,27 @@ nomos mcp -c .\examples\configs\config.example.json -p .\examples\policies\your-
 
 Use `-p` here only when you intentionally want to override the example config's bundled policy paths.
 
+## Remote MCP HTTP Serve Mode
+
+For shared enterprise deployments, Nomos can expose its downstream MCP surface over Streamable HTTP instead of requiring one local `stdio` subprocess per agent:
+
+```powershell
+nomos mcp serve --http --listen 127.0.0.1:8090 -c .\examples\configs\config.mcp-serve-http.example.json
+```
+
+Use this mode when:
+
+- multiple remote agents need to share one Nomos deployment
+- you want MCP session auth to reuse the same bearer, OIDC, or SPIFFE identity model as the HTTP gateway
+- you are deploying Nomos behind a reverse proxy or ingress with TLS termination
+
+Keep in mind:
+
+- clients must authenticate before `initialize`
+- tool listings are principal-scoped
+- resumed requests must send the same `MCP-Session-Id` and principal
+- `nomos mcp` stdio mode remains the right choice for single-user local editor integrations
+
 ## Doctor Preflight
 
 Use `nomos doctor` before connecting MCP clients to validate configuration and runtime readiness.

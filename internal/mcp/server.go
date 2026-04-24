@@ -42,6 +42,7 @@ type Server struct {
 	upstream            *upstreamSupervisor
 	logger              *runtimeLogger
 	pid                 int
+	ownsResources       bool
 }
 
 type Request struct {
@@ -185,7 +186,18 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		upstream:            upstream,
 		logger:              logger,
 		pid:                 os.Getpid(),
+		ownsResources:       true,
 	}, nil
+}
+
+func (s *Server) CloneForIdentity(id identity.VerifiedIdentity) *Server {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.identity = id
+	clone.ownsResources = false
+	return &clone
 }
 
 func (s *Server) SetAssuranceLevel(level string) {
@@ -204,11 +216,11 @@ func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.upstream != nil {
+	if s.ownsResources && s.upstream != nil {
 		s.upstream.close()
 		s.upstream = nil
 	}
-	if s.approvals == nil {
+	if !s.ownsResources || s.approvals == nil {
 		return nil
 	}
 	err := s.approvals.Close()
@@ -350,7 +362,7 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 			JSONRPC: "2.0",
 			ID:      parseRPCID(req.ID),
 			Result: map[string]any{
-				"tools": s.toolsList(),
+				"tools": s.toolsListForSession(session),
 			},
 		}
 	case "tools/call":
@@ -408,11 +420,11 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 		args = []byte(`{}`)
 	}
 	legacyReq := Request{
-		ID:     string(req.ID),
+		ID:     rpcIDKey(parseRPCID(req.ID)),
 		Method: canonicalToolName(name),
 		Params: args,
 	}
-	legacyResp := s.handleRequest(legacyReq)
+	legacyResp := s.handleRequestWithSession(legacyReq, session)
 	if legacyResp.Error != "" {
 		return "", errors.New(toolErrorMessage(canonicalToolName(name), legacyResp.Error))
 	}
@@ -447,14 +459,39 @@ func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
 }
 
 func (s *Server) toolsList() []map[string]any {
+	return s.toolsListForIdentity(s.identity, false)
+}
+
+func (s *Server) toolsListForSession(session *downstreamSession) []map[string]any {
+	if session == nil {
+		return s.toolsList()
+	}
+	return s.toolsListForIdentity(session.actionIdentity(), true)
+}
+
+func (s *Server) toolsListForIdentity(id identity.VerifiedIdentity, filterUnavailable bool) []map[string]any {
+	capabilities := s.service.ToolCapabilities(id)
 	tools := []map[string]any{
 		{"name": advertisedToolName("nomos.capabilities"), "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.fs_read"), "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.fs_write"), "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.apply_patch"), "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.exec"), "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.http_request"), "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": advertisedToolName("repo.validate_change_set"), "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}},
+	}
+	directTools := []struct {
+		capability string
+		entry      map[string]any
+	}{
+		{"nomos.fs_read", map[string]any{"name": advertisedToolName("nomos.fs_read"), "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}}},
+		{"nomos.fs_write", map[string]any{"name": advertisedToolName("nomos.fs_write"), "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}}},
+		{"nomos.apply_patch", map[string]any{"name": advertisedToolName("nomos.apply_patch"), "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}}},
+		{"nomos.exec", map[string]any{"name": advertisedToolName("nomos.exec"), "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}}},
+		{"nomos.http_request", map[string]any{"name": advertisedToolName("nomos.http_request"), "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}}},
+		{"repo.validate_change_set", map[string]any{"name": advertisedToolName("repo.validate_change_set"), "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}}},
+	}
+	for _, tool := range directTools {
+		if filterUnavailable {
+			if capability, ok := capabilities[tool.capability]; ok && capability.State == service.ToolStateUnavailable {
+				continue
+			}
+		}
+		tools = append(tools, tool.entry)
 	}
 	if s.upstream != nil {
 		for _, tool := range s.upstream.snapshotTools() {
@@ -540,24 +577,28 @@ func parseRPCID(raw json.RawMessage) interface{} {
 }
 
 func (s *Server) handleRequest(req Request) Response {
+	return s.handleRequestWithSession(req, nil)
+}
+
+func (s *Server) handleRequestWithSession(req Request, session *downstreamSession) Response {
 	req.Method = canonicalToolName(req.Method)
 	if req.Method != "nomos.fs_read" {
 		switch req.Method {
 		case "nomos.capabilities":
 			return s.handleCapabilities(req)
 		case "nomos.fs_write":
-			return s.handleFSWrite(req)
+			return s.handleFSWrite(req, session)
 		case "nomos.apply_patch":
-			return s.handleApplyPatch(req)
+			return s.handleApplyPatch(req, session)
 		case "nomos.exec":
-			return s.handleExec(req)
+			return s.handleExec(req, session)
 		case "nomos.http_request":
-			return s.handleHTTPRequest(req)
+			return s.handleHTTPRequest(req, session)
 		case "repo.validate_change_set":
 			return s.handleValidateChangeSet(req)
 		default:
 			if s.isForwardedTool(req.Method) {
-				return s.handleForwardedTool(req)
+				return s.handleForwardedToolWithSession(req, session)
 			}
 			return Response{ID: req.ID, Error: "method_not_found"}
 		}
@@ -579,7 +620,7 @@ func (s *Server) handleRequest(req Request) Response {
 		Resource:      resource,
 		Params:        []byte(`{}`),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -636,7 +677,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 			"tool_arguments":  check,
 		}),
 		TraceID: "mcp_" + req.ID,
-		Context: action.Context{Extensions: buildActionExtensions(approvalID)},
+		Context: action.Context{Extensions: buildActionExtensionsForSession(approvalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -660,7 +701,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleFSWrite(req Request) Response {
+func (s *Server) handleFSWrite(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.fs_write") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -681,7 +722,7 @@ func (s *Server) handleFSWrite(req Request) Response {
 		Resource:      resource,
 		Params:        mustJSONBytes(map[string]string{"content": params.Content}),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -694,7 +735,7 @@ func (s *Server) handleFSWrite(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleApplyPatch(req Request) Response {
+func (s *Server) handleApplyPatch(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.apply_patch") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -711,7 +752,7 @@ func (s *Server) handleApplyPatch(req Request) Response {
 		Resource:      "repo://local/workspace",
 		Params:        mustJSONBytes(map[string]string{"path": params.Path, "content": params.Content}),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -724,7 +765,7 @@ func (s *Server) handleApplyPatch(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleExec(req Request) Response {
+func (s *Server) handleExec(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.exec") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -745,7 +786,7 @@ func (s *Server) handleExec(req Request) Response {
 			"env_allowlist_keys": params.EnvAllowlistKeys,
 		}),
 		TraceID: "mcp_" + req.ID,
-		Context: action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context: action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -758,7 +799,7 @@ func (s *Server) handleExec(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleHTTPRequest(req Request) Response {
+func (s *Server) handleHTTPRequest(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.http_request") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -778,7 +819,7 @@ func (s *Server) handleHTTPRequest(req Request) Response {
 		Resource:      params.Resource,
 		Params:        mustJSONBytes(map[string]any{"method": params.Method, "body": params.Body, "headers": params.Header}),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -896,12 +937,16 @@ func mustJSONBytes(value any) []byte {
 	return data
 }
 
-func buildActionExtensions(approvalID string) map[string]json.RawMessage {
+func buildActionExtensionsForSession(approvalID string, session *downstreamSession) map[string]json.RawMessage {
 	extensions := map[string]json.RawMessage{}
-	if strings.TrimSpace(approvalID) == "" {
-		return extensions
+	if strings.TrimSpace(approvalID) != "" {
+		extensions["approval"] = mustJSONBytes(map[string]string{"approval_id": strings.TrimSpace(approvalID)})
 	}
-	extensions["approval"] = mustJSONBytes(map[string]string{"approval_id": strings.TrimSpace(approvalID)})
+	if session != nil {
+		if metadata := session.auditMetadata(); len(metadata) > 0 {
+			extensions["transport"] = mustJSONBytes(metadata)
+		}
+	}
 	return extensions
 }
 

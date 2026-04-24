@@ -141,6 +141,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		fallbackEnv:        actionInput.Environment,
 		actionSummary:      actionSummary(actionInput.ActionType, actionInput.Resource),
 		paramsSummary:      summarizeParams(s.redactor, actionInput.Params),
+		executorMetadata:   transportMetadataFromContext(actionInput.Context),
 	}
 	defer func() {
 		s.emitCompletedAudit(auditCtx, started)
@@ -344,11 +345,11 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	if !action.IsBuiltInActionType(normalized.ActionType) {
 		response.ExecutionMode = action.ExecutionModeExternalAuthorized
 		response.ReportPath = "/actions/report"
-		auditCtx.executorMetadata = map[string]any{
+		auditCtx.executorMetadata = mergeExecutorMetadata(auditCtx.executorMetadata, map[string]any{
 			"execution_mode":      action.ExecutionModeExternalAuthorized,
 			"nomos_executed":      false,
 			"reporting_supported": true,
-		}
+		})
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
 		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
@@ -370,11 +371,11 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		}
 		redacted := s.redactor.RedactText(readResult.Content)
 		response.Output, response.Truncated = applyOutputObligations(redacted, decision.Obligations, readResult.Truncated)
-		auditCtx.executorMetadata = map[string]any{
+		auditCtx.executorMetadata = mergeExecutorMetadata(auditCtx.executorMetadata, map[string]any{
 			"bytes_read": readResult.BytesRead,
 			"lines_read": readResult.LinesRead,
 			"truncated":  response.Truncated,
-		}
+		})
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
 		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
@@ -396,7 +397,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		auditCtx.resultSummary = summarizeResponse(s.redactor, resp)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, resp)
 		if metadata != nil {
-			auditCtx.executorMetadata = metadata
+			auditCtx.executorMetadata = mergeExecutorMetadata(auditCtx.executorMetadata, metadata)
 		}
 	}
 	s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, resp.Decision)

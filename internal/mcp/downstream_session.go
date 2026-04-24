@@ -10,13 +10,15 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
 type downstreamSession struct {
-	server *Server
-	reader *bufio.Reader
-	writer *bufio.Writer
+	server   *Server
+	identity identity.VerifiedIdentity
+	reader   *bufio.Reader
+	writer   *bufio.Writer
 
 	modeMu  sync.Mutex
 	mode    stdioMode
@@ -24,9 +26,12 @@ type downstreamSession struct {
 
 	writeMu sync.Mutex
 
-	mu      sync.Mutex
-	pending map[string]chan rpcMessage
-	closed  bool
+	mu         sync.Mutex
+	pending    map[string]chan rpcMessage
+	closed     bool
+	sessionID  string
+	transport  string
+	sendRawRPC func([]byte) error
 
 	nextID int64
 	done   chan struct{}
@@ -36,11 +41,25 @@ type downstreamSession struct {
 
 func newDownstreamSession(server *Server, in io.Reader, out io.Writer) *downstreamSession {
 	return &downstreamSession{
-		server:  server,
-		reader:  bufio.NewReader(in),
-		writer:  bufio.NewWriter(out),
-		pending: map[string]chan rpcMessage{},
-		done:    make(chan struct{}),
+		server:    server,
+		identity:  server.identity,
+		reader:    bufio.NewReader(in),
+		writer:    bufio.NewWriter(out),
+		pending:   map[string]chan rpcMessage{},
+		done:      make(chan struct{}),
+		transport: "stdio",
+	}
+}
+
+func newHTTPDownstreamSession(server *Server, id identity.VerifiedIdentity, sessionID string, sendRaw func([]byte) error) *downstreamSession {
+	return &downstreamSession{
+		server:     server.CloneForIdentity(id),
+		identity:   id,
+		pending:    map[string]chan rpcMessage{},
+		done:       make(chan struct{}),
+		sessionID:  sessionID,
+		transport:  "streamable_http",
+		sendRawRPC: sendRaw,
 	}
 }
 
@@ -178,6 +197,9 @@ func (s *downstreamSession) writeRPCResponse(resp *rpcResponse) error {
 }
 
 func (s *downstreamSession) writeRawRPC(data []byte) error {
+	if s.sendRawRPC != nil {
+		return s.sendRawRPC(data)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	mode, _ := s.currentMode()
@@ -198,6 +220,26 @@ func (s *downstreamSession) writeRawRPC(data []byte) error {
 		return err
 	}
 	return s.writer.Flush()
+}
+
+func (s *downstreamSession) actionIdentity() identity.VerifiedIdentity {
+	if s == nil {
+		return identity.VerifiedIdentity{}
+	}
+	return s.identity
+}
+
+func (s *downstreamSession) auditMetadata() map[string]any {
+	if s == nil {
+		return nil
+	}
+	metadata := map[string]any{
+		"downstream_transport": s.transport,
+	}
+	if s.sessionID != "" {
+		metadata["downstream_session_id"] = s.sessionID
+	}
+	return metadata
 }
 
 func (s *downstreamSession) setMode(mode stdioMode) {

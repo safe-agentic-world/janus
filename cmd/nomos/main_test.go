@@ -116,6 +116,9 @@ func TestHelpTextStability(t *testing.T) {
 	if !strings.Contains(mcp, "-c, --config") || !strings.Contains(mcp, "-p, --policy-bundle") || !strings.Contains(mcp, "-l, --log-level") || !strings.Contains(mcp, "-q, --quiet") {
 		t.Fatalf("missing short/long flags in mcp help: %q", mcp)
 	}
+	if !strings.Contains(mcp, "nomos mcp serve --http --listen 127.0.0.1:8090") {
+		t.Fatalf("expected mcp serve example in help: %q", mcp)
+	}
 }
 
 func TestVersionOutputIncludesExpectedFields(t *testing.T) {
@@ -188,6 +191,7 @@ func TestDocumentedArtifactsExist(t *testing.T) {
 		filepath.Join("..", "..", "examples", "policies", "local-override.yaml"),
 		filepath.Join("..", "..", "examples", "configs", "config.layered.example.json"),
 		filepath.Join("..", "..", "examples", "configs", "config.layered.local-override.example.json"),
+		filepath.Join("..", "..", "examples", "configs", "config.mcp-serve-http.example.json"),
 	}
 	for _, path := range required {
 		if _, err := os.Stat(path); err != nil {

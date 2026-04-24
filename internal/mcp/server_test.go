@@ -337,7 +337,7 @@ func TestHandleHTTPRequestHonorsConfiguredUpstreamRoutes(t *testing.T) {
 		ID:     "1",
 		Method: "nomos.http_request",
 		Params: mustJSONBytes(map[string]any{"resource": "url://api.example.com/v1/status", "method": "GET"}),
-	})
+	}, nil)
 	if allowed.Error == "validation_error" {
 		t.Fatalf("expected configured upstream route to pass precheck, got %+v", allowed)
 	}
@@ -346,7 +346,7 @@ func TestHandleHTTPRequestHonorsConfiguredUpstreamRoutes(t *testing.T) {
 		ID:     "2",
 		Method: "nomos.http_request",
 		Params: mustJSONBytes(map[string]any{"resource": "url://api.example.com/v2/status", "method": "GET"}),
-	})
+	}, nil)
 	if blocked.Error != "validation_error" {
 		t.Fatalf("expected upstream mismatch validation_error, got %+v", blocked)
 	}
