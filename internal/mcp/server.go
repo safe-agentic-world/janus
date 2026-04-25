@@ -677,8 +677,8 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 			"tool_arguments":  check,
 		}),
 		TraceID: "mcp_" + req.ID,
-		Context: action.Context{Extensions: buildActionExtensionsForSession(approvalID, session)},
 	}
+	actionReq.Context = action.Context{Extensions: buildActionExtensionsForSessionWithMetadata(approvalID, session, s.upstream.envMetadata(tool.ServerName))}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
@@ -938,14 +938,25 @@ func mustJSONBytes(value any) []byte {
 }
 
 func buildActionExtensionsForSession(approvalID string, session *downstreamSession) map[string]json.RawMessage {
+	return buildActionExtensionsForSessionWithMetadata(approvalID, session, nil)
+}
+
+func buildActionExtensionsForSessionWithMetadata(approvalID string, session *downstreamSession, extra map[string]any) map[string]json.RawMessage {
 	extensions := map[string]json.RawMessage{}
 	if strings.TrimSpace(approvalID) != "" {
 		extensions["approval"] = mustJSONBytes(map[string]string{"approval_id": strings.TrimSpace(approvalID)})
 	}
+	metadata := map[string]any{}
 	if session != nil {
-		if metadata := session.auditMetadata(); len(metadata) > 0 {
-			extensions["transport"] = mustJSONBytes(metadata)
+		for key, value := range session.auditMetadata() {
+			metadata[key] = value
 		}
+	}
+	for key, value := range extra {
+		metadata[key] = value
+	}
+	if len(metadata) > 0 {
+		extensions["transport"] = mustJSONBytes(metadata)
 	}
 	return extensions
 }

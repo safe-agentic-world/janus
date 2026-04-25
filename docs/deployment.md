@@ -109,6 +109,16 @@ Related references:
 - `docs/upstream-mcp-gateway.md`
 - `examples/configs/config.mcp-serve-http.example.json`
 
+## Upstream Env Isolation
+
+For upstream stdio servers, Nomos now starts child processes from an empty-by-default environment. If an upstream server needs specific parent variables, add them explicitly with `mcp.upstream_servers[].env_allowlist` and `mcp.upstream_servers[].env`.
+
+This is a migration change for older configs that implicitly depended on `os.Environ()` inheritance. The safe path is:
+
+1. list the exact parent env names you need in `env_allowlist`
+2. add fixed values in `env`
+3. prefer absolute command paths for stdio upstreams if `PATH` is no longer available to the child
+
 ## Container Packaging
 
 Nomos does not currently publish or maintain an official container image path.

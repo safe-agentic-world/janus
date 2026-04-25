@@ -132,6 +132,7 @@ type MCPUpstreamServerConfig struct {
 	Transport    string                 `json:"transport"`
 	Command      string                 `json:"command,omitempty"`
 	Args         []string               `json:"args,omitempty"`
+	EnvAllowlist []string               `json:"env_allowlist,omitempty"`
 	Env          map[string]string      `json:"env,omitempty"`
 	Workdir      string                 `json:"workdir,omitempty"`
 	Endpoint     string                 `json:"endpoint,omitempty"`
@@ -621,9 +622,22 @@ func (c Config) Validate() error {
 			default:
 				return errors.New("mcp.upstream_servers.transport must be stdio|streamable_http|sse")
 			}
+			for _, key := range server.EnvAllowlist {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
+					return errors.New("mcp.upstream_servers.env_allowlist entries must be non-empty")
+				}
+				if strings.ContainsAny(trimmed, "*?[]") {
+					return errors.New("mcp.upstream_servers.env_allowlist must use exact variable names")
+				}
+			}
 			for key := range server.Env {
-				if strings.TrimSpace(key) == "" {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
 					return errors.New("mcp.upstream_servers.env keys must be non-empty")
+				}
+				if strings.ContainsAny(trimmed, "*?[]") {
+					return errors.New("mcp.upstream_servers.env keys must use exact variable names")
 				}
 			}
 			if value := strings.TrimSpace(server.Workdir); value != "" {

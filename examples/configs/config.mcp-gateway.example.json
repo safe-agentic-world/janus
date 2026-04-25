@@ -55,6 +55,10 @@
         "args": [
           "path/to/your/retail_mcp_server.py"
         ],
+        "env_allowlist": [
+          "PATH",
+          "HOME"
+        ],
         "env": {
           "REFUND_BASE_URL": "http://127.0.0.1:8002",
           "COMP_SERVICE_BASE_URL": "http://127.0.0.1:8002"

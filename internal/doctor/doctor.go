@@ -220,6 +220,37 @@ func Run(options Options) (Report, error) {
 	mark("mcp.enabled", mcpEnabled, "mcp mode enabled", "set mcp.enabled=true for MCP readiness")
 	mark("mcp.transport_configured", mcpEnabled, "mcp stdio transport configured", "enable mcp mode in config")
 	mark("mcp.stdio_structure_valid", mcpEnabled, "mcp stdio structure valid", "enable mcp mode and keep standard nomos mcp invocation")
+	if cfgErr == nil {
+		for _, upstream := range cfg.MCP.UpstreamServers {
+			if strings.TrimSpace(upstream.Transport) != "stdio" {
+				continue
+			}
+			checkID := "mcp.upstream_env_isolation." + strings.TrimSpace(upstream.Name)
+			emptyEnv := len(upstream.EnvAllowlist) == 0 && len(upstream.Env) == 0
+			absoluteCommand := filepath.IsAbs(strings.TrimSpace(upstream.Command))
+			if emptyEnv {
+				message := "upstream env isolation uses empty env by default"
+				hint := "set env_allowlist/env explicitly to preserve parent variables"
+				if !absoluteCommand {
+					message = "upstream env isolation uses empty env by default and the command is not absolute"
+					hint = "set env_allowlist/env explicitly or use an absolute command path"
+				}
+				report.Checks = append(report.Checks, Check{
+					ID:      checkID,
+					Status:  "WARN",
+					Message: message,
+					Hint:    hint,
+				})
+				continue
+			}
+			report.Checks = append(report.Checks, Check{
+				ID:      checkID,
+				Status:  "PASS",
+				Message: "upstream env isolation configured",
+				Hint:    "empty-by-default env is in effect",
+			})
+		}
+	}
 
 	workspaceExists := false
 	workspaceCanon := false

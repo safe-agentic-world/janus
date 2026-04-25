@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -27,6 +26,7 @@ type upstreamTransport interface {
 	isClosed() bool
 	close()
 	doneCh() <-chan struct{}
+	envShapeHash() string
 }
 
 type upstreamRequestHandler func(req rpcRequest) *rpcResponse
@@ -57,13 +57,14 @@ type rpcMessage struct {
 }
 
 type upstreamConn struct {
-	config   UpstreamServerConfig
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	writer   *bufio.Writer
-	notifyFn func(method string, params json.RawMessage)
+	config            UpstreamServerConfig
+	cmd               *exec.Cmd
+	stdin             io.WriteCloser
+	stdout            io.ReadCloser
+	stderr            io.ReadCloser
+	writer            *bufio.Writer
+	notifyFn          func(method string, params json.RawMessage)
+	envShapeHashValue string
 
 	done       chan struct{}
 	stderrDone chan struct{}
@@ -83,6 +84,8 @@ type upstreamConn struct {
 
 func (c *upstreamConn) doneCh() <-chan struct{} { return c.done }
 
+func (c *upstreamConn) envShapeHash() string { return c.envShapeHashValue }
+
 func (c *upstreamConn) setRequestHandler(handler upstreamRequestHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -94,10 +97,8 @@ func startUpstreamConn(config UpstreamServerConfig, notify func(method string, p
 	if strings.TrimSpace(config.Workdir) != "" {
 		cmd.Dir = config.Workdir
 	}
-	cmd.Env = os.Environ()
-	for key, value := range config.Env {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	env, envShapeHash := buildUpstreamEnvironment(config)
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -120,16 +121,17 @@ func startUpstreamConn(config UpstreamServerConfig, notify func(method string, p
 		return nil, err
 	}
 	conn := &upstreamConn{
-		config:     config,
-		cmd:        cmd,
-		stdin:      stdin,
-		stdout:     stdout,
-		stderr:     stderr,
-		writer:     bufio.NewWriter(stdin),
-		pending:    map[string]chan rpcMessage{},
-		done:       make(chan struct{}),
-		stderrDone: make(chan struct{}),
-		notifyFn:   notify,
+		config:            config,
+		cmd:               cmd,
+		stdin:             stdin,
+		stdout:            stdout,
+		stderr:            stderr,
+		writer:            bufio.NewWriter(stdin),
+		pending:           map[string]chan rpcMessage{},
+		done:              make(chan struct{}),
+		stderrDone:        make(chan struct{}),
+		notifyFn:          notify,
+		envShapeHashValue: envShapeHash,
 	}
 	go conn.drainStderr()
 	go conn.readLoop()
@@ -394,16 +396,17 @@ type upstreamSession struct {
 	logger         *runtimeLogger
 	onNotification func(config UpstreamServerConfig, method string, params json.RawMessage)
 
-	mu             sync.Mutex
-	callMu         sync.Mutex
-	conn           upstreamTransport
-	starting       bool
-	closed         bool
-	lastFailureAt  time.Time
-	attempts       int
-	backoffInitial time.Duration
-	backoffMax     time.Duration
-	clock          func() time.Time
+	mu                sync.Mutex
+	callMu            sync.Mutex
+	conn              upstreamTransport
+	starting          bool
+	closed            bool
+	lastFailureAt     time.Time
+	attempts          int
+	envShapeHashValue string
+	backoffInitial    time.Duration
+	backoffMax        time.Duration
+	clock             func() time.Time
 }
 
 func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, notifyFn func(UpstreamServerConfig, string, json.RawMessage), clock func() time.Time) *upstreamSession {
@@ -427,6 +430,12 @@ func (s *upstreamSession) connForTest() *upstreamConn {
 		return conn
 	}
 	return nil
+}
+
+func (s *upstreamSession) envShapeHash() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.envShapeHashValue
 }
 
 func (s *upstreamSession) transportForTest() upstreamTransport {
@@ -487,6 +496,13 @@ func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
 		s.mu.Unlock()
 		return nil, errUpstreamUnavailable
 	}
+	if s.logger != nil && s.config.Transport == "stdio" && len(uniqueSortedNames(s.config.EnvAllowlist)) == 0 && len(s.config.Env) == 0 {
+		message := fmt.Sprintf("upstream mcp server %q uses empty env by default", s.config.Name)
+		if !isAbsoluteCommandPath(s.config.Command) {
+			message = fmt.Sprintf("%s and non-absolute command %q", message, strings.TrimSpace(s.config.Command))
+		}
+		s.logger.Warn(message + "; set env_allowlist/env explicitly or use an absolute command path")
+	}
 	s.starting = true
 	s.mu.Unlock()
 
@@ -511,6 +527,7 @@ func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
 		return nil, startErr
 	}
 	s.conn = conn
+	s.envShapeHashValue = conn.envShapeHash()
 	s.attempts = 0
 	s.lastFailureAt = time.Time{}
 	return conn, nil
@@ -789,6 +806,22 @@ func (s *upstreamSupervisor) callToolWithRequests(serverName, toolName string, r
 		return "", err
 	}
 	return stringifyUpstreamCallResult(result)
+}
+
+func (s *upstreamSupervisor) envMetadata(serverName string) map[string]any {
+	s.mu.RLock()
+	session, ok := s.sessions[serverName]
+	s.mu.RUnlock()
+	if !ok || session == nil {
+		return nil
+	}
+	hash := session.envShapeHash()
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	return map[string]any{
+		"upstream_env_shape_hash": hash,
+	}
 }
 
 func (s *upstreamSupervisor) listResources() ([]map[string]any, error) {

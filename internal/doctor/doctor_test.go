@@ -34,6 +34,71 @@ func TestRunReady(t *testing.T) {
 	}
 }
 
+func TestRunWarnsOnEmptyEnvWithRelativeUpstreamCommand(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"r1","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	configPath := filepath.Join(dir, "config.json")
+	cfg := map[string]any{
+		"gateway":     map[string]any{"listen": ":8080", "transport": "http"},
+		"runtime":     map[string]any{"stateless_mode": false, "strong_guarantee": false, "deployment_mode": "unmanaged"},
+		"policy":      map[string]any{"policy_bundle_path": bundlePath},
+		"executor":    map[string]any{"sandbox_enabled": false, "workspace_root": dir},
+		"credentials": map[string]any{"enabled": false, "secrets": []any{}},
+		"audit":       map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"upstream_servers": []any{
+				map[string]any{
+					"name":      "retail",
+					"transport": "stdio",
+					"command":   "python",
+					"args":      []any{"server.py"},
+				},
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"dev-api-key": "system"},
+			"agent_secrets": map[string]any{"nomos": "dev-agent-secret"},
+			"oidc":          map[string]any{"enabled": false, "issuer": "", "audience": "", "public_key_path": ""},
+		},
+		"redaction": map[string]any{"patterns": []any{}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	report, err := Run(Options{ConfigPath: configPath, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatalf("doctor run: %v", err)
+	}
+	if report.OverallStatus != "READY" {
+		t.Fatalf("expected READY, got %s", report.OverallStatus)
+	}
+	for _, check := range report.Checks {
+		if check.ID == "mcp.upstream_env_isolation.retail" {
+			if check.Status != "WARN" {
+				t.Fatalf("expected WARN env isolation check, got %+v", check)
+			}
+			if !strings.Contains(check.Message, "empty env") {
+				t.Fatalf("expected env isolation warning message, got %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("missing env isolation warning check")
+}
+
 func TestRunMultiBundleReportsMergedSources(t *testing.T) {
 	dir := t.TempDir()
 	baseBundlePath := filepath.Join(dir, "base.json")

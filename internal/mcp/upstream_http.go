@@ -195,6 +195,8 @@ func upstreamTLSConfig(config UpstreamServerConfig) (*tls.Config, error) {
 
 func (c *upstreamHTTPConn) doneCh() <-chan struct{} { return c.done }
 
+func (c *upstreamHTTPConn) envShapeHash() string { return "" }
+
 func (c *upstreamHTTPConn) setRequestHandler(handler upstreamRequestHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

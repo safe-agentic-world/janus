@@ -69,7 +69,7 @@ func parseDownstreamResourceURI(raw string) (string, string, error) {
 	return strings.ToLower(parsed.Host), decoded, nil
 }
 
-func (s *Server) processGovernedMCPAction(reqID, actionType, resource string, params any, approvalID string, session *downstreamSession) (action.Response, error) {
+func (s *Server) processGovernedMCPAction(reqID, actionType, resource string, params any, approvalID string, session *downstreamSession, extraMetadata map[string]any) (action.Response, error) {
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + reqID,
@@ -77,7 +77,7 @@ func (s *Server) processGovernedMCPAction(reqID, actionType, resource string, pa
 		Resource:      resource,
 		Params:        mustJSONBytes(params),
 		TraceID:       "mcp_" + reqID,
-		Context:       action.Context{Extensions: buildActionExtensionsForSession(approvalID, session)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSessionWithMetadata(approvalID, session, extraMetadata)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -210,7 +210,7 @@ func (s *Server) handleResourcesReadRPC(req rpcRequest, session *downstreamSessi
 	actionResp, err := s.processGovernedMCPAction(rpcIDKey(parseRPCID(req.ID)), "mcp.resource_read", downstreamResourceActionResource(serverName, upstreamURI), map[string]any{
 		"upstream_server": serverName,
 		"upstream_uri":    upstreamURI,
-	}, params.Meta.ApprovalID, session)
+	}, params.Meta.ApprovalID, session, s.upstream.envMetadata(serverName))
 	if err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
 	}
@@ -258,7 +258,7 @@ func (s *Server) handlePromptsGetRPC(req rpcRequest, session *downstreamSession)
 		"upstream_server":  serverName,
 		"upstream_prompt":  upstreamPrompt,
 		"prompt_arguments": params.Arguments,
-	}, params.Meta.ApprovalID, session)
+	}, params.Meta.ApprovalID, session, s.upstream.envMetadata(serverName))
 	if err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
 	}
@@ -289,7 +289,7 @@ func (s *Server) handleCompletionRPC(req rpcRequest, session *downstreamSession)
 		"completion_ref":     upstreamRef,
 		"completion_arg":     params.Argument,
 		"completion_context": params.Context,
-	}, params.Meta.ApprovalID, session)
+	}, params.Meta.ApprovalID, session, s.upstream.envMetadata(serverName))
 	if err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
 	}
@@ -391,7 +391,7 @@ func (s *Server) handleSamplingRPC(req rpcRequest, session *downstreamSession, s
 	if err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
 	}
-	actionResp, err := s.processGovernedMCPAction(rpcIDKey(parseRPCID(req.ID)), "mcp.sample", downstreamSamplingActionResource(serverName), summary, approvalID, session)
+	actionResp, err := s.processGovernedMCPAction(rpcIDKey(parseRPCID(req.ID)), "mcp.sample", downstreamSamplingActionResource(serverName), summary, approvalID, session, s.upstream.envMetadata(serverName))
 	if err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
 	}

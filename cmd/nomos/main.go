@@ -923,6 +923,7 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 			Transport:    server.Transport,
 			Command:      server.Command,
 			Args:         append([]string(nil), server.Args...),
+			EnvAllowlist: append([]string(nil), server.EnvAllowlist...),
 			Env:          env,
 			Workdir:      server.Workdir,
 			Endpoint:     server.Endpoint,

@@ -38,6 +38,7 @@ type UpstreamServerConfig struct {
 	Transport    string
 	Command      string
 	Args         []string
+	EnvAllowlist []string
 	Env          map[string]string
 	Workdir      string
 	Endpoint     string
@@ -150,6 +151,10 @@ func newRuntimeLogger(options RuntimeOptions) (*runtimeLogger, error) {
 
 func (l *runtimeLogger) Error(message string) {
 	l.write(logLevelError, "error", message)
+}
+
+func (l *runtimeLogger) Warn(message string) {
+	l.write(logLevelWarn, "warn", message)
 }
 
 func (l *runtimeLogger) Debug(message string) {
