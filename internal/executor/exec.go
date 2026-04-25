@@ -61,12 +61,27 @@ func (r *ExecRunner) Run(params ExecParams) (ExecResult, error) {
 	if len(params.Argv) == 0 {
 		return ExecResult{}, errors.New("argv is required")
 	}
-	if err := validateExecCommand(params.Argv); err != nil {
-		return ExecResult{}, err
+	command := strings.TrimSpace(params.Argv[0])
+	if command == "" {
+		return ExecResult{}, errors.New("argv[0] is required")
+	}
+	if !safeCommandNamePattern.MatchString(command) {
+		return ExecResult{}, errors.New("argv[0] contains unsupported characters")
+	}
+	if _, blocked := prohibitedShellCommands[commandRootName(command)]; blocked {
+		return ExecResult{}, errors.New("shell interpreter commands are not supported")
+	}
+	for _, arg := range params.Argv[1:] {
+		if arg == "--" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			return ExecResult{}, errors.New("argv arguments must not start with --")
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, params.Argv[0], params.Argv[1:]...)
+	cmd := exec.CommandContext(ctx, command, params.Argv[1:]...)
 	cwd := r.workspaceRoot
 	if params.Cwd != "" {
 		if strings.HasPrefix(params.Cwd, "..") {
@@ -111,28 +126,6 @@ func (r *ExecRunner) Run(params ExecParams) (ExecResult, error) {
 		ExitCode:  exitCode,
 		Truncated: truncated,
 	}, nil
-}
-
-func validateExecCommand(argv []string) error {
-	command := strings.TrimSpace(argv[0])
-	if command == "" {
-		return errors.New("argv[0] is required")
-	}
-	if !safeCommandNamePattern.MatchString(command) {
-		return errors.New("argv[0] contains unsupported characters")
-	}
-	if _, blocked := prohibitedShellCommands[commandRootName(command)]; blocked {
-		return errors.New("shell interpreter commands are not supported")
-	}
-	for _, arg := range argv[1:] {
-		if arg == "--" {
-			continue
-		}
-		if strings.HasPrefix(arg, "--") {
-			return errors.New("argv arguments must not start with --")
-		}
-	}
-	return nil
 }
 
 func commandRootName(command string) string {
