@@ -36,6 +36,7 @@ This is the 2026 MCP-native architecture path where:
   - `mcp.completion`
   - `mcp.sample` (default deny unless policy explicitly allows it)
 - approval-gated forwarded calls using the same `approval_id` retry model as direct Nomos tools
+- upstream stdio child processes run with an empty-by-default environment, plus only the explicitly allowlisted parent variables and declared per-server overrides
 
 Out of scope for this first gateway mode:
 
@@ -133,6 +134,7 @@ Auth material passed through the config is injected only into upstream HTTP requ
 - Upstream host allowlists are enforced **before** any JSON-RPC payload is sent. An allowlist violation prevents the upstream request entirely.
 - Upstream auth failures (HTTP `401`/`403`) surface as deterministic `upstream_unavailable` errors. Nomos does NOT retry with alternate credentials.
 - Streamed responses are read through the normal redaction and per-rule `output_max_bytes` / `output_max_lines` caps before they leave Nomos to the agent, logs, or audit sinks. A streamed secret in a tool result is redacted the same as a buffered secret.
+- Upstream stdio children do not inherit the parent process environment by default. If you need `PATH` or other process-level settings, add them explicitly through `env_allowlist` or `env`.
 
 ### Operator Guidance
 
@@ -141,6 +143,43 @@ Auth material passed through the config is injected only into upstream HTTP requ
 - Set `allowed_hosts` to the exact hostnames you intend to forward to. This is a transport-layer allowlist, not a substitute for a policy rule — the policy bundle is still the only authorization source.
 - Store upstream auth tokens outside the config file when possible (templated in at deploy time, or brokered via the M54 credential flow in future revisions). The v1 `auth` block is a stable injection point for that integration.
 - Policy bundles do not need any changes to move an upstream from `stdio` to `streamable_http`: `mcp.call` resource identity is `mcp://<server>/<tool>` regardless of transport.
+
+### Upstream Timeouts
+
+M50 adds per-stage upstream deadlines so a slow or hung server fails closed instead of stalling Nomos:
+
+- `initialize_timeout_ms`
+- `enumerate_timeout_ms`
+- `call_timeout_ms`
+- `stream_timeout_ms`
+
+Default budgets are conservative and can be overridden globally under `mcp.timeouts` or per upstream server under `mcp.upstream_servers[].timeouts`.
+
+Recommended tuning:
+
+- keep `initialize` and `enumerate` short, because they gate startup and tool discovery
+- give `call` a larger budget than `enumerate` for expensive tools, but keep it bounded
+- set `stream` only as high as necessary for long-lived SSE subscriptions, because each read still uses a bounded per-read deadline
+
+Timeout and cancellation failures are explicit:
+
+- `UPSTREAM_TIMEOUT` means the upstream did not respond before the configured deadline
+- `UPSTREAM_CANCELED` means the downstream request was canceled before the upstream completed
+- both are fail-closed and are not retried silently
+
+### Environment Isolation
+
+Nomos now isolates upstream stdio processes from the parent environment by default. For each upstream server:
+
+- `env_allowlist` copies named variables from the Nomos parent environment, if present
+- `env` injects explicit key/value overrides and wins over allowlisted parent values
+- the constructed child environment is sorted deterministically before launch
+- audit metadata records an `upstream_env_shape_hash` so operators can compare the shape of the environment without exposing values
+
+Migration note:
+
+- if you previously relied on inherited parent environment variables, move those names into `env_allowlist` and add any fixed overrides to `env`
+- if a stdio upstream command is not an absolute path and the env is empty, Nomos emits a startup warning because the child may not have a usable `PATH`
 
 
 Policy shape:

@@ -3,11 +3,11 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -19,17 +19,42 @@ import (
 var (
 	errUpstreamClosed      = errors.New("upstream mcp session closed")
 	errUpstreamUnavailable = errors.New("upstream mcp session unavailable")
+	errUpstreamTimeout     = errors.New("UPSTREAM_TIMEOUT")
+	errUpstreamCanceled    = errors.New("UPSTREAM_CANCELED")
+)
+
+const (
+	defaultUpstreamInitializeTimeout = 5 * time.Second
+	defaultUpstreamEnumerateTimeout  = 5 * time.Second
+	defaultUpstreamCallTimeout       = 30 * time.Second
+	defaultUpstreamStreamTimeout     = 30 * time.Second
 )
 
 type upstreamTransport interface {
-	callMethod(method string, params map[string]any) (any, error)
+	callMethod(ctx context.Context, timeout time.Duration, method string, params map[string]any) (any, error)
 	setRequestHandler(handler upstreamRequestHandler)
 	isClosed() bool
 	close()
 	doneCh() <-chan struct{}
+	envShapeHash() string
 }
 
 type upstreamRequestHandler func(req rpcRequest) *rpcResponse
+
+func upstreamCallContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining <= timeout {
+			return ctx, func() {}
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
 
 func startUpstreamTransport(config UpstreamServerConfig, notify func(method string, params json.RawMessage)) (upstreamTransport, error) {
 	switch strings.TrimSpace(config.Transport) {
@@ -57,13 +82,14 @@ type rpcMessage struct {
 }
 
 type upstreamConn struct {
-	config   UpstreamServerConfig
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	writer   *bufio.Writer
-	notifyFn func(method string, params json.RawMessage)
+	config            UpstreamServerConfig
+	cmd               *exec.Cmd
+	stdin             io.WriteCloser
+	stdout            io.ReadCloser
+	stderr            io.ReadCloser
+	writer            *bufio.Writer
+	notifyFn          func(method string, params json.RawMessage)
+	envShapeHashValue string
 
 	done       chan struct{}
 	stderrDone chan struct{}
@@ -83,6 +109,8 @@ type upstreamConn struct {
 
 func (c *upstreamConn) doneCh() <-chan struct{} { return c.done }
 
+func (c *upstreamConn) envShapeHash() string { return c.envShapeHashValue }
+
 func (c *upstreamConn) setRequestHandler(handler upstreamRequestHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -94,10 +122,8 @@ func startUpstreamConn(config UpstreamServerConfig, notify func(method string, p
 	if strings.TrimSpace(config.Workdir) != "" {
 		cmd.Dir = config.Workdir
 	}
-	cmd.Env = os.Environ()
-	for key, value := range config.Env {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	env, envShapeHash := buildUpstreamEnvironment(config)
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -120,16 +146,17 @@ func startUpstreamConn(config UpstreamServerConfig, notify func(method string, p
 		return nil, err
 	}
 	conn := &upstreamConn{
-		config:     config,
-		cmd:        cmd,
-		stdin:      stdin,
-		stdout:     stdout,
-		stderr:     stderr,
-		writer:     bufio.NewWriter(stdin),
-		pending:    map[string]chan rpcMessage{},
-		done:       make(chan struct{}),
-		stderrDone: make(chan struct{}),
-		notifyFn:   notify,
+		config:            config,
+		cmd:               cmd,
+		stdin:             stdin,
+		stdout:            stdout,
+		stderr:            stderr,
+		writer:            bufio.NewWriter(stdin),
+		pending:           map[string]chan rpcMessage{},
+		done:              make(chan struct{}),
+		stderrDone:        make(chan struct{}),
+		notifyFn:          notify,
+		envShapeHashValue: envShapeHash,
 	}
 	go conn.drainStderr()
 	go conn.readLoop()
@@ -286,7 +313,7 @@ func (c *upstreamConn) terminate(err error) {
 }
 
 func (c *upstreamConn) handshake() error {
-	if _, err := c.sendRequest("initialize", "initialize", map[string]any{
+	if _, err := c.sendRequest(context.Background(), c.timeoutOrDefault(c.config.InitializeTimeout, defaultUpstreamInitializeTimeout), "initialize", "initialize", map[string]any{
 		"protocolVersion": SupportedProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
@@ -299,7 +326,9 @@ func (c *upstreamConn) handshake() error {
 	return c.sendNotification("notifications/initialized", map[string]any{})
 }
 
-func (c *upstreamConn) sendRequest(id, method string, params map[string]any) (*rpcResponse, error) {
+func (c *upstreamConn) sendRequest(ctx context.Context, timeout time.Duration, id, method string, params map[string]any) (*rpcResponse, error) {
+	ctx, cancel := upstreamCallContext(ctx, timeout)
+	defer cancel()
 	ch := make(chan rpcMessage, 1)
 	c.mu.Lock()
 	if c.closed {
@@ -332,6 +361,14 @@ func (c *upstreamConn) sendRequest(id, method string, params map[string]any) (*r
 			return msg.resp, errors.New(msg.resp.Error.Message)
 		}
 		return msg.resp, nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, errUpstreamTimeout
+		}
+		return nil, errUpstreamCanceled
 	case <-c.done:
 		c.mu.Lock()
 		delete(c.pending, id)
@@ -358,9 +395,11 @@ func (c *upstreamConn) allocateRequestID() string {
 	return "req-" + strconv.FormatInt(id, 10)
 }
 
-func (c *upstreamConn) callMethod(method string, params map[string]any) (any, error) {
+func (c *upstreamConn) callMethod(ctx context.Context, timeout time.Duration, method string, params map[string]any) (any, error) {
+	ctx, cancel := upstreamCallContext(ctx, timeout)
+	defer cancel()
 	id := c.allocateRequestID()
-	resp, err := c.sendRequest(id, method, params)
+	resp, err := c.sendRequest(ctx, timeout, id, method, params)
 	if err != nil {
 		return nil, err
 	}
@@ -389,21 +428,29 @@ func (c *upstreamConn) close() {
 	}
 }
 
+func (c *upstreamConn) timeoutOrDefault(timeout, fallback time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	return fallback
+}
+
 type upstreamSession struct {
 	config         UpstreamServerConfig
 	logger         *runtimeLogger
 	onNotification func(config UpstreamServerConfig, method string, params json.RawMessage)
 
-	mu             sync.Mutex
-	callMu         sync.Mutex
-	conn           upstreamTransport
-	starting       bool
-	closed         bool
-	lastFailureAt  time.Time
-	attempts       int
-	backoffInitial time.Duration
-	backoffMax     time.Duration
-	clock          func() time.Time
+	mu                sync.Mutex
+	callMu            sync.Mutex
+	conn              upstreamTransport
+	starting          bool
+	closed            bool
+	lastFailureAt     time.Time
+	attempts          int
+	envShapeHashValue string
+	backoffInitial    time.Duration
+	backoffMax        time.Duration
+	clock             func() time.Time
 }
 
 func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, notifyFn func(UpstreamServerConfig, string, json.RawMessage), clock func() time.Time) *upstreamSession {
@@ -427,6 +474,12 @@ func (s *upstreamSession) connForTest() *upstreamConn {
 		return conn
 	}
 	return nil
+}
+
+func (s *upstreamSession) envShapeHash() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.envShapeHashValue
 }
 
 func (s *upstreamSession) transportForTest() upstreamTransport {
@@ -487,6 +540,13 @@ func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
 		s.mu.Unlock()
 		return nil, errUpstreamUnavailable
 	}
+	if s.logger != nil && s.config.Transport == "stdio" && len(uniqueSortedNames(s.config.EnvAllowlist)) == 0 && len(s.config.Env) == 0 {
+		message := fmt.Sprintf("upstream mcp server %q uses empty env by default", s.config.Name)
+		if !isAbsoluteCommandPath(s.config.Command) {
+			message = fmt.Sprintf("%s and non-absolute command %q", message, strings.TrimSpace(s.config.Command))
+		}
+		s.logger.Warn(message + "; set env_allowlist/env explicitly or use an absolute command path")
+	}
 	s.starting = true
 	s.mu.Unlock()
 
@@ -511,16 +571,17 @@ func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
 		return nil, startErr
 	}
 	s.conn = conn
+	s.envShapeHashValue = conn.envShapeHash()
 	s.attempts = 0
 	s.lastFailureAt = time.Time{}
 	return conn, nil
 }
 
-func (s *upstreamSession) call(method string, params map[string]any) (any, error) {
-	return s.callWithRequests(method, params, nil)
+func (s *upstreamSession) call(ctx context.Context, method string, params map[string]any) (any, error) {
+	return s.callWithRequests(ctx, method, params, nil)
 }
 
-func (s *upstreamSession) callWithRequests(method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
+func (s *upstreamSession) callWithRequests(ctx context.Context, method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
 	s.callMu.Lock()
 	defer s.callMu.Unlock()
 	conn, err := s.ensureConn()
@@ -529,7 +590,7 @@ func (s *upstreamSession) callWithRequests(method string, params map[string]any,
 	}
 	conn.setRequestHandler(handler)
 	defer conn.setRequestHandler(nil)
-	result, callErr := conn.callMethod(method, params)
+	result, callErr := conn.callMethod(ctx, s.timeoutForMethod(ctx, method), method, params)
 	if callErr == nil {
 		return result, nil
 	}
@@ -541,6 +602,31 @@ func (s *upstreamSession) callWithRequests(method string, params map[string]any,
 		s.mu.Unlock()
 	}
 	return nil, callErr
+}
+
+func (s *upstreamSession) timeoutForMethod(ctx context.Context, method string) time.Duration {
+	stageTimeout := s.config.CallTimeout
+	switch method {
+	case "initialize":
+		stageTimeout = s.config.InitializeTimeout
+	case "tools/list", "resources/list", "prompts/list":
+		stageTimeout = s.config.EnumerateTimeout
+	}
+	return s.timeoutOrDefault(ctx, stageTimeout, defaultUpstreamCallTimeout)
+}
+
+func (s *upstreamSession) timeoutOrDefault(ctx context.Context, timeout, fallback time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	if ctx != nil {
+		if deadline, ok := ctx.Deadline(); ok {
+			if remaining := time.Until(deadline); remaining > 0 {
+				return remaining
+			}
+		}
+	}
+	return fallback
 }
 
 func (s *upstreamSession) close() {
@@ -607,7 +693,7 @@ func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger
 		sup.sessions[config.Name] = session
 	}
 	for _, config := range configs {
-		tools, err := sup.enumerateTools(config.Name)
+		tools, err := sup.enumerateTools(context.Background(), config.Name)
 		if err != nil {
 			sup.close()
 			return nil, fmt.Errorf("load upstream mcp server %q: %w", config.Name, err)
@@ -674,7 +760,7 @@ func (s *upstreamSupervisor) processNotification(event upstreamNotificationEvent
 }
 
 func (s *upstreamSupervisor) refreshServerTools(serverName string) {
-	tools, err := s.enumerateTools(serverName)
+	tools, err := s.enumerateTools(context.Background(), serverName)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Error(fmt.Sprintf("upstream tools refresh failed server=%q: %v", serverName, err))
@@ -714,7 +800,7 @@ func (s *upstreamSupervisor) refreshServerTools(serverName string) {
 	}
 }
 
-func (s *upstreamSupervisor) enumerateTools(serverName string) ([]upstreamTool, error) {
+func (s *upstreamSupervisor) enumerateTools(ctx context.Context, serverName string) ([]upstreamTool, error) {
 	s.mu.RLock()
 	session, ok := s.sessions[serverName]
 	config, configOK := s.serversByName[serverName]
@@ -722,7 +808,7 @@ func (s *upstreamSupervisor) enumerateTools(serverName string) ([]upstreamTool, 
 	if !ok || !configOK {
 		return nil, fmt.Errorf("upstream mcp session missing for %q", serverName)
 	}
-	result, err := session.call("tools/list", map[string]any{})
+	result, err := session.call(ctx, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -762,11 +848,11 @@ func parseUpstreamTools(config UpstreamServerConfig, result any) ([]upstreamTool
 	return tools, nil
 }
 
-func (s *upstreamSupervisor) callTool(serverName, toolName string, rawArgs json.RawMessage) (string, error) {
-	return s.callToolWithRequests(serverName, toolName, rawArgs, nil)
+func (s *upstreamSupervisor) callTool(ctx context.Context, serverName, toolName string, rawArgs json.RawMessage) (string, error) {
+	return s.callToolWithRequests(ctx, serverName, toolName, rawArgs, nil)
 }
 
-func (s *upstreamSupervisor) callToolWithRequests(serverName, toolName string, rawArgs json.RawMessage, handler upstreamRequestHandler) (string, error) {
+func (s *upstreamSupervisor) callToolWithRequests(ctx context.Context, serverName, toolName string, rawArgs json.RawMessage, handler upstreamRequestHandler) (string, error) {
 	s.mu.RLock()
 	session, ok := s.sessions[serverName]
 	s.mu.RUnlock()
@@ -781,7 +867,7 @@ func (s *upstreamSupervisor) callToolWithRequests(serverName, toolName string, r
 			return "", fmt.Errorf("invalid forwarded tool arguments: %w", err)
 		}
 	}
-	result, err := session.callWithRequests("tools/call", map[string]any{
+	result, err := session.callWithRequests(ctx, "tools/call", map[string]any{
 		"name":      toolName,
 		"arguments": arguments,
 	}, handler)
@@ -791,7 +877,23 @@ func (s *upstreamSupervisor) callToolWithRequests(serverName, toolName string, r
 	return stringifyUpstreamCallResult(result)
 }
 
-func (s *upstreamSupervisor) listResources() ([]map[string]any, error) {
+func (s *upstreamSupervisor) envMetadata(serverName string) map[string]any {
+	s.mu.RLock()
+	session, ok := s.sessions[serverName]
+	s.mu.RUnlock()
+	if !ok || session == nil {
+		return nil
+	}
+	hash := session.envShapeHash()
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	return map[string]any{
+		"upstream_env_shape_hash": hash,
+	}
+}
+
+func (s *upstreamSupervisor) listResources(ctx context.Context) ([]map[string]any, error) {
 	s.mu.RLock()
 	servers := make([]string, 0, len(s.sessions))
 	for name := range s.sessions {
@@ -800,7 +902,7 @@ func (s *upstreamSupervisor) listResources() ([]map[string]any, error) {
 	s.mu.RUnlock()
 	out := make([]map[string]any, 0)
 	for _, serverName := range servers {
-		items, err := s.listResourcesForServer(serverName)
+		items, err := s.listResourcesForServer(ctx, serverName)
 		if err != nil {
 			return nil, err
 		}
@@ -809,8 +911,8 @@ func (s *upstreamSupervisor) listResources() ([]map[string]any, error) {
 	return out, nil
 }
 
-func (s *upstreamSupervisor) listResourcesForServer(serverName string) ([]map[string]any, error) {
-	result, err := s.call(serverName, "resources/list", map[string]any{})
+func (s *upstreamSupervisor) listResourcesForServer(ctx context.Context, serverName string) ([]map[string]any, error) {
+	result, err := s.call(ctx, serverName, "resources/list", map[string]any{})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "method not found") {
 			return []map[string]any{}, nil
@@ -843,12 +945,12 @@ func (s *upstreamSupervisor) listResourcesForServer(serverName string) ([]map[st
 	return out, nil
 }
 
-func (s *upstreamSupervisor) readResource(serverName, uri string) (map[string]any, error) {
-	return s.readResourceWithRequests(serverName, uri, nil)
+func (s *upstreamSupervisor) readResource(ctx context.Context, serverName, uri string) (map[string]any, error) {
+	return s.readResourceWithRequests(ctx, serverName, uri, nil)
 }
 
-func (s *upstreamSupervisor) readResourceWithRequests(serverName, uri string, handler upstreamRequestHandler) (map[string]any, error) {
-	result, err := s.callWithRequests(serverName, "resources/read", map[string]any{"uri": uri}, handler)
+func (s *upstreamSupervisor) readResourceWithRequests(ctx context.Context, serverName, uri string, handler upstreamRequestHandler) (map[string]any, error) {
+	result, err := s.callWithRequests(ctx, serverName, "resources/read", map[string]any{"uri": uri}, handler)
 	if err != nil {
 		return nil, err
 	}
@@ -859,7 +961,7 @@ func (s *upstreamSupervisor) readResourceWithRequests(serverName, uri string, ha
 	return cloneMap(payload), nil
 }
 
-func (s *upstreamSupervisor) listPrompts() ([]map[string]any, error) {
+func (s *upstreamSupervisor) listPrompts(ctx context.Context) ([]map[string]any, error) {
 	s.mu.RLock()
 	servers := make([]string, 0, len(s.sessions))
 	for name := range s.sessions {
@@ -868,7 +970,7 @@ func (s *upstreamSupervisor) listPrompts() ([]map[string]any, error) {
 	s.mu.RUnlock()
 	out := make([]map[string]any, 0)
 	for _, serverName := range servers {
-		items, err := s.listPromptsForServer(serverName)
+		items, err := s.listPromptsForServer(ctx, serverName)
 		if err != nil {
 			return nil, err
 		}
@@ -877,8 +979,8 @@ func (s *upstreamSupervisor) listPrompts() ([]map[string]any, error) {
 	return out, nil
 }
 
-func (s *upstreamSupervisor) listPromptsForServer(serverName string) ([]map[string]any, error) {
-	result, err := s.call(serverName, "prompts/list", map[string]any{})
+func (s *upstreamSupervisor) listPromptsForServer(ctx context.Context, serverName string) ([]map[string]any, error) {
+	result, err := s.call(ctx, serverName, "prompts/list", map[string]any{})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "method not found") {
 			return []map[string]any{}, nil
@@ -911,12 +1013,12 @@ func (s *upstreamSupervisor) listPromptsForServer(serverName string) ([]map[stri
 	return out, nil
 }
 
-func (s *upstreamSupervisor) getPrompt(serverName, name string, arguments map[string]any) (map[string]any, error) {
-	return s.getPromptWithRequests(serverName, name, arguments, nil)
+func (s *upstreamSupervisor) getPrompt(ctx context.Context, serverName, name string, arguments map[string]any) (map[string]any, error) {
+	return s.getPromptWithRequests(ctx, serverName, name, arguments, nil)
 }
 
-func (s *upstreamSupervisor) getPromptWithRequests(serverName, name string, arguments map[string]any, handler upstreamRequestHandler) (map[string]any, error) {
-	result, err := s.callWithRequests(serverName, "prompts/get", map[string]any{
+func (s *upstreamSupervisor) getPromptWithRequests(ctx context.Context, serverName, name string, arguments map[string]any, handler upstreamRequestHandler) (map[string]any, error) {
+	result, err := s.callWithRequests(ctx, serverName, "prompts/get", map[string]any{
 		"name":      name,
 		"arguments": arguments,
 	}, handler)
@@ -930,11 +1032,11 @@ func (s *upstreamSupervisor) getPromptWithRequests(serverName, name string, argu
 	return cloneMap(payload), nil
 }
 
-func (s *upstreamSupervisor) complete(serverName string, ref map[string]any, argument map[string]any, context map[string]any) (map[string]any, error) {
-	return s.completeWithRequests(serverName, ref, argument, context, nil)
+func (s *upstreamSupervisor) complete(ctx context.Context, serverName string, ref map[string]any, argument map[string]any, context map[string]any) (map[string]any, error) {
+	return s.completeWithRequests(ctx, serverName, ref, argument, context, nil)
 }
 
-func (s *upstreamSupervisor) completeWithRequests(serverName string, ref map[string]any, argument map[string]any, context map[string]any, handler upstreamRequestHandler) (map[string]any, error) {
+func (s *upstreamSupervisor) completeWithRequests(ctx context.Context, serverName string, ref map[string]any, argument map[string]any, context map[string]any, handler upstreamRequestHandler) (map[string]any, error) {
 	params := map[string]any{
 		"ref":      ref,
 		"argument": argument,
@@ -942,7 +1044,7 @@ func (s *upstreamSupervisor) completeWithRequests(serverName string, ref map[str
 	if len(context) > 0 {
 		params["context"] = context
 	}
-	result, err := s.callWithRequests(serverName, "completion/complete", params, handler)
+	result, err := s.callWithRequests(ctx, serverName, "completion/complete", params, handler)
 	if err != nil {
 		return nil, err
 	}
@@ -953,18 +1055,18 @@ func (s *upstreamSupervisor) completeWithRequests(serverName string, ref map[str
 	return cloneMap(payload), nil
 }
 
-func (s *upstreamSupervisor) call(serverName, method string, params map[string]any) (any, error) {
-	return s.callWithRequests(serverName, method, params, nil)
+func (s *upstreamSupervisor) call(ctx context.Context, serverName, method string, params map[string]any) (any, error) {
+	return s.callWithRequests(ctx, serverName, method, params, nil)
 }
 
-func (s *upstreamSupervisor) callWithRequests(serverName, method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
+func (s *upstreamSupervisor) callWithRequests(ctx context.Context, serverName, method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
 	s.mu.RLock()
 	session, ok := s.sessions[serverName]
 	s.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("upstream mcp server %q not configured", serverName)
 	}
-	return session.callWithRequests(method, params, handler)
+	return session.callWithRequests(ctx, method, params, handler)
 }
 
 func (s *upstreamSupervisor) snapshotTools() []upstreamTool {

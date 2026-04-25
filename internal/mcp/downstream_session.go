@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,13 +11,15 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
 type downstreamSession struct {
-	server *Server
-	reader *bufio.Reader
-	writer *bufio.Writer
+	server   *Server
+	identity identity.VerifiedIdentity
+	reader   *bufio.Reader
+	writer   *bufio.Writer
 
 	modeMu  sync.Mutex
 	mode    stdioMode
@@ -24,9 +27,12 @@ type downstreamSession struct {
 
 	writeMu sync.Mutex
 
-	mu      sync.Mutex
-	pending map[string]chan rpcMessage
-	closed  bool
+	mu         sync.Mutex
+	pending    map[string]chan rpcMessage
+	closed     bool
+	sessionID  string
+	transport  string
+	sendRawRPC func([]byte) error
 
 	nextID int64
 	done   chan struct{}
@@ -36,11 +42,25 @@ type downstreamSession struct {
 
 func newDownstreamSession(server *Server, in io.Reader, out io.Writer) *downstreamSession {
 	return &downstreamSession{
-		server:  server,
-		reader:  bufio.NewReader(in),
-		writer:  bufio.NewWriter(out),
-		pending: map[string]chan rpcMessage{},
-		done:    make(chan struct{}),
+		server:    server,
+		identity:  server.identity,
+		reader:    bufio.NewReader(in),
+		writer:    bufio.NewWriter(out),
+		pending:   map[string]chan rpcMessage{},
+		done:      make(chan struct{}),
+		transport: "stdio",
+	}
+}
+
+func newHTTPDownstreamSession(server *Server, id identity.VerifiedIdentity, sessionID string, sendRaw func([]byte) error) *downstreamSession {
+	return &downstreamSession{
+		server:     server.CloneForIdentity(id),
+		identity:   id,
+		pending:    map[string]chan rpcMessage{},
+		done:       make(chan struct{}),
+		sessionID:  sessionID,
+		transport:  "streamable_http",
+		sendRawRPC: sendRaw,
 	}
 }
 
@@ -94,6 +114,7 @@ func (s *downstreamSession) dispatchRPCPayload(payload []byte) error {
 	if err := dec.Decode(&req); err != nil {
 		return s.writeRPCResponse(&rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
 	}
+	req.Ctx = context.Background()
 	resp := s.server.handleRPCRequest(req, s)
 	if resp == nil {
 		return nil
@@ -121,7 +142,10 @@ func (s *downstreamSession) handleRPCResponse(payload []byte) error {
 	return nil
 }
 
-func (s *downstreamSession) sendRequest(method string, params map[string]any) (*rpcResponse, error) {
+func (s *downstreamSession) sendRequest(ctx context.Context, method string, params map[string]any) (*rpcResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	id := fmt.Sprintf("nomos-%d", atomic.AddInt64(&s.nextID, 1))
 	ch := make(chan rpcMessage, 1)
 	s.mu.Lock()
@@ -158,6 +182,14 @@ func (s *downstreamSession) sendRequest(method string, params map[string]any) (*
 			return nil, msg.err
 		}
 		return msg.resp, nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, errUpstreamTimeout
+		}
+		return nil, errUpstreamCanceled
 	case <-s.done:
 		return nil, errUpstreamUnavailable
 	}
@@ -178,6 +210,9 @@ func (s *downstreamSession) writeRPCResponse(resp *rpcResponse) error {
 }
 
 func (s *downstreamSession) writeRawRPC(data []byte) error {
+	if s.sendRawRPC != nil {
+		return s.sendRawRPC(data)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	mode, _ := s.currentMode()
@@ -198,6 +233,26 @@ func (s *downstreamSession) writeRawRPC(data []byte) error {
 		return err
 	}
 	return s.writer.Flush()
+}
+
+func (s *downstreamSession) actionIdentity() identity.VerifiedIdentity {
+	if s == nil {
+		return identity.VerifiedIdentity{}
+	}
+	return s.identity
+}
+
+func (s *downstreamSession) auditMetadata() map[string]any {
+	if s == nil {
+		return nil
+	}
+	metadata := map[string]any{
+		"downstream_transport": s.transport,
+	}
+	if s.sessionID != "" {
+		metadata["downstream_session_id"] = s.sessionID
+	}
+	return metadata
 }
 
 func (s *downstreamSession) setMode(mode stdioMode) {

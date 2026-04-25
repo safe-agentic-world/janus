@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,12 +43,14 @@ type Server struct {
 	upstream            *upstreamSupervisor
 	logger              *runtimeLogger
 	pid                 int
+	ownsResources       bool
 }
 
 type Request struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params"`
+	Ctx    context.Context `json:"-"`
 }
 
 type Response struct {
@@ -61,6 +64,7 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	Ctx     context.Context `json:"-"`
 }
 
 type rpcError struct {
@@ -185,7 +189,18 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		upstream:            upstream,
 		logger:              logger,
 		pid:                 os.Getpid(),
+		ownsResources:       true,
 	}, nil
+}
+
+func (s *Server) CloneForIdentity(id identity.VerifiedIdentity) *Server {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.identity = id
+	clone.ownsResources = false
+	return &clone
 }
 
 func (s *Server) SetAssuranceLevel(level string) {
@@ -204,11 +219,11 @@ func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.upstream != nil {
+	if s.ownsResources && s.upstream != nil {
 		s.upstream.close()
 		s.upstream = nil
 	}
-	if s.approvals == nil {
+	if !s.ownsResources || s.approvals == nil {
 		return nil
 	}
 	err := s.approvals.Close()
@@ -306,6 +321,9 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 }
 
 func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *rpcResponse {
+	if req.Ctx == nil {
+		req.Ctx = context.Background()
+	}
 	if req.Method == "" {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32600, Message: "invalid request"}}
 	}
@@ -346,11 +364,13 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 			Result:  map[string]any{},
 		}
 	case "tools/list":
+		tools, summary := s.toolsListForSessionWithSummary(session)
+		s.recordToolDiscoveryAudit(req, session, summary)
 		return &rpcResponse{
 			JSONRPC: "2.0",
 			ID:      parseRPCID(req.ID),
 			Result: map[string]any{
-				"tools": s.toolsList(),
+				"tools": tools,
 			},
 		}
 	case "tools/call":
@@ -398,6 +418,7 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 			ID:     rpcIDKey(parseRPCID(req.ID)),
 			Method: canonicalToolName(name),
 			Params: args,
+			Ctx:    req.Ctx,
 		}, session)
 		if resp.Error != "" {
 			return "", errors.New(toolErrorMessage(canonicalToolName(name), resp.Error))
@@ -408,11 +429,12 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 		args = []byte(`{}`)
 	}
 	legacyReq := Request{
-		ID:     string(req.ID),
+		ID:     rpcIDKey(parseRPCID(req.ID)),
 		Method: canonicalToolName(name),
 		Params: args,
+		Ctx:    req.Ctx,
 	}
-	legacyResp := s.handleRequest(legacyReq)
+	legacyResp := s.handleRequestWithSession(legacyReq, session)
 	if legacyResp.Error != "" {
 		return "", errors.New(toolErrorMessage(canonicalToolName(name), legacyResp.Error))
 	}
@@ -444,28 +466,6 @@ func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
 		return name, args, nil
 	}
 	return name, []byte(`{}`), nil
-}
-
-func (s *Server) toolsList() []map[string]any {
-	tools := []map[string]any{
-		{"name": advertisedToolName("nomos.capabilities"), "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.fs_read"), "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.fs_write"), "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.apply_patch"), "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.exec"), "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}},
-		{"name": advertisedToolName("nomos.http_request"), "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}},
-		{"name": advertisedToolName("repo.validate_change_set"), "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}},
-	}
-	if s.upstream != nil {
-		for _, tool := range s.upstream.snapshotTools() {
-			tools = append(tools, map[string]any{
-				"name":        tool.DownstreamName,
-				"description": forwardedToolDescription(tool),
-				"inputSchema": tool.InputSchema,
-			})
-		}
-	}
-	return tools
 }
 
 func readFramedPayload(reader *bufio.Reader) ([]byte, error) {
@@ -540,24 +540,28 @@ func parseRPCID(raw json.RawMessage) interface{} {
 }
 
 func (s *Server) handleRequest(req Request) Response {
+	return s.handleRequestWithSession(req, nil)
+}
+
+func (s *Server) handleRequestWithSession(req Request, session *downstreamSession) Response {
 	req.Method = canonicalToolName(req.Method)
 	if req.Method != "nomos.fs_read" {
 		switch req.Method {
 		case "nomos.capabilities":
 			return s.handleCapabilities(req)
 		case "nomos.fs_write":
-			return s.handleFSWrite(req)
+			return s.handleFSWrite(req, session)
 		case "nomos.apply_patch":
-			return s.handleApplyPatch(req)
+			return s.handleApplyPatch(req, session)
 		case "nomos.exec":
-			return s.handleExec(req)
+			return s.handleExec(req, session)
 		case "nomos.http_request":
-			return s.handleHTTPRequest(req)
+			return s.handleHTTPRequest(req, session)
 		case "repo.validate_change_set":
 			return s.handleValidateChangeSet(req)
 		default:
 			if s.isForwardedTool(req.Method) {
-				return s.handleForwardedTool(req)
+				return s.handleForwardedToolWithSession(req, session)
 			}
 			return Response{ID: req.ID, Error: "method_not_found"}
 		}
@@ -579,7 +583,7 @@ func (s *Server) handleRequest(req Request) Response {
 		Resource:      resource,
 		Params:        []byte(`{}`),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -607,6 +611,10 @@ func (s *Server) handleForwardedTool(req Request) Response {
 func (s *Server) handleForwardedToolWithSession(req Request, session *downstreamSession) Response {
 	if s.upstream == nil {
 		return Response{ID: req.ID, Error: "method_not_found"}
+	}
+	ctx := req.Ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	tool, ok := s.upstream.toolByName(req.Method)
 	if !ok {
@@ -636,8 +644,8 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 			"tool_arguments":  check,
 		}),
 		TraceID: "mcp_" + req.ID,
-		Context: action.Context{Extensions: buildActionExtensions(approvalID)},
 	}
+	actionReq.Context = action.Context{Extensions: buildActionExtensionsForSessionWithMetadata(approvalID, session, s.upstream.envMetadata(tool.ServerName))}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
@@ -649,7 +657,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	if resp.Decision != policy.DecisionAllow {
 		return Response{ID: req.ID, Result: resp}
 	}
-	output, err := s.upstream.callToolWithRequests(tool.ServerName, tool.ToolName, sanitizedArgs, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
+	output, err := s.upstream.callToolWithRequests(ctx, tool.ServerName, tool.ToolName, sanitizedArgs, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
 	if err != nil {
 		return Response{ID: req.ID, Error: classifyForwardedToolError(err)}
 	}
@@ -660,7 +668,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleFSWrite(req Request) Response {
+func (s *Server) handleFSWrite(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.fs_write") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -681,7 +689,7 @@ func (s *Server) handleFSWrite(req Request) Response {
 		Resource:      resource,
 		Params:        mustJSONBytes(map[string]string{"content": params.Content}),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -694,7 +702,7 @@ func (s *Server) handleFSWrite(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleApplyPatch(req Request) Response {
+func (s *Server) handleApplyPatch(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.apply_patch") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -711,7 +719,7 @@ func (s *Server) handleApplyPatch(req Request) Response {
 		Resource:      "repo://local/workspace",
 		Params:        mustJSONBytes(map[string]string{"path": params.Path, "content": params.Content}),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -724,7 +732,7 @@ func (s *Server) handleApplyPatch(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleExec(req Request) Response {
+func (s *Server) handleExec(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.exec") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -745,7 +753,7 @@ func (s *Server) handleExec(req Request) Response {
 			"env_allowlist_keys": params.EnvAllowlistKeys,
 		}),
 		TraceID: "mcp_" + req.ID,
-		Context: action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context: action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -758,7 +766,7 @@ func (s *Server) handleExec(req Request) Response {
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleHTTPRequest(req Request) Response {
+func (s *Server) handleHTTPRequest(req Request, session *downstreamSession) Response {
 	if !s.toolEnabled("nomos.http_request") {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
@@ -778,7 +786,7 @@ func (s *Server) handleHTTPRequest(req Request) Response {
 		Resource:      params.Resource,
 		Params:        mustJSONBytes(map[string]any{"method": params.Method, "body": params.Body, "headers": params.Header}),
 		TraceID:       "mcp_" + req.ID,
-		Context:       action.Context{Extensions: buildActionExtensions(params.ApprovalID)},
+		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
 	act, err := action.ToAction(actionReq, s.identity)
 	if err != nil {
@@ -896,12 +904,58 @@ func mustJSONBytes(value any) []byte {
 	return data
 }
 
-func buildActionExtensions(approvalID string) map[string]json.RawMessage {
-	extensions := map[string]json.RawMessage{}
-	if strings.TrimSpace(approvalID) == "" {
-		return extensions
+func (s *Server) recordToolDiscoveryAudit(req rpcRequest, session *downstreamSession, summary toolDiscoverySummary) {
+	if s == nil || s.service == nil {
+		return
 	}
-	extensions["approval"] = mustJSONBytes(map[string]string{"approval_id": strings.TrimSpace(approvalID)})
+	metadata := map[string]any{
+		"principal":       s.identity.Principal,
+		"evaluated_tools": summary.evaluated,
+		"hidden_tools":    summary.hidden,
+		"tool_surface":    "tools/list",
+	}
+	if session != nil {
+		for key, value := range session.auditMetadata() {
+			metadata[key] = value
+		}
+	}
+	_ = s.service.RecordAuditEvent(audit.Event{
+		SchemaVersion:        "v1",
+		Timestamp:            time.Now().UTC(),
+		EventType:            "mcp.tools_list",
+		TraceID:              "mcp_" + rpcIDKey(parseRPCID(req.ID)),
+		ActionID:             "mcp_" + rpcIDKey(parseRPCID(req.ID)),
+		Principal:            s.identity.Principal,
+		Agent:                s.identity.Agent,
+		Environment:          s.identity.Environment,
+		ActionType:           "mcp.tools_list",
+		Resource:             "mcp://tools/list",
+		ResultClassification: "discovery",
+		ExecutorMetadata:     metadata,
+	})
+}
+
+func buildActionExtensionsForSession(approvalID string, session *downstreamSession) map[string]json.RawMessage {
+	return buildActionExtensionsForSessionWithMetadata(approvalID, session, nil)
+}
+
+func buildActionExtensionsForSessionWithMetadata(approvalID string, session *downstreamSession, extra map[string]any) map[string]json.RawMessage {
+	extensions := map[string]json.RawMessage{}
+	if strings.TrimSpace(approvalID) != "" {
+		extensions["approval"] = mustJSONBytes(map[string]string{"approval_id": strings.TrimSpace(approvalID)})
+	}
+	metadata := map[string]any{}
+	if session != nil {
+		for key, value := range session.auditMetadata() {
+			metadata[key] = value
+		}
+	}
+	for key, value := range extra {
+		metadata[key] = value
+	}
+	if len(metadata) > 0 {
+		extensions["transport"] = mustJSONBytes(metadata)
+	}
 	return extensions
 }
 
@@ -997,6 +1051,10 @@ func classifyForwardedToolError(err error) string {
 		return "upstream_unavailable"
 	case errors.Is(err, errUpstreamClosed):
 		return "upstream_unavailable"
+	case errors.Is(err, errUpstreamTimeout):
+		return "UPSTREAM_TIMEOUT"
+	case errors.Is(err, errUpstreamCanceled):
+		return "UPSTREAM_CANCELED"
 	}
 	return "execution_error"
 }

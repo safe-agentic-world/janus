@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
+	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/identity"
 )
 
@@ -19,6 +22,26 @@ const statefulForwardedAllowBundle = `{"version":"v1","rules":[` +
 	`{"id":"allow-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},` +
 	`{"id":"allow-status","action_type":"mcp.call","resource":"mcp://retail/refund.status","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}` +
 	`]}`
+
+type recordingSink struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingSink) WriteEvent(event audit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+	return nil
+}
+
+func (r *recordingSink) snapshot() []audit.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]audit.Event, len(r.events))
+	copy(out, r.events)
+	return out
+}
 
 func newStatefulUpstreamServer(t *testing.T, bundle string) *Server {
 	t.Helper()
@@ -48,6 +71,66 @@ func newStatefulUpstreamServer(t *testing.T, bundle string) *Server {
 	})
 	if err != nil {
 		t.Fatalf("new stateful upstream server: %v", err)
+	}
+	server.upstream.setBackoffForTest(0, 0)
+	return server
+}
+
+func newEnvInspectUpstreamServer(t *testing.T, bundle string, upstream UpstreamServerConfig) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:        "error",
+		LogFormat:       "text",
+		ErrWriter:       io.Discard,
+		UpstreamServers: []UpstreamServerConfig{upstream},
+	})
+	if err != nil {
+		t.Fatalf("new env inspect upstream server: %v", err)
+	}
+	server.upstream.setBackoffForTest(0, 0)
+	return server
+}
+
+func newTimeoutUpstreamServer(t *testing.T, mode string, timeout time.Duration) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-call","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		UpstreamServers: []UpstreamServerConfig{{
+			Name:              "retail",
+			Transport:         "stdio",
+			Command:           os.Args[0],
+			Args:              []string{"-test.run=TestUpstreamMCPHelperProcess", "--", mode},
+			Env:               map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+			Workdir:           dir,
+			InitializeTimeout: timeout,
+			EnumerateTimeout:  timeout,
+			CallTimeout:       timeout,
+			StreamTimeout:     timeout,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("new timeout upstream server: %v", err)
 	}
 	server.upstream.setBackoffForTest(0, 0)
 	return server
@@ -117,6 +200,92 @@ func TestUpstreamSessionSharedByConcurrentCalls(t *testing.T) {
 	connAfter := session.connForTest()
 	if connAfter != connBefore {
 		t.Fatalf("expected shared upstream conn (one session), got %p then %p", connBefore, connAfter)
+	}
+}
+
+func TestUpstreamInitializeTimeoutFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout test in short mode")
+	}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-call","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	_, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		UpstreamServers: []UpstreamServerConfig{{
+			Name:              "retail",
+			Transport:         "stdio",
+			Command:           os.Args[0],
+			Args:              []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "hang-init"},
+			Env:               map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+			Workdir:           dir,
+			InitializeTimeout: 25 * time.Millisecond,
+			EnumerateTimeout:  25 * time.Millisecond,
+			CallTimeout:       25 * time.Millisecond,
+			StreamTimeout:     25 * time.Millisecond,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "UPSTREAM_TIMEOUT") {
+		t.Fatalf("expected initialize timeout, got %v", err)
+	}
+}
+
+func TestUpstreamCancellationReturnsStructuredError(t *testing.T) {
+	server := newTimeoutUpstreamServer(t, "hang-call", 500*time.Millisecond)
+	t.Cleanup(func() { _ = server.Close() })
+	session := server.upstream.sessionForTest("retail")
+	if session == nil {
+		t.Fatal("expected upstream session")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err := session.call(ctx, "tools/call", map[string]any{
+		"name":      "refund.request",
+		"arguments": map[string]any{"order_id": "ORD-1", "reason": "slow"},
+	})
+	if !errors.Is(err, errUpstreamCanceled) {
+		t.Fatalf("expected UPSTREAM_CANCELED, got %v", err)
+	}
+}
+
+func TestUpstreamForcedTimeoutsDoNotLeakGoroutines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping leak test in short mode")
+	}
+	server := newTimeoutUpstreamServer(t, "hang-call", 500*time.Millisecond)
+	t.Cleanup(func() { _ = server.Close() })
+	session := server.upstream.sessionForTest("retail")
+	if session == nil {
+		t.Fatal("expected upstream session")
+	}
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	before := runtime.NumGoroutine()
+	for i := 0; i < 1000; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		_, _ = session.call(ctx, "tools/call", map[string]any{
+			"name":      "refund.request",
+			"arguments": map[string]any{"order_id": fmt.Sprintf("ORD-%d", i), "reason": "timeout"},
+		})
+		cancel()
+	}
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after-before > 8 {
+		t.Fatalf("goroutine leak across forced timeouts: before=%d after=%d", before, after)
 	}
 }
 
@@ -333,6 +502,193 @@ func TestUpstreamSessionNoGoroutineLeakOverManySequentialCalls(t *testing.T) {
 	if connAfter != connBefore {
 		t.Fatalf("expected shared upstream conn across %d sequential calls, got %p then %p", iterations, connBefore, connAfter)
 	}
+}
+
+func TestUpstreamEnvEmptyByDefault(t *testing.T) {
+	t.Setenv("SECRET_TOKEN", "super-secret")
+	t.Setenv("ALLOWLISTED_VAR", "allowed")
+	server := newEnvInspectUpstreamServer(t, statefulForwardedAllowBundle, UpstreamServerConfig{
+		Name:      "retail",
+		Transport: "stdio",
+		Command:   os.Args[0],
+		Args:      []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "env-inspect"},
+		Workdir:   t.TempDir(),
+	})
+	t.Cleanup(func() { _ = server.Close() })
+
+	session := server.upstream.sessionForTest("retail")
+	result, err := session.call(context.Background(), "env.inspect", map[string]any{})
+	if err != nil {
+		t.Fatalf("env inspect call: %v", err)
+	}
+	env := helperEnvMap(t, result)
+	if env["SECRET_TOKEN"] != "" || env["ALLOWLISTED_VAR"] != "" || env["OVERRIDE_VAR"] != "" || env["PATH"] != "" {
+		t.Fatalf("expected empty inherited env, got %+v", env)
+	}
+}
+
+func TestUpstreamEnvAllowlistPassThrough(t *testing.T) {
+	t.Setenv("SECRET_TOKEN", "super-secret")
+	t.Setenv("ALLOWLISTED_VAR", "allowed")
+	server := newEnvInspectUpstreamServer(t, statefulForwardedAllowBundle, UpstreamServerConfig{
+		Name:         "retail",
+		Transport:    "stdio",
+		Command:      os.Args[0],
+		Args:         []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "env-inspect"},
+		EnvAllowlist: []string{"ALLOWLISTED_VAR"},
+		Workdir:      t.TempDir(),
+	})
+	t.Cleanup(func() { _ = server.Close() })
+
+	session := server.upstream.sessionForTest("retail")
+	result, err := session.call(context.Background(), "env.inspect", map[string]any{})
+	if err != nil {
+		t.Fatalf("env inspect call: %v", err)
+	}
+	env := helperEnvMap(t, result)
+	if env["ALLOWLISTED_VAR"] != "allowed" {
+		t.Fatalf("expected allowlisted env passthrough, got %+v", env)
+	}
+	if env["SECRET_TOKEN"] != "" {
+		t.Fatalf("expected secret to stay out of child env, got %+v", env)
+	}
+}
+
+func TestUpstreamEnvOverrideWinsOverAllowlist(t *testing.T) {
+	t.Setenv("OVERRIDE_VAR", "from_parent")
+	server := newEnvInspectUpstreamServer(t, statefulForwardedAllowBundle, UpstreamServerConfig{
+		Name:         "retail",
+		Transport:    "stdio",
+		Command:      os.Args[0],
+		Args:         []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "env-inspect"},
+		EnvAllowlist: []string{"OVERRIDE_VAR"},
+		Env: map[string]string{
+			"OVERRIDE_VAR": "from_config",
+		},
+		Workdir: t.TempDir(),
+	})
+	t.Cleanup(func() { _ = server.Close() })
+
+	session := server.upstream.sessionForTest("retail")
+	result, err := session.call(context.Background(), "env.inspect", map[string]any{})
+	if err != nil {
+		t.Fatalf("env inspect call: %v", err)
+	}
+	env := helperEnvMap(t, result)
+	if env["OVERRIDE_VAR"] != "from_config" {
+		t.Fatalf("expected override to win over allowlist, got %+v", env)
+	}
+}
+
+func TestUpstreamEnvShapeHashRecordedInAuditMetadata(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	recorderA := &recordingSink{}
+	recorderB := &recordingSink{}
+	upstream := UpstreamServerConfig{
+		Name:         "retail",
+		Transport:    "stdio",
+		Command:      os.Args[0],
+		Args:         []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "stateful-retail"},
+		EnvAllowlist: []string{"ALLOWLISTED_VAR"},
+		Env: map[string]string{
+			"OVERRIDE_VAR": "from_config",
+		},
+		Workdir: dir,
+	}
+	serverA, err := NewServerWithRuntimeOptionsAndRecorder(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:        "error",
+		LogFormat:       "text",
+		ErrWriter:       io.Discard,
+		UpstreamServers: []UpstreamServerConfig{upstream},
+	}, recorderA)
+	if err != nil {
+		t.Fatalf("new server a: %v", err)
+	}
+	serverB, err := NewServerWithRuntimeOptionsAndRecorder(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:        "error",
+		LogFormat:       "text",
+		ErrWriter:       io.Discard,
+		UpstreamServers: []UpstreamServerConfig{upstream},
+	}, recorderB)
+	if err != nil {
+		t.Fatalf("new server b: %v", err)
+	}
+	t.Cleanup(func() { _ = serverA.Close() })
+	t.Cleanup(func() { _ = serverB.Close() })
+
+	respA := serverA.handleRequest(Request{
+		ID:     "one",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1", "reason": "test"}),
+	})
+	if respA.Error != "" {
+		t.Fatalf("server A call: %+v", respA)
+	}
+	respB := serverB.handleRequest(Request{
+		ID:     "two",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-2", "reason": "test"}),
+	})
+	if respB.Error != "" {
+		t.Fatalf("server B call: %+v", respB)
+	}
+
+	hashA := completedEnvShapeHash(t, recorderA.snapshot())
+	hashB := completedEnvShapeHash(t, recorderB.snapshot())
+	if hashA == "" || hashB == "" {
+		t.Fatalf("expected env shape hash in audit metadata, got a=%q b=%q", hashA, hashB)
+	}
+	if hashA != hashB {
+		t.Fatalf("expected deterministic env shape hash, got %q and %q", hashA, hashB)
+	}
+}
+
+func helperEnvMap(t *testing.T, result any) map[string]string {
+	t.Helper()
+	payload, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", result)
+	}
+	rawEnv, ok := payload["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected env map, got %+v", payload)
+	}
+	out := map[string]string{}
+	for key, value := range rawEnv {
+		text, _ := value.(string)
+		out[key] = text
+	}
+	return out
+}
+
+func completedEnvShapeHash(t *testing.T, events []audit.Event) string {
+	t.Helper()
+	for _, event := range events {
+		if event.EventType != "action.completed" {
+			continue
+		}
+		if event.ExecutorMetadata == nil {
+			continue
+		}
+		if hash, _ := event.ExecutorMetadata["upstream_env_shape_hash"].(string); hash != "" {
+			return hash
+		}
+	}
+	t.Fatal("missing upstream env shape hash in completed audit event")
+	return ""
 }
 
 func containsForwardedTool(tools []map[string]any, name string) bool {

@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/assurance"
 	"github.com/safe-agentic-world/nomos/internal/doctor"
 	"github.com/safe-agentic-world/nomos/internal/gateway"
+	"github.com/safe-agentic-world/nomos/internal/mcp"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/version"
@@ -104,6 +106,36 @@ func TestLoadConfigFailsClosedWithoutBundle(t *testing.T) {
 	}
 }
 
+func TestToMCPUpstreamServersAppliesTimeoutDefaultsAndOverrides(t *testing.T) {
+	got := toMCPUpstreamServers(gateway.MCPTimeoutConfig{
+		InitializeMS: 5000,
+		EnumerateMS:  5000,
+		CallMS:       30000,
+		StreamMS:     30000,
+	}, []gateway.MCPUpstreamServerConfig{{
+		Name:      "retail",
+		Transport: "stdio",
+		Timeouts: gateway.MCPTimeoutConfig{
+			EnumerateMS: 12000,
+			CallMS:      45000,
+		},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("expected one runtime upstream server, got %+v", got)
+	}
+	want := mcp.UpstreamServerConfig{
+		Name:              "retail",
+		Transport:         "stdio",
+		InitializeTimeout: 5 * time.Second,
+		EnumerateTimeout:  12 * time.Second,
+		CallTimeout:       45 * time.Second,
+		StreamTimeout:     30 * time.Second,
+	}
+	if got[0].Name != want.Name || got[0].Transport != want.Transport || got[0].InitializeTimeout != want.InitializeTimeout || got[0].EnumerateTimeout != want.EnumerateTimeout || got[0].CallTimeout != want.CallTimeout || got[0].StreamTimeout != want.StreamTimeout {
+		t.Fatalf("unexpected runtime upstream timeouts: got %+v want %+v", got[0], want)
+	}
+}
+
 func TestHelpTextStability(t *testing.T) {
 	root := rootHelpText()
 	mcp := mcpHelpText()
@@ -115,6 +147,9 @@ func TestHelpTextStability(t *testing.T) {
 	}
 	if !strings.Contains(mcp, "-c, --config") || !strings.Contains(mcp, "-p, --policy-bundle") || !strings.Contains(mcp, "-l, --log-level") || !strings.Contains(mcp, "-q, --quiet") {
 		t.Fatalf("missing short/long flags in mcp help: %q", mcp)
+	}
+	if !strings.Contains(mcp, "nomos mcp serve --http --listen 127.0.0.1:8090") {
+		t.Fatalf("expected mcp serve example in help: %q", mcp)
 	}
 }
 
@@ -188,6 +223,7 @@ func TestDocumentedArtifactsExist(t *testing.T) {
 		filepath.Join("..", "..", "examples", "policies", "local-override.yaml"),
 		filepath.Join("..", "..", "examples", "configs", "config.layered.example.json"),
 		filepath.Join("..", "..", "examples", "configs", "config.layered.local-override.example.json"),
+		filepath.Join("..", "..", "examples", "configs", "config.mcp-serve-http.example.json"),
 	}
 	for _, path := range required {
 		if _, err := os.Stat(path); err != nil {

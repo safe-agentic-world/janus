@@ -79,6 +79,46 @@ For details, see:
 
 - `docs/operator-ui.md`
 
+## Remote MCP Gateway
+
+Nomos can expose its downstream MCP surface over Streamable HTTP for shared remote-agent deployments:
+
+```text
+nomos mcp serve --http --listen 127.0.0.1:8090 -c ./examples/configs/config.mcp-serve-http.example.json
+```
+
+This mode leaves `nomos mcp` stdio unchanged and adds a separate authenticated HTTP listener for remote MCP clients.
+
+Operator notes:
+
+- put `nomos mcp serve --http` behind a reverse proxy or ingress that terminates TLS
+- prefer mTLS from the proxy to Nomos, or an internal network hop with strict source controls
+- if a proxy injects identity headers, only do so on an authenticated non-spoofable hop
+- direct client access should keep TLS termination on Nomos or on an mTLS-enforcing edge
+- resumed MCP requests must keep sending the same authenticated principal and `MCP-Session-Id`
+
+Security notes:
+
+- authentication happens before `initialize`, `tools/list`, or `tools/call`
+- failed auth returns a stable HTTP JSON error shape and never reaches policy evaluation
+- governed MCP audit events include `executor_metadata.downstream_transport` and `executor_metadata.downstream_session_id`
+
+Related references:
+
+- `docs/integration-kit.md`
+- `docs/upstream-mcp-gateway.md`
+- `examples/configs/config.mcp-serve-http.example.json`
+
+## Upstream Env Isolation
+
+For upstream stdio servers, Nomos now starts child processes from an empty-by-default environment. If an upstream server needs specific parent variables, add them explicitly with `mcp.upstream_servers[].env_allowlist` and `mcp.upstream_servers[].env`.
+
+This is a migration change for older configs that implicitly depended on `os.Environ()` inheritance. The safe path is:
+
+1. list the exact parent env names you need in `env_allowlist`
+2. add fixed values in `env`
+3. prefer absolute command paths for stdio upstreams if `PATH` is no longer available to the child
+
 ## Container Packaging
 
 Nomos does not currently publish or maintain an official container image path.

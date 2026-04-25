@@ -142,6 +142,10 @@ func toUIReadinessReport(report doctor.Report) gateway.UIReadinessReport {
 }
 
 func runMCP(args []string) {
+	if len(args) > 0 && args[0] == "serve" {
+		runMCPServe(args[1:])
+		return
+	}
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	fs.SetOutput(os.Stderr)
 	var configPath string
@@ -180,7 +184,7 @@ func runMCP(args []string) {
 		ApprovalStorePath:     cfg.Approvals.StorePath,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
-		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.UpstreamServers),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.UpstreamServers),
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -212,6 +216,103 @@ func runMCP(args []string) {
 	cliSuccessf("MCP stdio server ready (assurance=%s)", assuranceLevel)
 	if err := mcp.RunStdioForBundlesWithRuntimeOptionsAndRecorder(cfg.Policy.EffectiveBundlePaths(), id, cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines, cfg.Approvals.Enabled, cfg.Executor.SandboxEnabled, cfg.Executor.SandboxProfile, runtimeOptions, recorder, assuranceLevel); err != nil {
 		cliFatalf("mcp server error: %v", err)
+	}
+}
+
+func runMCPServe(args []string) {
+	fs := flag.NewFlagSet("mcp serve", flag.ExitOnError)
+	fs.SetOutput(os.Stderr)
+	var configPath string
+	var policyBundle string
+	var listen string
+	var useHTTP bool
+	fs.StringVar(&configPath, "config", "", "path to config json")
+	fs.StringVar(&configPath, "c", "", "path to config json")
+	fs.StringVar(&policyBundle, "policy-bundle", "", "path to policy bundle")
+	fs.StringVar(&policyBundle, "p", "", "path to policy bundle")
+	fs.StringVar(&listen, "listen", "", "bind address for downstream MCP HTTP server")
+	fs.BoolVar(&useHTTP, "http", false, "serve downstream MCP over streamable http")
+	fs.Usage = func() { writeHelpText(fs.Output(), mcpServeHelpText()) }
+	fs.Parse(args)
+
+	if !useHTTP {
+		cliFatal("--http is required for 'nomos mcp serve'")
+	}
+	resolved, err := resolveMCPInvocation(configPath, policyBundle, "", false, os.Getenv)
+	if err != nil {
+		cliFatal(err.Error())
+	}
+	cfg, err := gateway.LoadConfig(resolved.ConfigPath, os.Getenv, resolved.PolicyBundle)
+	if err != nil {
+		cliFatalf("load config: %v", err)
+	}
+	if strings.TrimSpace(listen) == "" {
+		cliFatal("--listen is required for 'nomos mcp serve --http'")
+	}
+	runtimeOptions, err := mcp.ParseRuntimeOptions(mcp.RuntimeOptions{
+		LogLevel:              "info",
+		LogFormat:             "text",
+		ErrWriter:             os.Stderr,
+		ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
+		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
+		ApprovalStorePath:     cfg.Approvals.StorePath,
+		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
+		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.UpstreamServers),
+	})
+	if err != nil {
+		cliFatalf("invalid mcp runtime options: %v", err)
+	}
+	recorder, err := buildProtocolSafeMCPRecorder(cfg)
+	if err != nil {
+		cliFatalf("init mcp audit recorder: %v", err)
+	}
+	if closer, ok := recorder.(io.Closer); ok {
+		defer func() { _ = closer.Close() }()
+	}
+	baseID := identity.VerifiedIdentity{
+		Principal:   cfg.Identity.Principal,
+		Agent:       cfg.Identity.Agent,
+		Environment: cfg.Identity.Environment,
+	}
+	assuranceLevel := assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence())
+	baseServer, err := mcp.NewServerForBundlesWithRuntimeOptionsAndRecorder(cfg.Policy.EffectiveBundlePaths(), baseID, cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines, cfg.Approvals.Enabled, cfg.Executor.SandboxEnabled, cfg.Executor.SandboxProfile, runtimeOptions, recorder)
+	if err != nil {
+		cliFatalf("init mcp server: %v", err)
+	}
+	baseServer.SetAssuranceLevel(assuranceLevel)
+	defer func() { _ = baseServer.Close() }()
+	auth, err := identity.NewAuthenticator(identity.AuthConfig{
+		APIKeys:           cfg.Identity.APIKeys,
+		ServiceSecrets:    cfg.Identity.ServiceSecrets,
+		AgentSecrets:      cfg.Identity.AgentSecrets,
+		Environment:       cfg.Identity.Environment,
+		OIDCEnabled:       cfg.Identity.OIDC.Enabled,
+		OIDCIssuer:        cfg.Identity.OIDC.Issuer,
+		OIDCAudience:      cfg.Identity.OIDC.Audience,
+		OIDCPublicKeyPath: cfg.Identity.OIDC.PublicKeyPath,
+		SPIFFEEnabled:     cfg.Identity.SPIFFE.Enabled,
+		SPIFFETrustDomain: cfg.Identity.SPIFFE.TrustDomain,
+	})
+	if err != nil {
+		cliFatalf("init mcp auth: %v", err)
+	}
+	httpServer, err := mcp.NewDownstreamHTTPServer(baseServer, auth, listen, cfg.Identity.Agent, cfg.Gateway.RateLimitPerMin)
+	if err != nil {
+		cliFatalf("init downstream mcp http server: %v", err)
+	}
+	if err := httpServer.Start(); err != nil {
+		cliFatalf("start downstream mcp http server: %v", err)
+	}
+	cliSuccessf("MCP HTTP server ready on %s (assurance=%s)", httpServer.Addr(), assuranceLevel)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		cliFatalf("mcp http server shutdown: %v", err)
 	}
 }
 
@@ -807,7 +908,7 @@ func toMCPUpstreamRoutes(routes []gateway.UpstreamRoute) []mcp.UpstreamRoute {
 	return out
 }
 
-func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
+func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
 	if len(servers) == 0 {
 		return nil
 	}
@@ -818,18 +919,23 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 			env[key] = value
 		}
 		mapped := mcp.UpstreamServerConfig{
-			Name:         server.Name,
-			Transport:    server.Transport,
-			Command:      server.Command,
-			Args:         append([]string(nil), server.Args...),
-			Env:          env,
-			Workdir:      server.Workdir,
-			Endpoint:     server.Endpoint,
-			AllowedHosts: append([]string(nil), server.AllowedHosts...),
-			TLSInsecure:  server.TLSInsecure,
-			TLSCAFile:    server.TLSCAFile,
-			TLSCertFile:  server.TLSCertFile,
-			TLSKeyFile:   server.TLSKeyFile,
+			Name:              server.Name,
+			Transport:         server.Transport,
+			Command:           server.Command,
+			Args:              append([]string(nil), server.Args...),
+			EnvAllowlist:      append([]string(nil), server.EnvAllowlist...),
+			Env:               env,
+			Workdir:           server.Workdir,
+			Endpoint:          server.Endpoint,
+			AllowedHosts:      append([]string(nil), server.AllowedHosts...),
+			TLSInsecure:       server.TLSInsecure,
+			TLSCAFile:         server.TLSCAFile,
+			TLSCertFile:       server.TLSCertFile,
+			TLSKeyFile:        server.TLSKeyFile,
+			InitializeTimeout: timeoutDurationFromMS(coalesceTimeout(defaults.InitializeMS, server.Timeouts.InitializeMS)),
+			EnumerateTimeout:  timeoutDurationFromMS(coalesceTimeout(defaults.EnumerateMS, server.Timeouts.EnumerateMS)),
+			CallTimeout:       timeoutDurationFromMS(coalesceTimeout(defaults.CallMS, server.Timeouts.CallMS)),
+			StreamTimeout:     timeoutDurationFromMS(coalesceTimeout(defaults.StreamMS, server.Timeouts.StreamMS)),
 		}
 		if server.Auth != nil {
 			mapped.AuthType = server.Auth.Type
@@ -846,6 +952,20 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 		out = append(out, mapped)
 	}
 	return out
+}
+
+func coalesceTimeout(defaultMS, overrideMS int) int {
+	if overrideMS > 0 {
+		return overrideMS
+	}
+	return defaultMS
+}
+
+func timeoutDurationFromMS(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func mcpSinkRewritesStdout(sink string) bool {
@@ -884,7 +1004,18 @@ func mcpHelpText() string {
 		"  -q, --quiet                  suppress banner and non-error logs\n" +
 		"      --log-format <format>    text|json\n\n" +
 		"example:\n" +
-		"  nomos mcp -c ./examples/configs/config.example.json -p ./examples/policies/your-policy-bundle.json\n"
+		"  nomos mcp -c ./examples/configs/config.example.json -p ./examples/policies/your-policy-bundle.json\n" +
+		"  nomos mcp serve --http --listen 127.0.0.1:8090 -c ./examples/configs/config.example.json\n"
+}
+
+func mcpServeHelpText() string {
+	return "usage: nomos mcp serve --http --listen <addr> [flags]\n" +
+		"  -c, --config <path>          config json path (or NOMOS_CONFIG)\n" +
+		"  -p, --policy-bundle <path>   policy bundle path (or NOMOS_POLICY_BUNDLE)\n" +
+		"      --http                   serve downstream MCP over streamable http\n" +
+		"      --listen <addr>          bind address for downstream MCP http server\n\n" +
+		"example:\n" +
+		"  nomos mcp serve --http --listen 127.0.0.1:8090 -c ./examples/configs/config.example.json\n"
 }
 
 func doctorHelpText() string {

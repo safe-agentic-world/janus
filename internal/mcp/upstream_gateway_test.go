@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/identity"
@@ -491,17 +492,14 @@ func newSamplingClientSession(t *testing.T, server *Server, sampledText string) 
 }
 
 func TestUpstreamMCPHelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_UPSTREAM_MCP_HELPER") != "1" {
-		return
-	}
 	if len(os.Args) < 4 {
-		os.Exit(2)
+		return
 	}
 	mode := os.Args[3]
 	switch mode {
-	case "retail", "framed-retail", "stateful-retail":
+	case "retail", "framed-retail", "stateful-retail", "env-inspect", "hang-init", "hang-call":
 	default:
-		os.Exit(2)
+		return
 	}
 	reader := bufio.NewReader(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
@@ -523,6 +521,10 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 		method, _ := req["method"].(string)
 		switch method {
 		case "initialize":
+			if mode == "hang-init" {
+				time.Sleep(time.Hour)
+				return
+			}
 			writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
 				"protocolVersion": SupportedProtocolVersion,
 				"capabilities": map[string]any{
@@ -535,6 +537,15 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 			}, nil)
 		case "notifications/initialized":
 			continue
+		case "env.inspect":
+			writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
+				"env": map[string]any{
+					"PATH":            os.Getenv("PATH"),
+					"ALLOWLISTED_VAR": os.Getenv("ALLOWLISTED_VAR"),
+					"OVERRIDE_VAR":    os.Getenv("OVERRIDE_VAR"),
+					"SECRET_TOKEN":    os.Getenv("SECRET_TOKEN"),
+				},
+			}, nil)
 		case "tools/list":
 			tools := []map[string]any{{
 				"name":        "refund.request",
@@ -653,6 +664,9 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 				},
 			}, nil)
 		case "tools/call":
+			if mode == "hang-call" {
+				continue
+			}
 			params, _ := req["params"].(map[string]any)
 			callName, _ := params["name"].(string)
 			args, _ := params["arguments"].(map[string]any)

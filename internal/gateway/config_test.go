@@ -804,6 +804,7 @@ func TestLoadConfigSupportsMCPUpstreamServers(t *testing.T) {
 					"transport":     "streamable_http",
 					"endpoint":      "https://retail.example.com/mcp",
 					"workdir":       ".\\upstream",
+					"env_allowlist": []any{"RETAIL_ENV", "PATH"},
 					"env":           map[string]any{"RETAIL_ENV": "demo"},
 					"tls_ca_file":   ".\\ca.pem",
 					"tls_cert_file": ".\\client.pem",
@@ -842,8 +843,69 @@ func TestLoadConfigSupportsMCPUpstreamServers(t *testing.T) {
 	if server.TLSCAFile != caPath || server.TLSCertFile != certPath || server.TLSKeyFile != keyPath {
 		t.Fatalf("expected config-relative TLS files, got %+v", server)
 	}
+	if len(server.EnvAllowlist) != 2 || server.EnvAllowlist[0] != "RETAIL_ENV" || server.EnvAllowlist[1] != "PATH" {
+		t.Fatalf("expected env allowlist, got %+v", server.EnvAllowlist)
+	}
 	if server.Env["RETAIL_ENV"] != "demo" {
 		t.Fatalf("expected upstream env, got %+v", server.Env)
+	}
+}
+
+func TestLoadConfigAppliesMCPTimeoutDefaultsAndOverrides(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway":  map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":   map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{"sandbox_enabled": true},
+		"audit":    map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"timeouts": map[string]any{
+				"initialize_timeout_ms": 7000,
+				"call_timeout_ms":       45000,
+			},
+			"upstream_servers": []any{
+				map[string]any{
+					"name":      "retail",
+					"transport": "stdio",
+					"command":   "helper",
+					"timeouts": map[string]any{
+						"enumerate_timeout_ms": 12000,
+					},
+				},
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.MCP.Timeouts.InitializeMS != 7000 || cfg.MCP.Timeouts.EnumerateMS != 5000 || cfg.MCP.Timeouts.CallMS != 45000 || cfg.MCP.Timeouts.StreamMS != 30000 {
+		t.Fatalf("unexpected global mcp timeouts: %+v", cfg.MCP.Timeouts)
+	}
+	if len(cfg.MCP.UpstreamServers) != 1 {
+		t.Fatalf("expected one upstream server, got %+v", cfg.MCP.UpstreamServers)
+	}
+	server := cfg.MCP.UpstreamServers[0]
+	if server.Timeouts.InitializeMS != 0 || server.Timeouts.EnumerateMS != 12000 || server.Timeouts.CallMS != 0 || server.Timeouts.StreamMS != 0 {
+		t.Fatalf("unexpected per-server mcp timeouts: %+v", server.Timeouts)
 	}
 }
 
@@ -933,5 +995,48 @@ func TestLoadConfigRejectsIncompleteMCPUpstreamMutualTLSConfig(t *testing.T) {
 	}
 	if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), "tls_cert_file and tls_key_file must be provided together") {
 		t.Fatalf("expected incomplete mTLS config error, got %v", err)
+	}
+}
+
+func TestLoadConfigRejectsWildcardMCPUpstreamEnvNames(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":  map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{
+			"sandbox_enabled": true,
+		},
+		"audit": map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"upstream_servers": []any{
+				map[string]any{
+					"name":          "retail",
+					"transport":     "stdio",
+					"command":       "python",
+					"env_allowlist": []any{"RETAIL_*"},
+				},
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), "env_allowlist must use exact variable names") {
+		t.Fatalf("expected invalid env allowlist error, got %v", err)
 	}
 }

@@ -273,6 +273,7 @@ Notes:
 - resource URIs are normalized as opaque MCP resource identities, so `mcp://retail/resource/note://retail/customer-42` is the canonical policy form.
 - prompt names and completion refs are matched exactly after deterministic normalization.
 - `mcp.sample` is intentionally high-friction: if no rule matches, Nomos denies it by default.
+- discovery filtering for `tools/list` is conservative by design: it may under-report tools that are not policy-visible for the current principal, but it must never over-report a tool the caller cannot actually invoke.
 
 Example:
 

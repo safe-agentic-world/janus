@@ -124,7 +124,15 @@ type RedactionConfig struct {
 
 type MCPConfig struct {
 	Enabled         bool                      `json:"enabled"`
+	Timeouts        MCPTimeoutConfig          `json:"timeouts,omitempty"`
 	UpstreamServers []MCPUpstreamServerConfig `json:"upstream_servers,omitempty"`
+}
+
+type MCPTimeoutConfig struct {
+	InitializeMS int `json:"initialize_timeout_ms,omitempty"`
+	EnumerateMS  int `json:"enumerate_timeout_ms,omitempty"`
+	CallMS       int `json:"call_timeout_ms,omitempty"`
+	StreamMS     int `json:"stream_timeout_ms,omitempty"`
 }
 
 type MCPUpstreamServerConfig struct {
@@ -132,6 +140,7 @@ type MCPUpstreamServerConfig struct {
 	Transport    string                 `json:"transport"`
 	Command      string                 `json:"command,omitempty"`
 	Args         []string               `json:"args,omitempty"`
+	EnvAllowlist []string               `json:"env_allowlist,omitempty"`
 	Env          map[string]string      `json:"env,omitempty"`
 	Workdir      string                 `json:"workdir,omitempty"`
 	Endpoint     string                 `json:"endpoint,omitempty"`
@@ -140,6 +149,7 @@ type MCPUpstreamServerConfig struct {
 	TLSCAFile    string                 `json:"tls_ca_file,omitempty"`
 	TLSCertFile  string                 `json:"tls_cert_file,omitempty"`
 	TLSKeyFile   string                 `json:"tls_key_file,omitempty"`
+	Timeouts     MCPTimeoutConfig       `json:"timeouts,omitempty"`
 	Auth         *MCPUpstreamAuthConfig `json:"auth,omitempty"`
 }
 
@@ -282,6 +292,18 @@ func (c *Config) SetDefaults() error {
 	}
 	if c.Audit.Sink == "" {
 		c.Audit.Sink = "stdout"
+	}
+	if c.MCP.Timeouts.InitializeMS == 0 {
+		c.MCP.Timeouts.InitializeMS = 5000
+	}
+	if c.MCP.Timeouts.EnumerateMS == 0 {
+		c.MCP.Timeouts.EnumerateMS = 5000
+	}
+	if c.MCP.Timeouts.CallMS == 0 {
+		c.MCP.Timeouts.CallMS = 30000
+	}
+	if c.MCP.Timeouts.StreamMS == 0 {
+		c.MCP.Timeouts.StreamMS = 30000
 	}
 	if c.Telemetry.Enabled && c.Telemetry.Sink == "" {
 		c.Telemetry.Sink = "stdout"
@@ -432,6 +454,34 @@ func (c Config) Validate() error {
 		}
 		if c.Approvals.TTLSeconds <= 0 {
 			return errors.New("approvals.ttl_seconds must be > 0 when approvals are enabled")
+		}
+	}
+	for _, timeout := range []struct {
+		value int
+		label string
+	}{
+		{c.MCP.Timeouts.InitializeMS, "mcp.timeouts.initialize_timeout_ms"},
+		{c.MCP.Timeouts.EnumerateMS, "mcp.timeouts.enumerate_timeout_ms"},
+		{c.MCP.Timeouts.CallMS, "mcp.timeouts.call_timeout_ms"},
+		{c.MCP.Timeouts.StreamMS, "mcp.timeouts.stream_timeout_ms"},
+	} {
+		if timeout.value <= 0 {
+			return errors.New(timeout.label + " must be > 0")
+		}
+	}
+	for _, server := range c.MCP.UpstreamServers {
+		for _, timeout := range []struct {
+			value int
+			label string
+		}{
+			{server.Timeouts.InitializeMS, "mcp.upstream_servers.timeouts.initialize_timeout_ms"},
+			{server.Timeouts.EnumerateMS, "mcp.upstream_servers.timeouts.enumerate_timeout_ms"},
+			{server.Timeouts.CallMS, "mcp.upstream_servers.timeouts.call_timeout_ms"},
+			{server.Timeouts.StreamMS, "mcp.upstream_servers.timeouts.stream_timeout_ms"},
+		} {
+			if timeout.value < 0 {
+				return errors.New(timeout.label + " must be >= 0")
+			}
 		}
 	}
 	if strings.TrimSpace(c.Policy.BundlePath) != "" && len(c.Policy.BundlePaths) > 0 {
@@ -621,9 +671,22 @@ func (c Config) Validate() error {
 			default:
 				return errors.New("mcp.upstream_servers.transport must be stdio|streamable_http|sse")
 			}
+			for _, key := range server.EnvAllowlist {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
+					return errors.New("mcp.upstream_servers.env_allowlist entries must be non-empty")
+				}
+				if strings.ContainsAny(trimmed, "*?[]") {
+					return errors.New("mcp.upstream_servers.env_allowlist must use exact variable names")
+				}
+			}
 			for key := range server.Env {
-				if strings.TrimSpace(key) == "" {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
 					return errors.New("mcp.upstream_servers.env keys must be non-empty")
+				}
+				if strings.ContainsAny(trimmed, "*?[]") {
+					return errors.New("mcp.upstream_servers.env keys must use exact variable names")
 				}
 			}
 			if value := strings.TrimSpace(server.Workdir); value != "" {

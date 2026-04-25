@@ -3,11 +3,11 @@ package bypasssuite
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +164,8 @@ func runCase(t *testing.T, mode string, tc corpusCase, expected caseExpectation)
 			t.Fatalf("lease process: %v", leaseErr)
 		}
 		argv, allowPrefix := secretEchoCommand()
+		t.Setenv("GO_WANT_EXEC_HELPER_PROCESS", "1")
+		t.Setenv("NOMOS_EXEC_HELPER_MODE", "secret")
 		engine = policy.NewEngine(policy.Bundle{
 			Version: "v1",
 			Hash:    "bypass-bundle",
@@ -185,7 +187,7 @@ func runCase(t *testing.T, mode string, tc corpusCase, expected caseExpectation)
 		params, marshalErr := json.Marshal(map[string]any{
 			"argv":                 argv,
 			"cwd":                  "",
-			"env_allowlist_keys":   []string{"API_TOKEN"},
+			"env_allowlist_keys":   []string{"API_TOKEN", "GO_WANT_EXEC_HELPER_PROCESS", "NOMOS_EXEC_HELPER_MODE"},
 			"credential_lease_ids": []string{leaseResp.CredentialLeaseID},
 		})
 		if marshalErr != nil {
@@ -194,6 +196,8 @@ func runCase(t *testing.T, mode string, tc corpusCase, expected caseExpectation)
 		resp, err = svc.Process(mustActionWithTrace(t, "act-"+tc.ID, "process.exec", "file://workspace/", string(params), "dev", traceID))
 	case "subprocess_escape_probe":
 		argv, allowPrefix := benignExecCommand()
+		t.Setenv("GO_WANT_EXEC_HELPER_PROCESS", "1")
+		t.Setenv("NOMOS_EXEC_HELPER_MODE", "echo")
 		engine = policy.NewEngine(policy.Bundle{
 			Version: "v1",
 			Hash:    "bypass-bundle",
@@ -420,17 +424,27 @@ func mustJSON(value any) string {
 }
 
 func benignExecCommand() ([]string, []any) {
-	if runtime.GOOS == "windows" {
-		return []string{"cmd", "/c", "echo", "ok"}, []any{"cmd", "/c", "echo"}
-	}
-	return []string{"sh", "-c", "printf %s ok"}, []any{"sh", "-c", "printf %s ok"}
+	return []string{os.Args[0], "-test.run=TestExecHelperProcess"}, []any{os.Args[0], "-test.run=TestExecHelperProcess"}
 }
 
 func secretEchoCommand() ([]string, []any) {
-	if runtime.GOOS == "windows" {
-		return []string{"cmd", "/c", "echo", "%API_TOKEN%"}, []any{"cmd", "/c", "echo"}
+	return []string{os.Args[0], "-test.run=TestExecHelperProcess"}, []any{os.Args[0], "-test.run=TestExecHelperProcess"}
+}
+
+func TestExecHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_EXEC_HELPER_PROCESS") != "1" {
+		return
 	}
-	return []string{"sh", "-c", "printf %s \"$API_TOKEN\""}, []any{"sh", "-c", "printf %s \"$API_TOKEN\""}
+	switch os.Getenv("NOMOS_EXEC_HELPER_MODE") {
+	case "echo":
+		fmt.Fprint(os.Stdout, "ok")
+	case "secret":
+		fmt.Fprint(os.Stdout, os.Getenv("API_TOKEN"))
+	default:
+		fmt.Fprint(os.Stdout, "unexpected helper mode")
+		os.Exit(2)
+	}
+	os.Exit(0)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

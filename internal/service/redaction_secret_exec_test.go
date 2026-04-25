@@ -2,7 +2,8 @@ package service
 
 import (
 	"encoding/json"
-	"runtime"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,8 @@ func TestSecretNeverLeaksFromExecOutputOrAudit(t *testing.T) {
 		t.Fatalf("new broker: %v", err)
 	}
 	argv, allowPrefix := secretEchoCommand()
+	t.Setenv("GO_WANT_EXEC_HELPER_PROCESS", "1")
+	t.Setenv("NOMOS_EXEC_HELPER_MODE", "secret")
 	bundle := policy.Bundle{
 		Version: "v1",
 		Hash:    "bundle-hash-redaction",
@@ -88,7 +91,7 @@ func TestSecretNeverLeaksFromExecOutputOrAudit(t *testing.T) {
 	execParams, err := json.Marshal(map[string]any{
 		"argv":                 argv,
 		"cwd":                  "",
-		"env_allowlist_keys":   []string{"API_TOKEN"},
+		"env_allowlist_keys":   []string{"API_TOKEN", "GO_WANT_EXEC_HELPER_PROCESS", "NOMOS_EXEC_HELPER_MODE"},
 		"credential_lease_ids": []string{checkoutResp.CredentialLeaseID},
 	})
 	if err != nil {
@@ -148,8 +151,17 @@ func mustAction(t *testing.T, req action.Request) action.Action {
 }
 
 func secretEchoCommand() ([]string, []any) {
-	if runtime.GOOS == "windows" {
-		return []string{"cmd", "/c", "echo", "%API_TOKEN%"}, []any{"cmd", "/c", "echo"}
+	return []string{os.Args[0], "-test.run=TestExecHelperProcess"}, []any{os.Args[0], "-test.run=TestExecHelperProcess"}
+}
+
+func TestExecHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_EXEC_HELPER_PROCESS") != "1" {
+		return
 	}
-	return []string{"sh", "-c", "printf %s \"$API_TOKEN\""}, []any{"sh", "-c", "printf %s \"$API_TOKEN\""}
+	if os.Getenv("NOMOS_EXEC_HELPER_MODE") != "secret" {
+		fmt.Fprint(os.Stdout, "unexpected helper mode")
+		os.Exit(2)
+	}
+	fmt.Fprint(os.Stdout, os.Getenv("API_TOKEN"))
+	os.Exit(0)
 }

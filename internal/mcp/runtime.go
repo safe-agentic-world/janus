@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
@@ -34,23 +35,28 @@ type UpstreamRoute struct {
 }
 
 type UpstreamServerConfig struct {
-	Name         string
-	Transport    string
-	Command      string
-	Args         []string
-	Env          map[string]string
-	Workdir      string
-	Endpoint     string
-	AllowedHosts []string
-	TLSInsecure  bool
-	TLSCAFile    string
-	TLSCertFile  string
-	TLSKeyFile   string
-	AuthType     string
-	AuthToken    string
-	AuthHeader   string
-	AuthValue    string
-	AuthHeaders  map[string]string
+	Name              string
+	Transport         string
+	Command           string
+	Args              []string
+	EnvAllowlist      []string
+	Env               map[string]string
+	Workdir           string
+	Endpoint          string
+	AllowedHosts      []string
+	TLSInsecure       bool
+	TLSCAFile         string
+	TLSCertFile       string
+	TLSKeyFile        string
+	AuthType          string
+	AuthToken         string
+	AuthHeader        string
+	AuthValue         string
+	AuthHeaders       map[string]string
+	InitializeTimeout time.Duration
+	EnumerateTimeout  time.Duration
+	CallTimeout       time.Duration
+	StreamTimeout     time.Duration
 }
 
 type logLevel int
@@ -150,6 +156,10 @@ func newRuntimeLogger(options RuntimeOptions) (*runtimeLogger, error) {
 
 func (l *runtimeLogger) Error(message string) {
 	l.write(logLevelError, "error", message)
+}
+
+func (l *runtimeLogger) Warn(message string) {
+	l.write(logLevelWarn, "warn", message)
 }
 
 func (l *runtimeLogger) Debug(message string) {

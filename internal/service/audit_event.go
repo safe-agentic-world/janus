@@ -13,6 +13,37 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
+func transportMetadataFromContext(ctx action.Context) map[string]any {
+	if len(ctx.Extensions) == 0 {
+		return nil
+	}
+	raw, ok := ctx.Extensions["transport"]
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	var metadata map[string]any
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&metadata); err != nil || len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func mergeExecutorMetadata(base map[string]any, extra map[string]any) map[string]any {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
+}
+
 const (
 	resultDeniedPolicy    = "DENIED_POLICY"
 	resultApprovalNeeded  = "APPROVAL_REQUIRED"

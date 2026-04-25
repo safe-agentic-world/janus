@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -32,6 +33,19 @@ type ExecRunner struct {
 	timeout       time.Duration
 }
 
+var safeCommandNamePattern = regexp.MustCompile(`^[A-Za-z0-9._:/\\+-]+$`)
+var prohibitedShellCommands = map[string]struct{}{
+	"sh":         {},
+	"bash":       {},
+	"dash":       {},
+	"zsh":        {},
+	"fish":       {},
+	"ksh":        {},
+	"cmd":        {},
+	"powershell": {},
+	"pwsh":       {},
+}
+
 func NewExecRunner(workspaceRoot string, maxBytes int) *ExecRunner {
 	if maxBytes <= 0 {
 		maxBytes = 64 * 1024
@@ -47,9 +61,27 @@ func (r *ExecRunner) Run(params ExecParams) (ExecResult, error) {
 	if len(params.Argv) == 0 {
 		return ExecResult{}, errors.New("argv is required")
 	}
+	command := strings.TrimSpace(params.Argv[0])
+	if command == "" {
+		return ExecResult{}, errors.New("argv[0] is required")
+	}
+	if !safeCommandNamePattern.MatchString(command) {
+		return ExecResult{}, errors.New("argv[0] contains unsupported characters")
+	}
+	if _, blocked := prohibitedShellCommands[commandRootName(command)]; blocked {
+		return ExecResult{}, errors.New("shell interpreter commands are not supported")
+	}
+	for _, arg := range params.Argv[1:] {
+		if arg == "--" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			return ExecResult{}, errors.New("argv arguments must not start with --")
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, params.Argv[0], params.Argv[1:]...)
+	cmd := exec.CommandContext(ctx, command, params.Argv[1:]...)
 	cwd := r.workspaceRoot
 	if params.Cwd != "" {
 		if strings.HasPrefix(params.Cwd, "..") {
@@ -94,6 +126,11 @@ func (r *ExecRunner) Run(params ExecParams) (ExecResult, error) {
 		ExitCode:  exitCode,
 		Truncated: truncated,
 	}, nil
+}
+
+func commandRootName(command string) string {
+	base := strings.ToLower(filepath.Base(command))
+	return strings.TrimSuffix(base, strings.ToLower(filepath.Ext(base)))
 }
 
 func filteredEnv(allowlist []string, injected map[string]string) []string {

@@ -30,19 +30,20 @@ import (
 )
 
 type upstreamHTTPTestServer struct {
-	t          *testing.T
-	httpServer *httptest.Server
-	streaming  bool
-	authHeader string
-	authValue  string
-	toolOutput string
-	callCount  atomic.Int32
-	authCalls  atomic.Int32
-	protoCalls atomic.Int32
-	deleteSeen atomic.Int32
-	eventSeq   atomic.Int64
-	extraTool  atomic.Bool
-	sessionID  string
+	t                  *testing.T
+	httpServer         *httptest.Server
+	streaming          bool
+	hangStreamResponse bool
+	authHeader         string
+	authValue          string
+	toolOutput         string
+	callCount          atomic.Int32
+	authCalls          atomic.Int32
+	protoCalls         atomic.Int32
+	deleteSeen         atomic.Int32
+	eventSeq           atomic.Int64
+	extraTool          atomic.Bool
+	sessionID          string
 
 	sseMu        sync.Mutex
 	sseWriter    http.ResponseWriter
@@ -146,6 +147,18 @@ func (s *upstreamHTTPTestServer) handle(w http.ResponseWriter, r *http.Request) 
 		s.writeResponse(w, id, map[string]any{"tools": s.toolsList()})
 	case "tools/call":
 		s.callCount.Add(1)
+		if s.streaming && s.hangStreamResponse {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				s.t.Fatal("expected streamable HTTP response writer to support flushing")
+			}
+			fmt.Fprint(w, "event: message\n")
+			flusher.Flush()
+			<-r.Context().Done()
+			return
+		}
 		s.writeResponse(w, id, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": s.toolOutput}},
 			"isError": false,
@@ -353,7 +366,7 @@ func newHTTPUpstreamNomosServer(t *testing.T, bundle string, upstream UpstreamSe
 	return server
 }
 
-const retailAllowBundle = `{"version":"v1","rules":[{"id":"allow-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+const retailAllowBundle = `{"version":"v1","rules":[{"id":"allow-refund-request","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},{"id":"allow-refund-status","action_type":"mcp.call","resource":"mcp://retail/refund.status","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
 
 func TestUpstreamStreamableHTTPSingleResponse(t *testing.T) {
 	upstream := newUpstreamHTTPTestServer(t, false, "plaintext")
@@ -679,6 +692,32 @@ func TestUpstreamStreamableHTTPBackgroundNotificationsRefreshTools(t *testing.T)
 
 	if !containsForwardedTool(server.toolsList(), "upstream_retail_refund_status") {
 		t.Fatalf("expected refreshed tool list, got %+v", server.toolsList())
+	}
+}
+
+func TestUpstreamStreamableHTTPSlowStreamTimesOut(t *testing.T) {
+	upstream := newUpstreamHTTPTestServer(t, true, "plaintext")
+	upstream.hangStreamResponse = true
+	server := newHTTPUpstreamNomosServer(t, retailAllowBundle, UpstreamServerConfig{
+		Name:          "retail",
+		Transport:     "streamable_http",
+		Endpoint:      upstream.endpoint(),
+		TLSInsecure:   true,
+		CallTimeout:   50 * time.Millisecond,
+		StreamTimeout: 50 * time.Millisecond,
+	}, nil)
+	t.Cleanup(func() { _ = server.Close() })
+
+	resp := server.handleRequest(Request{
+		ID:     "slow-stream",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "delayed"}),
+	})
+	if resp.Error != "UPSTREAM_TIMEOUT" {
+		t.Fatalf("expected upstream timeout on slow stream, got %+v", resp)
+	}
+	if upstream.callCount.Load() == 0 {
+		t.Fatal("expected upstream tools/call to be invoked")
 	}
 }
 

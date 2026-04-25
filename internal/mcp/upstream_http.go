@@ -195,6 +195,8 @@ func upstreamTLSConfig(config UpstreamServerConfig) (*tls.Config, error) {
 
 func (c *upstreamHTTPConn) doneCh() <-chan struct{} { return c.done }
 
+func (c *upstreamHTTPConn) envShapeHash() string { return "" }
+
 func (c *upstreamHTTPConn) setRequestHandler(handler upstreamRequestHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -245,7 +247,7 @@ func (c *upstreamHTTPConn) allocateRequestID() string {
 }
 
 func (c *upstreamHTTPConn) handshake() error {
-	resp, err := c.sendRequestRaw(upstreamHTTPHandshakeID, "initialize", map[string]any{
+	resp, err := c.sendRequestRaw(context.Background(), c.timeoutOrDefault(c.config.InitializeTimeout, defaultUpstreamInitializeTimeout), upstreamHTTPHandshakeID, "initialize", map[string]any{
 		"protocolVersion": upstreamHTTPProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
@@ -262,19 +264,24 @@ func (c *upstreamHTTPConn) handshake() error {
 	if resp.Error != nil {
 		return errors.New(resp.Error.Message)
 	}
-	if err := c.sendNotificationRaw("notifications/initialized", map[string]any{}); err != nil {
+	if err := c.sendNotificationRaw(context.Background(), c.timeoutOrDefault(c.config.CallTimeout, defaultUpstreamCallTimeout), "notifications/initialized", map[string]any{}); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *upstreamHTTPConn) callMethod(method string, params map[string]any) (any, error) {
+func (c *upstreamHTTPConn) callMethod(ctx context.Context, timeout time.Duration, method string, params map[string]any) (any, error) {
 	if c.isClosed() {
 		return nil, errUpstreamUnavailable
 	}
+	ctx, cancel := upstreamCallContext(ctx, timeout)
+	defer cancel()
 	id := c.allocateRequestID()
-	resp, err := c.sendRequestRaw(id, method, params)
+	resp, err := c.sendRequestRaw(ctx, timeout, id, method, params)
 	if err != nil {
+		if errors.Is(err, errUpstreamTimeout) || errors.Is(err, errUpstreamCanceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, errUpstreamTimeoutOrCanceled(err)
+		}
 		c.shutdown(err)
 		return nil, errUpstreamUnavailable
 	}
@@ -287,7 +294,7 @@ func (c *upstreamHTTPConn) callMethod(method string, params map[string]any) (any
 	return resp.Result, nil
 }
 
-func (c *upstreamHTTPConn) sendRequestRaw(id, method string, params map[string]any) (*rpcResponse, error) {
+func (c *upstreamHTTPConn) sendRequestRaw(ctx context.Context, timeout time.Duration, id, method string, params map[string]any) (*rpcResponse, error) {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -299,12 +306,14 @@ func (c *upstreamHTTPConn) sendRequestRaw(id, method string, params map[string]a
 		return nil, err
 	}
 	if c.legacySSE {
-		return c.postLegacySSERequest(id, body)
+		return c.postLegacySSERequest(ctx, timeout, id, body)
 	}
-	return c.postStreamableHTTPRequest(id, body)
+	return c.postStreamableHTTPRequest(ctx, timeout, id, body)
 }
 
-func (c *upstreamHTTPConn) sendNotificationRaw(method string, params map[string]any) error {
+func (c *upstreamHTTPConn) sendNotificationRaw(ctx context.Context, timeout time.Duration, method string, params map[string]any) error {
+	ctx, cancel := upstreamCallContext(ctx, timeout)
+	defer cancel()
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
@@ -315,10 +324,20 @@ func (c *upstreamHTTPConn) sendNotificationRaw(method string, params map[string]
 		return err
 	}
 	if c.legacySSE {
-		_, err := c.doPOST(body, true)
+		_, err := c.doPOST(ctx, timeout, body, true)
 		return err
 	}
-	_, err = c.doPOST(body, true)
+	_, err = c.doPOST(ctx, timeout, body, true)
+	return err
+}
+
+func errUpstreamTimeoutOrCanceled(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errUpstreamTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return errUpstreamCanceled
+	}
 	return err
 }
 
@@ -332,7 +351,7 @@ func (c *upstreamHTTPConn) checkAllowlist(host string) error {
 	return fmt.Errorf("upstream host %q not in allowed_hosts", host)
 }
 
-func (c *upstreamHTTPConn) doPOST(body []byte, notification bool) (*http.Response, error) {
+func (c *upstreamHTTPConn) doPOST(ctx context.Context, timeout time.Duration, body []byte, notification bool) (*http.Response, error) {
 	postURL, _ := c.postURL.Load().(*neturl.URL)
 	if postURL == nil {
 		return nil, errors.New("upstream post url not set")
@@ -340,7 +359,7 @@ func (c *upstreamHTTPConn) doPOST(body []byte, notification bool) (*http.Respons
 	if err := c.checkAllowlist(postURL.Hostname()); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(c.ctx, http.MethodPost, postURL.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, postURL.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -381,8 +400,8 @@ func (c *upstreamHTTPConn) applyRequestHeaders(req *http.Request) {
 	}
 }
 
-func (c *upstreamHTTPConn) postStreamableHTTPRequest(id string, body []byte) (*rpcResponse, error) {
-	resp, err := c.doPOST(body, false)
+func (c *upstreamHTTPConn) postStreamableHTTPRequest(ctx context.Context, timeout time.Duration, id string, body []byte) (*rpcResponse, error) {
+	resp, err := c.doPOST(ctx, timeout, body, false)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +411,7 @@ func (c *upstreamHTTPConn) postStreamableHTTPRequest(id string, body []byte) (*r
 	defer resp.Body.Close()
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.HasPrefix(ct, "text/event-stream") {
-		return c.readResponseFromSSE(resp.Body, id)
+		return c.readResponseFromSSE(ctx, timeout, resp.Body, id)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, upstreamSSEReadCap))
 	if err != nil {
@@ -401,7 +420,7 @@ func (c *upstreamHTTPConn) postStreamableHTTPRequest(id string, body []byte) (*r
 	return decodeRPCResponse(bytes.TrimSpace(data))
 }
 
-func (c *upstreamHTTPConn) postLegacySSERequest(id string, body []byte) (*rpcResponse, error) {
+func (c *upstreamHTTPConn) postLegacySSERequest(ctx context.Context, timeout time.Duration, id string, body []byte) (*rpcResponse, error) {
 	ch := make(chan rpcMessage, 1)
 	c.mu.Lock()
 	if c.closed {
@@ -415,7 +434,7 @@ func (c *upstreamHTTPConn) postLegacySSERequest(id string, body []byte) (*rpcRes
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if _, err := c.doPOST(body, false); err != nil {
+	if _, err := c.doPOST(ctx, timeout, body, false); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -432,14 +451,25 @@ func (c *upstreamHTTPConn) postLegacySSERequest(id string, body []byte) (*rpcRes
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, errUpstreamUnavailable
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, errUpstreamTimeoutOrCanceled(ctx.Err())
 	}
 }
 
-func (c *upstreamHTTPConn) readResponseFromSSE(body io.Reader, wantID string) (*rpcResponse, error) {
+func (c *upstreamHTTPConn) readResponseFromSSE(ctx context.Context, timeout time.Duration, body io.ReadCloser, wantID string) (*rpcResponse, error) {
+	defer body.Close()
 	reader := bufio.NewReader(body)
 	for {
-		evt, err := readSSEEvent(reader)
+		readCtx, cancel := upstreamCallContext(ctx, timeout)
+		evt, err := readSSEEventWithContext(readCtx, body, reader)
+		cancel()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, errUpstreamTimeoutOrCanceled(err)
+			}
 			if errors.Is(err, io.EOF) {
 				return nil, errors.New("upstream sse stream closed without response")
 			}
@@ -554,7 +584,7 @@ func (c *upstreamHTTPConn) sendResponseRaw(resp *rpcResponse) error {
 	if err != nil {
 		return err
 	}
-	httpResp, err := c.doPOST(body, false)
+	httpResp, err := c.doPOST(context.Background(), c.timeoutOrDefault(c.config.CallTimeout, defaultUpstreamCallTimeout), body, false)
 	if err != nil {
 		return err
 	}
@@ -643,6 +673,25 @@ func readSSEEvent(reader *bufio.Reader) (sseEvent, error) {
 	}
 }
 
+func readSSEEventWithContext(ctx context.Context, closer io.Closer, reader *bufio.Reader) (sseEvent, error) {
+	type result struct {
+		evt sseEvent
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		evt, err := readSSEEvent(reader)
+		ch <- result{evt: evt, err: err}
+	}()
+	select {
+	case res := <-ch:
+		return res.evt, res.err
+	case <-ctx.Done():
+		_ = closer.Close()
+		return sseEvent{}, ctx.Err()
+	}
+}
+
 func (c *upstreamHTTPConn) startLegacySSE() error {
 	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, c.endpoint.String(), nil)
 	if err != nil {
@@ -701,8 +750,14 @@ func (c *upstreamHTTPConn) legacySSEReadLoop(resp *http.Response) {
 	defer resp.Body.Close()
 	reader := bufio.NewReader(resp.Body)
 	for {
-		evt, err := readSSEEvent(reader)
+		readCtx, cancel := upstreamCallContext(c.ctx, c.timeoutOrDefault(c.config.StreamTimeout, defaultUpstreamStreamTimeout))
+		evt, err := readSSEEventWithContext(readCtx, resp.Body, reader)
+		cancel()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				c.shutdown(errUpstreamTimeoutOrCanceled(err))
+				return
+			}
 			c.shutdown(err)
 			return
 		}
@@ -792,11 +847,16 @@ func (c *upstreamHTTPConn) openStreamableHTTPEventStream() (*http.Response, bool
 	return resp, true, nil
 }
 
-func (c *upstreamHTTPConn) consumeBackgroundSSE(body io.Reader) error {
+func (c *upstreamHTTPConn) consumeBackgroundSSE(body io.ReadCloser) error {
 	reader := bufio.NewReader(body)
 	for {
-		evt, err := readSSEEvent(reader)
+		readCtx, cancel := upstreamCallContext(c.ctx, c.timeoutOrDefault(c.config.StreamTimeout, defaultUpstreamStreamTimeout))
+		evt, err := readSSEEventWithContext(readCtx, body, reader)
+		cancel()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return errUpstreamTimeoutOrCanceled(err)
+			}
 			return err
 		}
 		c.recordSSEEventMetadata(evt)
@@ -814,6 +874,13 @@ func (c *upstreamHTTPConn) currentRetryDelay() time.Duration {
 		return time.Duration(millis) * time.Millisecond
 	}
 	return defaultSSEReconnectDelay
+}
+
+func (c *upstreamHTTPConn) timeoutOrDefault(timeout, fallback time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	return fallback
 }
 
 func (c *upstreamHTTPConn) closeSession() {

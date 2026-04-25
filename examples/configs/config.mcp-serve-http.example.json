@@ -39,39 +39,22 @@
     "secrets": []
   },
   "audit": {
-    "sink": "stdout"
+    "sink": "stderr"
   },
   "telemetry": {
     "enabled": false,
     "sink": ""
   },
   "mcp": {
-    "enabled": true,
-    "upstream_servers": [
-      {
-        "name": "retail",
-        "transport": "stdio",
-        "command": "python",
-        "args": [
-          "path/to/your/retail_mcp_server.py"
-        ],
-        "env_allowlist": [
-          "PATH",
-          "HOME"
-        ],
-        "env": {
-          "REFUND_BASE_URL": "http://127.0.0.1:8002",
-          "COMP_SERVICE_BASE_URL": "http://127.0.0.1:8002"
-        }
-      }
-    ]
+    "enabled": false,
+    "upstream_servers": []
   },
   "upstream": {
     "routes": []
   },
   "approvals": {
     "enabled": true,
-    "store_path": "./nomos-upstream-approvals.db",
+    "store_path": "./nomos-mcp-http-approvals.db",
     "ttl_seconds": 900,
     "webhook_token": "",
     "slack_token": "",
@@ -82,7 +65,7 @@
     "agent": "nomos",
     "environment": "dev",
     "api_keys": {
-      "dev-api-key": "system"
+      "dev-api-key": "developer@example.com"
     },
     "agent_secrets": {
       "nomos": "dev-agent-secret"
