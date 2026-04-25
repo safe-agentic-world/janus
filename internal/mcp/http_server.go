@@ -162,6 +162,7 @@ func (s *DownstreamHTTPServer) handleMCPPost(w http.ResponseWriter, r *http.Requ
 	}
 	if req.Method == "initialize" {
 		session := s.newSession(id)
+		req.Ctx = r.Context()
 		resp := session.session.server.handleRPCRequest(req, session.session)
 		w.Header().Set(downstreamHTTPSessionHeader, session.id)
 		s.writeRPCJSON(w, resp)
@@ -174,6 +175,7 @@ func (s *DownstreamHTTPServer) handleMCPPost(w http.ResponseWriter, r *http.Requ
 	if !s.allowSessionRequest(session.id, w) {
 		return
 	}
+	req.Ctx = r.Context()
 	resp := session.session.server.handleRPCRequest(req, session.session)
 	if resp == nil {
 		w.WriteHeader(http.StatusAccepted)

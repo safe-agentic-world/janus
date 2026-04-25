@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ type Request struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params"`
+	Ctx    context.Context `json:"-"`
 }
 
 type Response struct {
@@ -62,6 +64,7 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	Ctx     context.Context `json:"-"`
 }
 
 type rpcError struct {
@@ -318,6 +321,9 @@ func (s *Server) handleRPCPayload(payload []byte) *rpcResponse {
 }
 
 func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *rpcResponse {
+	if req.Ctx == nil {
+		req.Ctx = context.Background()
+	}
 	if req.Method == "" {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32600, Message: "invalid request"}}
 	}
@@ -412,6 +418,7 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 			ID:     rpcIDKey(parseRPCID(req.ID)),
 			Method: canonicalToolName(name),
 			Params: args,
+			Ctx:    req.Ctx,
 		}, session)
 		if resp.Error != "" {
 			return "", errors.New(toolErrorMessage(canonicalToolName(name), resp.Error))
@@ -425,6 +432,7 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 		ID:     rpcIDKey(parseRPCID(req.ID)),
 		Method: canonicalToolName(name),
 		Params: args,
+		Ctx:    req.Ctx,
 	}
 	legacyResp := s.handleRequestWithSession(legacyReq, session)
 	if legacyResp.Error != "" {
@@ -604,6 +612,10 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	if s.upstream == nil {
 		return Response{ID: req.ID, Error: "method_not_found"}
 	}
+	ctx := req.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	tool, ok := s.upstream.toolByName(req.Method)
 	if !ok {
 		return Response{ID: req.ID, Error: "method_not_found"}
@@ -645,7 +657,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	if resp.Decision != policy.DecisionAllow {
 		return Response{ID: req.ID, Result: resp}
 	}
-	output, err := s.upstream.callToolWithRequests(tool.ServerName, tool.ToolName, sanitizedArgs, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
+	output, err := s.upstream.callToolWithRequests(ctx, tool.ServerName, tool.ToolName, sanitizedArgs, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
 	if err != nil {
 		return Response{ID: req.ID, Error: classifyForwardedToolError(err)}
 	}
@@ -1039,6 +1051,10 @@ func classifyForwardedToolError(err error) string {
 		return "upstream_unavailable"
 	case errors.Is(err, errUpstreamClosed):
 		return "upstream_unavailable"
+	case errors.Is(err, errUpstreamTimeout):
+		return "UPSTREAM_TIMEOUT"
+	case errors.Is(err, errUpstreamCanceled):
+		return "UPSTREAM_CANCELED"
 	}
 	return "execution_error"
 }

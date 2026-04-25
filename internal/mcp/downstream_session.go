@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,6 +114,7 @@ func (s *downstreamSession) dispatchRPCPayload(payload []byte) error {
 	if err := dec.Decode(&req); err != nil {
 		return s.writeRPCResponse(&rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
 	}
+	req.Ctx = context.Background()
 	resp := s.server.handleRPCRequest(req, s)
 	if resp == nil {
 		return nil
@@ -140,7 +142,10 @@ func (s *downstreamSession) handleRPCResponse(payload []byte) error {
 	return nil
 }
 
-func (s *downstreamSession) sendRequest(method string, params map[string]any) (*rpcResponse, error) {
+func (s *downstreamSession) sendRequest(ctx context.Context, method string, params map[string]any) (*rpcResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	id := fmt.Sprintf("nomos-%d", atomic.AddInt64(&s.nextID, 1))
 	ch := make(chan rpcMessage, 1)
 	s.mu.Lock()
@@ -177,6 +182,14 @@ func (s *downstreamSession) sendRequest(method string, params map[string]any) (*
 			return nil, msg.err
 		}
 		return msg.resp, nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, errUpstreamTimeout
+		}
+		return nil, errUpstreamCanceled
 	case <-s.done:
 		return nil, errUpstreamUnavailable
 	}

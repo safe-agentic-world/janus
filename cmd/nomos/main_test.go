@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/assurance"
 	"github.com/safe-agentic-world/nomos/internal/doctor"
 	"github.com/safe-agentic-world/nomos/internal/gateway"
+	"github.com/safe-agentic-world/nomos/internal/mcp"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/version"
@@ -101,6 +103,36 @@ func TestLoadConfigFailsClosedWithoutBundle(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "policy.policy_bundle_path or policy.policy_bundle_paths is required") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestToMCPUpstreamServersAppliesTimeoutDefaultsAndOverrides(t *testing.T) {
+	got := toMCPUpstreamServers(gateway.MCPTimeoutConfig{
+		InitializeMS: 5000,
+		EnumerateMS:  5000,
+		CallMS:       30000,
+		StreamMS:     30000,
+	}, []gateway.MCPUpstreamServerConfig{{
+		Name:      "retail",
+		Transport: "stdio",
+		Timeouts: gateway.MCPTimeoutConfig{
+			EnumerateMS: 12000,
+			CallMS:      45000,
+		},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("expected one runtime upstream server, got %+v", got)
+	}
+	want := mcp.UpstreamServerConfig{
+		Name:              "retail",
+		Transport:         "stdio",
+		InitializeTimeout: 5 * time.Second,
+		EnumerateTimeout:  12 * time.Second,
+		CallTimeout:       45 * time.Second,
+		StreamTimeout:     30 * time.Second,
+	}
+	if got[0].Name != want.Name || got[0].Transport != want.Transport || got[0].InitializeTimeout != want.InitializeTimeout || got[0].EnumerateTimeout != want.EnumerateTimeout || got[0].CallTimeout != want.CallTimeout || got[0].StreamTimeout != want.StreamTimeout {
+		t.Fatalf("unexpected runtime upstream timeouts: got %+v want %+v", got[0], want)
 	}
 }
 

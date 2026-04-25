@@ -144,6 +144,29 @@ Auth material passed through the config is injected only into upstream HTTP requ
 - Store upstream auth tokens outside the config file when possible (templated in at deploy time, or brokered via the M54 credential flow in future revisions). The v1 `auth` block is a stable injection point for that integration.
 - Policy bundles do not need any changes to move an upstream from `stdio` to `streamable_http`: `mcp.call` resource identity is `mcp://<server>/<tool>` regardless of transport.
 
+### Upstream Timeouts
+
+M50 adds per-stage upstream deadlines so a slow or hung server fails closed instead of stalling Nomos:
+
+- `initialize_timeout_ms`
+- `enumerate_timeout_ms`
+- `call_timeout_ms`
+- `stream_timeout_ms`
+
+Default budgets are conservative and can be overridden globally under `mcp.timeouts` or per upstream server under `mcp.upstream_servers[].timeouts`.
+
+Recommended tuning:
+
+- keep `initialize` and `enumerate` short, because they gate startup and tool discovery
+- give `call` a larger budget than `enumerate` for expensive tools, but keep it bounded
+- set `stream` only as high as necessary for long-lived SSE subscriptions, because each read still uses a bounded per-read deadline
+
+Timeout and cancellation failures are explicit:
+
+- `UPSTREAM_TIMEOUT` means the upstream did not respond before the configured deadline
+- `UPSTREAM_CANCELED` means the downstream request was canceled before the upstream completed
+- both are fail-closed and are not retried silently
+
 ### Environment Isolation
 
 Nomos now isolates upstream stdio processes from the parent environment by default. For each upstream server:

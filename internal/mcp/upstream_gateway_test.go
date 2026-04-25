@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/identity"
@@ -496,7 +497,7 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 	}
 	mode := os.Args[3]
 	switch mode {
-	case "retail", "framed-retail", "stateful-retail", "env-inspect":
+	case "retail", "framed-retail", "stateful-retail", "env-inspect", "hang-init", "hang-call":
 	default:
 		return
 	}
@@ -520,6 +521,10 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 		method, _ := req["method"].(string)
 		switch method {
 		case "initialize":
+			if mode == "hang-init" {
+				time.Sleep(time.Hour)
+				return
+			}
 			writeUpstreamHelperResponse(writer, mode, req["id"], map[string]any{
 				"protocolVersion": SupportedProtocolVersion,
 				"capabilities": map[string]any{
@@ -659,6 +664,9 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 				},
 			}, nil)
 		case "tools/call":
+			if mode == "hang-call" {
+				continue
+			}
 			params, _ := req["params"].(map[string]any)
 			callName, _ := params["name"].(string)
 			args, _ := params["arguments"].(map[string]any)

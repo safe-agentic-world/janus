@@ -184,7 +184,7 @@ func runMCP(args []string) {
 		ApprovalStorePath:     cfg.Approvals.StorePath,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
-		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.UpstreamServers),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.UpstreamServers),
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -259,7 +259,7 @@ func runMCPServe(args []string) {
 		ApprovalStorePath:     cfg.Approvals.StorePath,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
-		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.UpstreamServers),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.UpstreamServers),
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -908,7 +908,7 @@ func toMCPUpstreamRoutes(routes []gateway.UpstreamRoute) []mcp.UpstreamRoute {
 	return out
 }
 
-func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
+func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
 	if len(servers) == 0 {
 		return nil
 	}
@@ -919,19 +919,23 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 			env[key] = value
 		}
 		mapped := mcp.UpstreamServerConfig{
-			Name:         server.Name,
-			Transport:    server.Transport,
-			Command:      server.Command,
-			Args:         append([]string(nil), server.Args...),
-			EnvAllowlist: append([]string(nil), server.EnvAllowlist...),
-			Env:          env,
-			Workdir:      server.Workdir,
-			Endpoint:     server.Endpoint,
-			AllowedHosts: append([]string(nil), server.AllowedHosts...),
-			TLSInsecure:  server.TLSInsecure,
-			TLSCAFile:    server.TLSCAFile,
-			TLSCertFile:  server.TLSCertFile,
-			TLSKeyFile:   server.TLSKeyFile,
+			Name:              server.Name,
+			Transport:         server.Transport,
+			Command:           server.Command,
+			Args:              append([]string(nil), server.Args...),
+			EnvAllowlist:      append([]string(nil), server.EnvAllowlist...),
+			Env:               env,
+			Workdir:           server.Workdir,
+			Endpoint:          server.Endpoint,
+			AllowedHosts:      append([]string(nil), server.AllowedHosts...),
+			TLSInsecure:       server.TLSInsecure,
+			TLSCAFile:         server.TLSCAFile,
+			TLSCertFile:       server.TLSCertFile,
+			TLSKeyFile:        server.TLSKeyFile,
+			InitializeTimeout: timeoutDurationFromMS(coalesceTimeout(defaults.InitializeMS, server.Timeouts.InitializeMS)),
+			EnumerateTimeout:  timeoutDurationFromMS(coalesceTimeout(defaults.EnumerateMS, server.Timeouts.EnumerateMS)),
+			CallTimeout:       timeoutDurationFromMS(coalesceTimeout(defaults.CallMS, server.Timeouts.CallMS)),
+			StreamTimeout:     timeoutDurationFromMS(coalesceTimeout(defaults.StreamMS, server.Timeouts.StreamMS)),
 		}
 		if server.Auth != nil {
 			mapped.AuthType = server.Auth.Type
@@ -948,6 +952,20 @@ func toMCPUpstreamServers(servers []gateway.MCPUpstreamServerConfig) []mcp.Upstr
 		out = append(out, mapped)
 	}
 	return out
+}
+
+func coalesceTimeout(defaultMS, overrideMS int) int {
+	if overrideMS > 0 {
+		return overrideMS
+	}
+	return defaultMS
+}
+
+func timeoutDurationFromMS(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func mcpSinkRewritesStdout(sink string) bool {

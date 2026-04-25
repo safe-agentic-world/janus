@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -98,6 +100,42 @@ func newEnvInspectUpstreamServer(t *testing.T, bundle string, upstream UpstreamS
 	return server
 }
 
+func newTimeoutUpstreamServer(t *testing.T, mode string, timeout time.Duration) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-call","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		UpstreamServers: []UpstreamServerConfig{{
+			Name:              "retail",
+			Transport:         "stdio",
+			Command:           os.Args[0],
+			Args:              []string{"-test.run=TestUpstreamMCPHelperProcess", "--", mode},
+			Env:               map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+			Workdir:           dir,
+			InitializeTimeout: timeout,
+			EnumerateTimeout:  timeout,
+			CallTimeout:       timeout,
+			StreamTimeout:     timeout,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("new timeout upstream server: %v", err)
+	}
+	server.upstream.setBackoffForTest(0, 0)
+	return server
+}
+
 func TestUpstreamSessionSharedByConcurrentCalls(t *testing.T) {
 	server := newStatefulUpstreamServer(t, statefulForwardedAllowBundle)
 	t.Cleanup(func() { _ = server.Close() })
@@ -162,6 +200,92 @@ func TestUpstreamSessionSharedByConcurrentCalls(t *testing.T) {
 	connAfter := session.connForTest()
 	if connAfter != connBefore {
 		t.Fatalf("expected shared upstream conn (one session), got %p then %p", connBefore, connAfter)
+	}
+}
+
+func TestUpstreamInitializeTimeoutFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout test in short mode")
+	}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-call","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	_, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		UpstreamServers: []UpstreamServerConfig{{
+			Name:              "retail",
+			Transport:         "stdio",
+			Command:           os.Args[0],
+			Args:              []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "hang-init"},
+			Env:               map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+			Workdir:           dir,
+			InitializeTimeout: 25 * time.Millisecond,
+			EnumerateTimeout:  25 * time.Millisecond,
+			CallTimeout:       25 * time.Millisecond,
+			StreamTimeout:     25 * time.Millisecond,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "UPSTREAM_TIMEOUT") {
+		t.Fatalf("expected initialize timeout, got %v", err)
+	}
+}
+
+func TestUpstreamCancellationReturnsStructuredError(t *testing.T) {
+	server := newTimeoutUpstreamServer(t, "hang-call", 500*time.Millisecond)
+	t.Cleanup(func() { _ = server.Close() })
+	session := server.upstream.sessionForTest("retail")
+	if session == nil {
+		t.Fatal("expected upstream session")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err := session.call(ctx, "tools/call", map[string]any{
+		"name":      "refund.request",
+		"arguments": map[string]any{"order_id": "ORD-1", "reason": "slow"},
+	})
+	if !errors.Is(err, errUpstreamCanceled) {
+		t.Fatalf("expected UPSTREAM_CANCELED, got %v", err)
+	}
+}
+
+func TestUpstreamForcedTimeoutsDoNotLeakGoroutines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping leak test in short mode")
+	}
+	server := newTimeoutUpstreamServer(t, "hang-call", 500*time.Millisecond)
+	t.Cleanup(func() { _ = server.Close() })
+	session := server.upstream.sessionForTest("retail")
+	if session == nil {
+		t.Fatal("expected upstream session")
+	}
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	before := runtime.NumGoroutine()
+	for i := 0; i < 1000; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		_, _ = session.call(ctx, "tools/call", map[string]any{
+			"name":      "refund.request",
+			"arguments": map[string]any{"order_id": fmt.Sprintf("ORD-%d", i), "reason": "timeout"},
+		})
+		cancel()
+	}
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after-before > 8 {
+		t.Fatalf("goroutine leak across forced timeouts: before=%d after=%d", before, after)
 	}
 }
 
@@ -393,7 +517,7 @@ func TestUpstreamEnvEmptyByDefault(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	session := server.upstream.sessionForTest("retail")
-	result, err := session.call("env.inspect", map[string]any{})
+	result, err := session.call(context.Background(), "env.inspect", map[string]any{})
 	if err != nil {
 		t.Fatalf("env inspect call: %v", err)
 	}
@@ -417,7 +541,7 @@ func TestUpstreamEnvAllowlistPassThrough(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	session := server.upstream.sessionForTest("retail")
-	result, err := session.call("env.inspect", map[string]any{})
+	result, err := session.call(context.Background(), "env.inspect", map[string]any{})
 	if err != nil {
 		t.Fatalf("env inspect call: %v", err)
 	}
@@ -446,7 +570,7 @@ func TestUpstreamEnvOverrideWinsOverAllowlist(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	session := server.upstream.sessionForTest("retail")
-	result, err := session.call("env.inspect", map[string]any{})
+	result, err := session.call(context.Background(), "env.inspect", map[string]any{})
 	if err != nil {
 		t.Fatalf("env inspect call: %v", err)
 	}
