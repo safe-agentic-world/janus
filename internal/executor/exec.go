@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -32,6 +33,19 @@ type ExecRunner struct {
 	timeout       time.Duration
 }
 
+var safeCommandNamePattern = regexp.MustCompile(`^[A-Za-z0-9._:/\\+-]+$`)
+var prohibitedShellCommands = map[string]struct{}{
+	"sh":         {},
+	"bash":       {},
+	"dash":       {},
+	"zsh":        {},
+	"fish":       {},
+	"ksh":        {},
+	"cmd":        {},
+	"powershell": {},
+	"pwsh":       {},
+}
+
 func NewExecRunner(workspaceRoot string, maxBytes int) *ExecRunner {
 	if maxBytes <= 0 {
 		maxBytes = 64 * 1024
@@ -46,6 +60,9 @@ func NewExecRunner(workspaceRoot string, maxBytes int) *ExecRunner {
 func (r *ExecRunner) Run(params ExecParams) (ExecResult, error) {
 	if len(params.Argv) == 0 {
 		return ExecResult{}, errors.New("argv is required")
+	}
+	if err := validateExecCommand(params.Argv); err != nil {
+		return ExecResult{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
@@ -94,6 +111,33 @@ func (r *ExecRunner) Run(params ExecParams) (ExecResult, error) {
 		ExitCode:  exitCode,
 		Truncated: truncated,
 	}, nil
+}
+
+func validateExecCommand(argv []string) error {
+	command := strings.TrimSpace(argv[0])
+	if command == "" {
+		return errors.New("argv[0] is required")
+	}
+	if !safeCommandNamePattern.MatchString(command) {
+		return errors.New("argv[0] contains unsupported characters")
+	}
+	if _, blocked := prohibitedShellCommands[commandRootName(command)]; blocked {
+		return errors.New("shell interpreter commands are not supported")
+	}
+	for _, arg := range argv[1:] {
+		if arg == "--" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			return errors.New("argv arguments must not start with --")
+		}
+	}
+	return nil
+}
+
+func commandRootName(command string) string {
+	base := strings.ToLower(filepath.Base(command))
+	return strings.TrimSuffix(base, strings.ToLower(filepath.Ext(base)))
 }
 
 func filteredEnv(allowlist []string, injected map[string]string) []string {
