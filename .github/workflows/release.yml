@@ -148,4 +148,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash ./scripts/update-packages-repo.sh
+          if ! bash ./scripts/update-packages-repo.sh; then
+            echo "::warning::package repo update failed; release was published, but Homebrew/Scoop manifests were not updated"
+          fi
