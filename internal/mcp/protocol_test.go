@@ -91,7 +91,7 @@ func TestFramedInitializeAndToolsList(t *testing.T) {
 	}
 }
 
-func TestToolsListRemainsStaticWhenPolicyDoesNotEnableAListedTool(t *testing.T) {
+func TestToolsListFiltersUnavailableToolsByPolicy(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
 	bundle := `{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
@@ -108,15 +108,21 @@ func TestToolsListRemainsStaticWhenPolicyDoesNotEnableAListedTool(t *testing.T) 
 	}
 
 	tools := server.toolsList()
+	foundRead := false
 	foundHTTP := false
 	for _, tool := range tools {
+		if tool["name"] == "nomos_fs_read" {
+			foundRead = true
+		}
 		if tool["name"] == "nomos_http_request" {
 			foundHTTP = true
-			break
 		}
 	}
-	if !foundHTTP {
-		t.Fatalf("expected static tools/list to advertise nomos_http_request, got %+v", tools)
+	if !foundRead {
+		t.Fatalf("expected filtered tools/list to advertise nomos_fs_read, got %+v", tools)
+	}
+	if foundHTTP {
+		t.Fatalf("did not expect filtered tools/list to advertise nomos_http_request, got %+v", tools)
 	}
 	foundCapabilities := false
 	for _, tool := range tools {
@@ -133,7 +139,7 @@ func TestToolsListRemainsStaticWhenPolicyDoesNotEnableAListedTool(t *testing.T) 
 		}
 	}
 	if !foundCapabilities {
-		t.Fatalf("expected static tools/list to advertise nomos_capabilities, got %+v", tools)
+		t.Fatalf("expected filtered tools/list to advertise nomos_capabilities, got %+v", tools)
 	}
 
 	resp := server.handleCapabilities(Request{ID: "1", Method: "nomos.capabilities"})

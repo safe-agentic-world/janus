@@ -358,11 +358,13 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 			Result:  map[string]any{},
 		}
 	case "tools/list":
+		tools, summary := s.toolsListForSessionWithSummary(session)
+		s.recordToolDiscoveryAudit(req, session, summary)
 		return &rpcResponse{
 			JSONRPC: "2.0",
 			ID:      parseRPCID(req.ID),
 			Result: map[string]any{
-				"tools": s.toolsListForSession(session),
+				"tools": tools,
 			},
 		}
 	case "tools/call":
@@ -456,53 +458,6 @@ func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
 		return name, args, nil
 	}
 	return name, []byte(`{}`), nil
-}
-
-func (s *Server) toolsList() []map[string]any {
-	return s.toolsListForIdentity(s.identity, false)
-}
-
-func (s *Server) toolsListForSession(session *downstreamSession) []map[string]any {
-	if session == nil {
-		return s.toolsList()
-	}
-	return s.toolsListForIdentity(session.actionIdentity(), true)
-}
-
-func (s *Server) toolsListForIdentity(id identity.VerifiedIdentity, filterUnavailable bool) []map[string]any {
-	capabilities := s.service.ToolCapabilities(id)
-	tools := []map[string]any{
-		{"name": advertisedToolName("nomos.capabilities"), "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
-	}
-	directTools := []struct {
-		capability string
-		entry      map[string]any
-	}{
-		{"nomos.fs_read", map[string]any{"name": advertisedToolName("nomos.fs_read"), "description": "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}}},
-		{"nomos.fs_write", map[string]any{"name": advertisedToolName("nomos.fs_write"), "description": "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}}},
-		{"nomos.apply_patch", map[string]any{"name": advertisedToolName("nomos.apply_patch"), "description": "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}}},
-		{"nomos.exec", map[string]any{"name": advertisedToolName("nomos.exec"), "description": "Run a bounded process action. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}}},
-		{"nomos.http_request", map[string]any{"name": advertisedToolName("nomos.http_request"), "description": "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}}},
-		{"repo.validate_change_set", map[string]any{"name": advertisedToolName("repo.validate_change_set"), "description": "Validate changed repo paths against policy before attempting a patch action.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}}},
-	}
-	for _, tool := range directTools {
-		if filterUnavailable {
-			if capability, ok := capabilities[tool.capability]; ok && capability.State == service.ToolStateUnavailable {
-				continue
-			}
-		}
-		tools = append(tools, tool.entry)
-	}
-	if s.upstream != nil {
-		for _, tool := range s.upstream.snapshotTools() {
-			tools = append(tools, map[string]any{
-				"name":        tool.DownstreamName,
-				"description": forwardedToolDescription(tool),
-				"inputSchema": tool.InputSchema,
-			})
-		}
-	}
-	return tools
 }
 
 func readFramedPayload(reader *bufio.Reader) ([]byte, error) {
@@ -935,6 +890,37 @@ func mustJSONBytes(value any) []byte {
 		return []byte(`{}`)
 	}
 	return data
+}
+
+func (s *Server) recordToolDiscoveryAudit(req rpcRequest, session *downstreamSession, summary toolDiscoverySummary) {
+	if s == nil || s.service == nil {
+		return
+	}
+	metadata := map[string]any{
+		"principal":       s.identity.Principal,
+		"evaluated_tools": summary.evaluated,
+		"hidden_tools":    summary.hidden,
+		"tool_surface":    "tools/list",
+	}
+	if session != nil {
+		for key, value := range session.auditMetadata() {
+			metadata[key] = value
+		}
+	}
+	_ = s.service.RecordAuditEvent(audit.Event{
+		SchemaVersion:        "v1",
+		Timestamp:            time.Now().UTC(),
+		EventType:            "mcp.tools_list",
+		TraceID:              "mcp_" + rpcIDKey(parseRPCID(req.ID)),
+		ActionID:             "mcp_" + rpcIDKey(parseRPCID(req.ID)),
+		Principal:            s.identity.Principal,
+		Agent:                s.identity.Agent,
+		Environment:          s.identity.Environment,
+		ActionType:           "mcp.tools_list",
+		Resource:             "mcp://tools/list",
+		ResultClassification: "discovery",
+		ExecutorMetadata:     metadata,
+	})
 }
 
 func buildActionExtensionsForSession(approvalID string, session *downstreamSession) map[string]json.RawMessage {

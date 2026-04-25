@@ -353,7 +353,7 @@ func newHTTPUpstreamNomosServer(t *testing.T, bundle string, upstream UpstreamSe
 	return server
 }
 
-const retailAllowBundle = `{"version":"v1","rules":[{"id":"allow-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+const retailAllowBundle = `{"version":"v1","rules":[{"id":"allow-refund-request","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},{"id":"allow-refund-status","action_type":"mcp.call","resource":"mcp://retail/refund.status","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
 
 func TestUpstreamStreamableHTTPSingleResponse(t *testing.T) {
 	upstream := newUpstreamHTTPTestServer(t, false, "plaintext")

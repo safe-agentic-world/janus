@@ -1,0 +1,230 @@
+package mcp
+
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/safe-agentic-world/nomos/internal/action"
+	"github.com/safe-agentic-world/nomos/internal/identity"
+	"github.com/safe-agentic-world/nomos/internal/policy"
+)
+
+type toolDiscoverySummary struct {
+	evaluated int
+	hidden    int
+}
+
+type toolDiscoveryMode string
+
+const (
+	toolDiscoveryAllowed          toolDiscoveryMode = "allowed"
+	toolDiscoveryApprovalRequired toolDiscoveryMode = "approval_required"
+	toolDiscoveryHidden           toolDiscoveryMode = "hidden"
+)
+
+type toolDiscoverySpec struct {
+	Name       string
+	ActionType string
+	Resource   string
+	Params     map[string]any
+	Exempt     bool
+}
+
+var directToolDiscoverySpecs = []toolDiscoverySpec{
+	{
+		Name:       "nomos.capabilities",
+		ActionType: "",
+		Resource:   "",
+		Params:     nil,
+		Exempt:     true,
+	},
+	{
+		Name:       "nomos.fs_read",
+		ActionType: "fs.read",
+		Resource:   "file://workspace/README.md",
+		Params:     map[string]any{"resource": "README.md"},
+	},
+	{
+		Name:       "nomos.fs_write",
+		ActionType: "fs.write",
+		Resource:   "file://workspace/README.md",
+		Params:     map[string]any{"resource": "README.md", "content": "sample"},
+	},
+	{
+		Name:       "nomos.apply_patch",
+		ActionType: "repo.apply_patch",
+		Resource:   "repo://local/workspace",
+		Params:     map[string]any{"path": "README.md", "content": "sample"},
+	},
+	{
+		Name:       "nomos.exec",
+		ActionType: "process.exec",
+		Resource:   "file://workspace/",
+		Params:     map[string]any{"argv": []string{"echo", "sample"}, "cwd": "", "env_allowlist_keys": []string{}},
+	},
+	{
+		Name:       "nomos.http_request",
+		ActionType: "net.http_request",
+		Resource:   "url://example.com/status",
+		Params:     map[string]any{"resource": "url://example.com/status", "method": "GET", "body": "", "headers": map[string]string{}},
+	},
+	{
+		Name:       "repo.validate_change_set",
+		ActionType: "repo.apply_patch",
+		Resource:   "repo://local/workspace",
+		Params:     map[string]any{"paths": []string{"README.md"}},
+	},
+}
+
+func (s *Server) toolsList() []map[string]any {
+	tools, _ := s.toolsListForIdentityWithSummary(s.identity, false)
+	return tools
+}
+
+func (s *Server) toolsListForSession(session *downstreamSession) []map[string]any {
+	tools, _ := s.toolsListForSessionWithSummary(session)
+	return tools
+}
+
+func (s *Server) toolsListForSessionWithSummary(session *downstreamSession) ([]map[string]any, toolDiscoverySummary) {
+	if session == nil {
+		return s.toolsListForIdentityWithSummary(s.identity, false)
+	}
+	return s.toolsListForIdentityWithSummary(session.actionIdentity(), true)
+}
+
+func (s *Server) toolsListForIdentity(id identity.VerifiedIdentity, filterUnavailable bool) []map[string]any {
+	tools, _ := s.toolsListForIdentityWithSummary(id, filterUnavailable)
+	return tools
+}
+
+func (s *Server) toolsListForIdentityWithSummary(id identity.VerifiedIdentity, filterUnavailable bool) ([]map[string]any, toolDiscoverySummary) {
+	_ = filterUnavailable
+	summary := toolDiscoverySummary{}
+	tools := []map[string]any{
+		{"name": advertisedToolName("nomos.capabilities"), "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
+	}
+	for _, spec := range directToolDiscoverySpecs {
+		summary.evaluated++
+		if spec.Exempt {
+			continue
+		}
+		discovery, err := s.discoverToolVisibility(id, spec.ActionType, spec.Resource, spec.Params)
+		if err != nil || discovery == toolDiscoveryHidden {
+			summary.hidden++
+			continue
+		}
+		tools = append(tools, toolListEntryForSpec(spec.Name, toolSchemaForSpec(spec.Name), discovery))
+	}
+	if s.upstream != nil {
+		for _, tool := range s.upstream.snapshotTools() {
+			summary.evaluated++
+			discovery, err := s.discoverToolVisibility(id, "mcp.call", "mcp://"+tool.ServerName+"/"+tool.ToolName, map[string]any{
+				"upstream_server": tool.ServerName,
+				"upstream_tool":   tool.ToolName,
+			})
+			if err != nil || discovery == toolDiscoveryHidden {
+				summary.hidden++
+				continue
+			}
+			tools = append(tools, toolListEntryForUpstream(tool, discovery))
+		}
+	}
+	return tools, summary
+}
+
+func (s *Server) discoverToolVisibility(id identity.VerifiedIdentity, actionType, resource string, params map[string]any) (toolDiscoveryMode, error) {
+	if strings.TrimSpace(actionType) == "" {
+		return toolDiscoveryAllowed, nil
+	}
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "mcp_discovery",
+		ActionType:    actionType,
+		Resource:      resource,
+		Params:        mustJSONBytes(params),
+		TraceID:       "mcp_discovery",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, id)
+	if err != nil {
+		return toolDiscoveryHidden, err
+	}
+	_, decision, err := s.service.EvaluateAction(act)
+	if err != nil {
+		return toolDiscoveryHidden, err
+	}
+	switch decision.Decision {
+	case policy.DecisionAllow:
+		return toolDiscoveryAllowed, nil
+	case policy.DecisionRequireApproval:
+		return toolDiscoveryApprovalRequired, nil
+	default:
+		return toolDiscoveryHidden, nil
+	}
+}
+
+func toolListEntryForSpec(name string, schema map[string]any, discovery toolDiscoveryMode) map[string]any {
+	entry := map[string]any{
+		"name":        advertisedToolName(name),
+		"description": toolDiscoveryDescription(name),
+		"inputSchema": schema,
+	}
+	if discovery == toolDiscoveryApprovalRequired {
+		entry["_meta"] = map[string]any{"approval_required": true}
+	}
+	return entry
+}
+
+func toolListEntryForUpstream(tool upstreamTool, discovery toolDiscoveryMode) map[string]any {
+	entry := map[string]any{
+		"name":        tool.DownstreamName,
+		"description": forwardedToolDescription(tool),
+		"inputSchema": tool.InputSchema,
+	}
+	if discovery == toolDiscoveryApprovalRequired {
+		entry["_meta"] = map[string]any{"approval_required": true}
+	}
+	return entry
+}
+
+func toolDiscoveryDescription(name string) string {
+	switch name {
+	case "nomos.capabilities":
+		return "Return the policy-derived capability contract for this session"
+	case "nomos.fs_read":
+		return "Read a workspace file. Use a workspace-relative path like README.md or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state."
+	case "nomos.fs_write":
+		return "Write a workspace file. Use a workspace-relative path like notes.txt or a canonical file://workspace/... resource. Check nomos.capabilities for current allow versus approval state."
+	case "nomos.apply_patch":
+		return "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state."
+	case "nomos.exec":
+		return "Run a bounded process action. Check nomos.capabilities for current allow versus approval state."
+	case "nomos.http_request":
+		return "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state."
+	case "repo.validate_change_set":
+		return "Validate changed repo paths against policy before attempting a patch action."
+	default:
+		return "Nomos tool"
+	}
+}
+
+func toolSchemaForSpec(name string) map[string]any {
+	switch name {
+	case "nomos.capabilities":
+		return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+	case "nomos.fs_read":
+		return map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}
+	case "nomos.fs_write":
+		return map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource", "content"}, "additionalProperties": false}
+	case "nomos.apply_patch":
+		return map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"path", "content"}, "additionalProperties": false}
+	case "nomos.exec":
+		return map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "cwd": map[string]any{"type": "string"}, "env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"argv"}, "additionalProperties": false}
+	case "nomos.http_request":
+		return map[string]any{"type": "object", "properties": map[string]any{"resource": map[string]any{"type": "string"}, "method": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "approval_id": map[string]any{"type": "string"}}, "required": []string{"resource"}, "additionalProperties": false}
+	case "repo.validate_change_set":
+		return map[string]any{"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "required": []string{"paths"}, "additionalProperties": false}
+	default:
+		return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+	}
+}
