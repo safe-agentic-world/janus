@@ -24,7 +24,7 @@
 
 <br>
 
-Nomos lets companies safely use **Claude Code, Cursor, Codex, and MCP agents** without giving them uncontrolled access to files, shell, GitHub, cloud APIs, secrets, or production systems.
+Nomos lets developers and teams safely use **Claude Code, Cursor, Codex, and MCP agents** without giving them uncontrolled access to files, shell, GitHub, cloud APIs, secrets, or production systems.
 
 It sits between the agent and real systems and enforces one decision at the **execution boundary**: `ALLOW`, `DENY`, or `REQUIRE_APPROVAL`.
 
@@ -71,26 +71,76 @@ Minimal allowing change:
 Same pipeline whether the caller is Claude Code over MCP, Codex over MCP, or an HTTP-integrated agent. Same fingerprint, same decision, same audit record.
 
 
-## Why Nomos Exists
+## What Gets Blocked By Default
 
-Agents are useful, but they are still one bad tool call away from:
+Examples of actions Nomos can block or approval-gate with starter policy bundles:
 
-- wrong business actions (refunds, free bookings, sent messages) under prompt injection
-- pushing code, shipping changes, or running destructive commands like `terraform destroy`, `git push origin main`, or `kubectl delete`
-- changing or deleting files you did not ask them to touch
-- using powerful credentials in ways you never intended
+- read `.env`
+- read `~/.ssh/id_rsa`
+- print authorization headers
+- run `rm -rf`
+- run `terraform destroy`
+- run `kubectl delete`
+- run `git push origin main`
+- call unknown external hosts
+- mutate production resources without approval
 
-Without governance at the execution boundary, prompt injection, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real.
+Each of these is shaped by your own policies and configs — these are starter rules, not built-in enterprise packs.
 
-With Nomos:
 
-- routed actions hit **one control point** before they happen
-- the same normalized action gets the same decision under the same identity, environment, and policy bundle
-- sensitive actions can be routed to **manual approval**
-- agents do not need to hold **long-lived enterprise credentials** on the Nomos-governed path
-- outputs can be **redacted** and governed actions produce **audit evidence**
-- the same control model works across **MCP** and **HTTP** integrations
-- behavior stays flexible because you shape it with your own **policies** and **configs**
+## Install
+
+### Homebrew (macOS)
+
+```bash
+brew install safe-agentic-world/nomos/nomos
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add nomos https://github.com/safe-agentic-world/scoop-nomos
+scoop install nomos
+```
+
+### Build From Source (Go)
+
+```bash
+go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
+```
+
+### Shell Installer (macOS And Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
+```
+
+
+## Try In 60 Seconds
+
+After installing `nomos`, clone this repo to get the starter fixtures and run two policy tests — no Claude, Codex, or MCP setup needed:
+
+```bash
+git clone https://github.com/safe-agentic-world/nomos.git
+cd nomos
+
+nomos policy test \
+  --action ./examples/quickstart/actions/allow-readme.json \
+  --bundle ./examples/policies/safe.yaml
+
+nomos policy test \
+  --action ./examples/quickstart/actions/deny-env.json \
+  --bundle ./examples/policies/safe.yaml
+```
+
+Expected output:
+
+```
+allow-readme.json  -> ALLOW   (matched: safe-read-workspace)
+deny-env.json      -> DENY    (matched: safe-deny-root-env, safe-deny-nested-env)
+```
+
+Both runs print the same `policy_bundle_hash`, so you can verify the decision came from the bundle you expected.
 
 
 ## Try It With Claude Code
@@ -98,7 +148,7 @@ With Nomos:
 Use the demo repo and Claude Code to see Nomos deny a sensitive file read:
 
 ```powershell
-git clone git@github.com:safe-agentic-world/demo-langchain-nomos.git
+git clone https://github.com/safe-agentic-world/demo-langchain-nomos.git
 cd demo-langchain-nomos
 claude mcp add --transport stdio --scope local nomos-demo -- nomos mcp -c "nomos\config.claude-demo.json"
 claude mcp list
@@ -132,7 +182,7 @@ You can also prove:
 ## Try It With Codex
 
 ```powershell
-git clone git@github.com:safe-agentic-world/demo-langchain-nomos.git
+git clone https://github.com/safe-agentic-world/demo-langchain-nomos.git
 cd demo-langchain-nomos
 codex mcp add nomos-demo -- nomos mcp -c "nomos\config.demo.json"
 codex mcp list
@@ -180,32 +230,26 @@ Same agent, same user request, different outcome at the execution boundary.
 To run it yourself, see [demo-langchain-nomos](https://github.com/safe-agentic-world/demo-langchain-nomos) and follow the before/after Nomos runbook.
 
 
-## Install
+## Why Nomos Exists
 
-### Homebrew (macOS)
+Agents are useful, but they are still one bad tool call away from:
 
-```bash
-brew install safe-agentic-world/nomos/nomos
-```
+- wrong business actions (refunds, free bookings, sent messages) under prompt injection
+- pushing code, shipping changes, or running destructive commands like `terraform destroy`, `git push origin main`, or `kubectl delete`
+- changing or deleting files you did not ask them to touch
+- using powerful credentials in ways you never intended
 
-### Scoop (Windows)
+Without governance at the execution boundary, prompt injection, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real.
 
-```powershell
-scoop bucket add nomos https://github.com/safe-agentic-world/scoop-nomos
-scoop install nomos
-```
+With Nomos:
 
-### Build From Source (Go)
-
-```bash
-go install github.com/safe-agentic-world/nomos/cmd/nomos@latest
-```
-
-### Shell Installer (macOS And Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/nomos/main/install.sh | sh
-```
+- routed actions hit **one control point** before they happen
+- the same normalized action gets the same decision under the same identity, environment, and policy bundle
+- sensitive actions can be routed to **manual approval**
+- agents do not need to hold **long-lived enterprise credentials** on the Nomos-governed path
+- outputs can be **redacted** and governed actions produce **audit evidence**
+- the same control model works across **MCP** and **HTTP** integrations
+- behavior stays flexible because you shape it with your own **policies** and **configs**
 
 
 ## Architecture In One Picture
@@ -414,16 +458,14 @@ See:
 
 ## Why Not Just Use OPA, Vault, Or Sandboxes?
 
-Those tools solve pieces of the problem.
+Those tools each solve a piece of the problem. Nomos puts them together at the moment an agent tries to do something real.
 
-| Tool | What it primarily solves |
-| --- | --- |
-| OPA | policy evaluation |
-| Vault | secret storage |
-| sandbox runtimes | process isolation |
-| MCP servers | tool exposure |
-
-Nomos puts **policy**, **approvals**, **redaction**, and **audit** around the moment an agent tries to do something real on the mediated path.
+| Tool | What it solves | What Nomos adds |
+| --- | --- | --- |
+| OPA | policy evaluation | agent action normalization, approvals, execution mediation, audit replay |
+| Vault | secret storage | short-lived credential brokering without exposing raw secrets to agents |
+| sandbox runtimes | process isolation | business policy, approvals, redaction, audit, MCP/HTTP integration |
+| MCP servers | tool exposure | least-privilege governance, deny/approval decisions, output controls |
 
 
 ## Testing
@@ -443,7 +485,7 @@ See:
 - [docs/local-test-plan.md](./docs/local-test-plan.md)
 
 
-## Few More Use Cases
+## More Use Cases
 
 ### Coding Agents
 
