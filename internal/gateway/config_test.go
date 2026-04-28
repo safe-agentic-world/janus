@@ -909,6 +909,135 @@ func TestLoadConfigAppliesMCPTimeoutDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsRateLimitRules(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+		"runtime": map[string]any{"deployment_mode": "unmanaged"},
+		"policy":  map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{
+			"sandbox_enabled": false,
+			"workspace_root":  dir,
+		},
+		"audit":     map[string]any{"sink": "stdout"},
+		"telemetry": map[string]any{"enabled": true, "sink": "stderr"},
+		"rate_limits": map[string]any{
+			"enabled":             true,
+			"evict_after_seconds": 60,
+			"principal_action": []any{
+				map[string]any{"id": "read-per-principal", "action_type": "fs.read", "burst": 2, "refill_per_minute": 60},
+			},
+			"principal_resource": []any{
+				map[string]any{"id": "readme-per-principal", "resource": "file://workspace/README.md", "burst": 1, "refill_per_minute": 30},
+			},
+			"global_tool": []any{
+				map[string]any{"id": "global-read", "action_type": "fs.read", "burst": 10, "refill_per_minute": 120},
+			},
+		},
+		"mcp":      map[string]any{"enabled": false},
+		"upstream": map[string]any{"routes": []any{}},
+		"approvals": map[string]any{
+			"enabled": false,
+		},
+		"identity": map[string]any{
+			"principal":   "system",
+			"agent":       "nomos",
+			"environment": "dev",
+			"api_keys":    map[string]any{"dev-api-key": "system"},
+			"agent_secrets": map[string]any{
+				"nomos": "secret",
+			},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.RateLimits.Enabled || cfg.RateLimits.EvictAfterSeconds != 60 {
+		t.Fatalf("unexpected rate limits config: %+v", cfg.RateLimits)
+	}
+	rules, err := cfg.RateLimits.Rules()
+	if err != nil {
+		t.Fatalf("rate limit rules: %v", err)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 rate limit rules, got %+v", rules)
+	}
+}
+
+func TestLoadConfigRejectsInvalidRateLimitRules(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"fs.read","resource":"file://workspace/README.md","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	cases := []struct {
+		name    string
+		rule    map[string]any
+		wantErr string
+	}{
+		{
+			name:    "burst",
+			rule:    map[string]any{"id": "bad-burst", "action_type": "fs.read", "burst": 0, "refill_per_minute": 60},
+			wantErr: "burst must be > 0",
+		},
+		{
+			name:    "refill",
+			rule:    map[string]any{"id": "bad-refill", "action_type": "fs.read", "burst": 1, "refill_per_minute": 0},
+			wantErr: "refill_per_minute must be > 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, "config-"+tc.name+".json")
+			configJSON := mustMarshal(map[string]any{
+				"gateway": map[string]any{"listen": ":8080", "transport": "http"},
+				"runtime": map[string]any{"deployment_mode": "unmanaged"},
+				"policy":  map[string]any{"policy_bundle_path": bundlePath},
+				"executor": map[string]any{
+					"sandbox_enabled": false,
+					"workspace_root":  dir,
+				},
+				"audit":    map[string]any{"sink": "stdout"},
+				"mcp":      map[string]any{"enabled": false},
+				"upstream": map[string]any{"routes": []any{}},
+				"approvals": map[string]any{
+					"enabled": false,
+				},
+				"rate_limits": map[string]any{
+					"enabled": true,
+					"principal_action": []any{
+						tc.rule,
+					},
+				},
+				"identity": map[string]any{
+					"principal":   "system",
+					"agent":       "nomos",
+					"environment": "dev",
+					"api_keys":    map[string]any{"dev-api-key": "system"},
+					"agent_secrets": map[string]any{
+						"nomos": "secret",
+					},
+				},
+			})
+			if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected invalid rate limit config error %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsInvalidMCPUpstreamServer(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")

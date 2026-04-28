@@ -52,6 +52,7 @@ const (
 	resultSandbox         = "SANDBOX_VIOLATION"
 	resultExecTimeout     = "EXEC_TIMEOUT"
 	resultOutputLimit     = "OUTPUT_LIMIT"
+	resultRateLimit       = "RATE_LIMIT_EXCEEDED"
 	resultUpstreamError   = "UPSTREAM_ERROR"
 	resultInternalError   = "INTERNAL_ERROR"
 )
@@ -110,6 +111,7 @@ func (s *Service) emitCompletedAudit(ctx auditContext, started time.Time) {
 	if e.Decision == "" {
 		e.Decision = policy.DecisionDeny
 	}
+	e.Reason = ctx.decision.ReasonCode
 	e.MatchedRuleIDs = ctx.decision.MatchedRuleIDs
 	e.Obligations = ctx.decision.Obligations
 	e.PolicyBundleHash = ctx.decision.PolicyBundleHash

@@ -47,6 +47,35 @@
   "audit": {
     "sink": "stdout"
   },
+  "rate_limits": {
+    "enabled": true,
+    "evict_after_seconds": 3600,
+    "principal_action": [
+      {
+        "id": "read-per-principal",
+        "action_type": "fs.read",
+        "burst": 30,
+        "refill_per_minute": 60
+      }
+    ],
+    "principal_resource": [
+      {
+        "id": "write-readme-per-principal",
+        "action_type": "fs.write",
+        "resource": "file://workspace/README.md",
+        "burst": 2,
+        "refill_per_minute": 6
+      }
+    ],
+    "global_tool": [
+      {
+        "id": "global-http-budget",
+        "action_type": "net.http_request",
+        "burst": 100,
+        "refill_per_minute": 300
+      }
+    ]
+  },
   "mcp": {
     "enabled": true
   },
