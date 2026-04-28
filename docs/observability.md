@@ -46,7 +46,9 @@ The current implementation emits:
 - request lifecycle events
 - policy evaluation events
 - executor run events
-- counters for decisions, approvals, retries, and failures
+- counters for decisions, rate limits, approvals, retries, and failures
+
+`nomos.rate_limits` counters include stable `result`, `rule_id`, `scope`, `action_type`, and `principal` attributes. `result=allowed` means a matching bucket was consumed; `result=exceeded` means the action was denied with `RATE_LIMIT_EXCEEDED`.
 
 ## W3C Trace Context
 

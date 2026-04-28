@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/assurance"
 	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/ratelimit"
 	"github.com/safe-agentic-world/nomos/internal/sandbox"
 )
 
@@ -25,6 +27,7 @@ type Config struct {
 	Credentials CredentialsConfig `json:"credentials"`
 	Audit       AuditConfig       `json:"audit"`
 	Telemetry   TelemetryConfig   `json:"telemetry"`
+	RateLimits  RateLimitsConfig  `json:"rate_limits"`
 	MCP         MCPConfig         `json:"mcp"`
 	Upstream    UpstreamConfig    `json:"upstream"`
 	Approvals   ApprovalsConfig   `json:"approvals"`
@@ -116,6 +119,65 @@ type AuditConfig struct {
 type TelemetryConfig struct {
 	Enabled bool   `json:"enabled"`
 	Sink    string `json:"sink"`
+}
+
+type RateLimitsConfig struct {
+	Enabled           bool                  `json:"enabled"`
+	EvictAfterSeconds int                   `json:"evict_after_seconds,omitempty"`
+	PrincipalAction   []RateLimitRuleConfig `json:"principal_action,omitempty"`
+	PrincipalResource []RateLimitRuleConfig `json:"principal_resource,omitempty"`
+	GlobalTool        []RateLimitRuleConfig `json:"global_tool,omitempty"`
+}
+
+type RateLimitRuleConfig struct {
+	ID              string `json:"id"`
+	Principal       string `json:"principal,omitempty"`
+	ActionType      string `json:"action_type,omitempty"`
+	Resource        string `json:"resource,omitempty"`
+	Burst           int    `json:"burst"`
+	RefillPerMinute int    `json:"refill_per_minute"`
+}
+
+func (c RateLimitsConfig) hasRules() bool {
+	return len(c.PrincipalAction) > 0 || len(c.PrincipalResource) > 0 || len(c.GlobalTool) > 0
+}
+
+func (c RateLimitsConfig) Validate() error {
+	if !c.Enabled && !c.hasRules() {
+		return nil
+	}
+	if c.EvictAfterSeconds <= 0 {
+		return errors.New("rate_limits.evict_after_seconds must be > 0 when rate limits are enabled")
+	}
+	rules, err := c.Rules()
+	if err != nil {
+		return err
+	}
+	if _, err := ratelimit.New(ratelimit.Config{Enabled: c.Enabled, Rules: rules, EvictAfter: time.Duration(c.EvictAfterSeconds) * time.Second}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c RateLimitsConfig) Rules() ([]ratelimit.Rule, error) {
+	rules := make([]ratelimit.Rule, 0, len(c.PrincipalAction)+len(c.PrincipalResource)+len(c.GlobalTool))
+	appendRules := func(scope string, input []RateLimitRuleConfig) {
+		for _, rule := range input {
+			rules = append(rules, ratelimit.Rule{
+				ID:              rule.ID,
+				Scope:           scope,
+				Principal:       rule.Principal,
+				ActionType:      rule.ActionType,
+				Resource:        rule.Resource,
+				Burst:           rule.Burst,
+				RefillPerMinute: rule.RefillPerMinute,
+			})
+		}
+	}
+	appendRules(ratelimit.ScopePrincipalAction, c.PrincipalAction)
+	appendRules(ratelimit.ScopePrincipalResource, c.PrincipalResource)
+	appendRules(ratelimit.ScopeGlobalTool, c.GlobalTool)
+	return rules, nil
 }
 
 type RedactionConfig struct {
@@ -308,6 +370,12 @@ func (c *Config) SetDefaults() error {
 	if c.Telemetry.Enabled && c.Telemetry.Sink == "" {
 		c.Telemetry.Sink = "stdout"
 	}
+	if c.RateLimits.EvictAfterSeconds == 0 && (c.RateLimits.Enabled || c.RateLimits.hasRules()) {
+		c.RateLimits.EvictAfterSeconds = 3600
+	}
+	if !c.RateLimits.Enabled && c.RateLimits.hasRules() {
+		c.RateLimits.Enabled = true
+	}
 	if c.Executor.WorkspaceRoot == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -447,6 +515,9 @@ func (c Config) Validate() error {
 		default:
 			return errors.New("telemetry.sink must be stdout, stderr, or otlp:<base_url>")
 		}
+	}
+	if err := c.RateLimits.Validate(); err != nil {
+		return err
 	}
 	if c.Approvals.Enabled {
 		if c.Approvals.StorePath == "" {

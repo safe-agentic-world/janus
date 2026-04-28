@@ -14,6 +14,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/executor"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/ratelimit"
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/sandbox"
 	"github.com/safe-agentic-world/nomos/internal/telemetry"
@@ -36,6 +37,7 @@ type Service struct {
 	sandboxWritablePaths  []string
 	assuranceLevel        string
 	telemetry             *telemetry.Emitter
+	rateLimiter           *ratelimit.Limiter
 	execCompatibilityMode string
 	now                   func() time.Time
 }
@@ -100,6 +102,13 @@ func (s *Service) SetTelemetry(emitter *telemetry.Emitter) {
 		return
 	}
 	s.telemetry = emitter
+}
+
+func (s *Service) SetRateLimiter(limiter *ratelimit.Limiter) {
+	if s == nil {
+		return
+	}
+	s.rateLimiter = limiter
 }
 
 func (s *Service) SetExternalPolicy(evaluator ExternalPolicyEvaluator) {
@@ -172,6 +181,46 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		return action.Response{}, err
 	}
 	auditCtx.normalized = &normalized
+	auditCtx.riskLevel, auditCtx.riskFlags = riskVisibility(normalized)
+	auditCtx.actionSummary = actionSummary(normalized.ActionType, normalized.Resource)
+
+	if s.rateLimiter != nil {
+		limitResult := s.rateLimiter.Check(normalized)
+		s.emitRateLimitTelemetry(normalized, limitResult)
+		if !limitResult.Allowed {
+			decision := policy.Decision{
+				Decision:            policy.DecisionDeny,
+				ReasonCode:          "RATE_LIMIT_EXCEEDED",
+				MatchedRuleIDs:      []string{},
+				Obligations:         map[string]any{},
+				PolicyBundleHash:    s.policy.BundleHash(),
+				PolicyBundleSources: s.policy.BundleSources(),
+				PolicyBundleInputs:  s.policy.BundleInputs(),
+			}
+			auditCtx.decision = decision
+			auditCtx.sandboxMode, auditCtx.networkMode = visibilityModes(decision.Obligations, s.sandboxProfile, normalized.ActionType)
+			auditCtx.executorMetadata = mergeExecutorMetadata(auditCtx.executorMetadata, map[string]any{
+				"rate_limit_rule_id":           limitResult.RuleID,
+				"rate_limit_scope":             limitResult.Scope,
+				"rate_limit_bucket_key":        limitResult.BucketKey,
+				"rate_limit_remaining_tokens":  limitResult.RemainingTokens,
+				"rate_limit_refill_per_minute": limitResult.RefillPerMinute,
+			})
+			response := action.Response{
+				Decision: policy.DecisionDeny,
+				Reason:   "RATE_LIMIT_EXCEEDED",
+				TraceID:  normalized.TraceID,
+				ActionID: normalized.ActionID,
+			}
+			s.emitRateLimitAuditDecision(normalized, decision, auditCtx, limitResult)
+			auditCtx.resultSummary = summarizeResponse(s.redactor, response)
+			auditCtx.resultClass = resultRateLimit
+			auditCtx.retryable = true
+			s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
+			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+			return response, nil
+		}
+	}
 
 	decision := s.policy.Evaluate(normalized)
 	if s.externalPolicy != nil {
@@ -201,10 +250,8 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		"policy_bundle_hash": decision.PolicyBundleHash,
 	})
 	auditCtx.decision = decision
-	auditCtx.riskLevel, auditCtx.riskFlags = riskVisibility(normalized)
 	auditCtx.sandboxMode, auditCtx.networkMode = visibilityModes(decision.Obligations, s.sandboxProfile, normalized.ActionType)
 	auditCtx.credentialLeaseIDs = credentialLeaseIDs(decision.Obligations)
-	auditCtx.actionSummary = actionSummary(normalized.ActionType, normalized.Resource)
 	fingerprint, err := actionFingerprint(normalized)
 	if err != nil {
 		auditCtx.resultClass = resultInternalError

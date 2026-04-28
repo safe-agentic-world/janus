@@ -108,6 +108,10 @@ func New(cfg Config) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	actionRateLimiter, err := buildActionRateLimiter(cfg, time.Now)
+	if err != nil {
+		return nil, err
+	}
 	exec := executor.NewFSReader(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines)
 	writerExec := executor.NewFSWriter(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
 	patcher := executor.NewPatchApplier(cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes)
@@ -116,6 +120,7 @@ func New(cfg Config) (*Gateway, error) {
 	svc := service.New(engine, exec, writerExec, patcher, execRunner, httpRunner, writer, redactor, approvalStore, credentialBroker, cfg.Executor.SandboxProfile, time.Now)
 	svc.SetSandboxEvidence(cfg.Runtime.Evidence.SandboxEvidence(), []string{cfg.Executor.WorkspaceRoot})
 	svc.SetExecCompatibilityMode(cfg.Policy.ExecCompatibilityMode)
+	svc.SetRateLimiter(actionRateLimiter)
 	if cfg.Policy.OPA.Enabled {
 		backend, err := opabridge.NewCommandBackend(opabridge.CommandConfig{
 			BinaryPath: cfg.Policy.OPA.BinaryPath,
@@ -213,6 +218,10 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	if err != nil {
 		return nil, err
 	}
+	actionRateLimiter, err := buildActionRateLimiter(cfg, now)
+	if err != nil {
+		return nil, err
+	}
 	redactor, err := redact.NewRedactor(cfg.Redaction.Patterns)
 	if err != nil {
 		return nil, err
@@ -232,6 +241,7 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	svc := service.New(engine, exec, writerExec, patcher, execRunner, httpRunner, recorder, redactor, approvalStore, credentialBroker, cfg.Executor.SandboxProfile, now)
 	svc.SetSandboxEvidence(cfg.Runtime.Evidence.SandboxEvidence(), []string{cfg.Executor.WorkspaceRoot})
 	svc.SetExecCompatibilityMode(cfg.Policy.ExecCompatibilityMode)
+	svc.SetRateLimiter(actionRateLimiter)
 	if cfg.Policy.OPA.Enabled {
 		backend, err := opabridge.NewCommandBackend(opabridge.CommandConfig{
 			BinaryPath: cfg.Policy.OPA.BinaryPath,

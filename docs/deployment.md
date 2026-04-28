@@ -137,6 +137,18 @@ When limit is reached:
 - request is rejected with HTTP `429`
 - response reason code is `rate_limited`
 
+## Service-Stage Rate Limits
+
+Use `rate_limits` for deterministic action quotas after normalization and before policy evaluation. These limits are separate from the legacy `gateway.rate_limit_per_minute` transport guard.
+
+Supported buckets:
+
+- `principal_action`: one bucket per `(principal, action_type)`.
+- `principal_resource`: one bucket per `(principal, normalized_resource)`.
+- `global_tool`: one shared bucket per `action_type`.
+
+All matching buckets are enforced. If any bucket is empty, Nomos denies the action with `RATE_LIMIT_EXCEEDED`, writes that classification to audit, and exports `nomos.rate_limits` telemetry counters. Keep bursts large enough for normal automation spikes and use `evict_after_seconds` to bound idle in-memory bucket state.
+
 ## Horizontal Scaling Notes
 
 For horizontal scaling:

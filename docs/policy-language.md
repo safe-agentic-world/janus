@@ -83,6 +83,52 @@ rules:
 3. Else if any matching rule returns `ALLOW` → **ALLOW**
 4. Else → **DENY** (default)
 
+## Rate Limits
+
+Rate limits are configured outside policy bundles under `rate_limits` so enforcement can run after normalization and before policy evaluation. This keeps rate limiting additive: it can only reject an action with `RATE_LIMIT_EXCEEDED`; it never turns a policy denial into an allow.
+
+```json
+{
+  "rate_limits": {
+    "enabled": true,
+    "evict_after_seconds": 3600,
+    "principal_action": [
+      {
+        "id": "read-per-principal",
+        "action_type": "fs.read",
+        "burst": 30,
+        "refill_per_minute": 60
+      }
+    ],
+    "principal_resource": [
+      {
+        "id": "write-readme-per-principal",
+        "action_type": "fs.write",
+        "resource": "file://workspace/README.md",
+        "burst": 2,
+        "refill_per_minute": 6
+      }
+    ],
+    "global_tool": [
+      {
+        "id": "global-http-budget",
+        "action_type": "net.http_request",
+        "burst": 100,
+        "refill_per_minute": 300
+      }
+    ]
+  }
+}
+```
+
+Rule types:
+
+- `principal_action` creates one bucket per `(principal, action_type)`.
+- `principal_resource` creates one bucket per `(principal, normalized_resource)`.
+- `global_tool` creates one shared bucket per `action_type`.
+
+All matching rate-limit rules apply. If any matching bucket is empty, Nomos fails closed with `Decision: DENY`, `Reason: RATE_LIMIT_EXCEEDED`, an `action.completed` audit classification of `RATE_LIMIT_EXCEEDED`, and `nomos.rate_limits` telemetry counters. Missing `rate_limits` config means no additional service-stage rate limit is applied; policy behavior is unchanged.
+
 ## Pattern Examples
 
 1. `file://workspace/README.md`

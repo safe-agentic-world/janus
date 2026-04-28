@@ -64,6 +64,27 @@ func NewEngine(bundle Bundle) *Engine {
 	return &Engine{bundle: bundle}
 }
 
+func (e *Engine) BundleHash() string {
+	if e == nil {
+		return ""
+	}
+	return e.bundle.Hash
+}
+
+func (e *Engine) BundleSources() []string {
+	if e == nil {
+		return nil
+	}
+	return policyBundleSources(e.bundle)
+}
+
+func (e *Engine) BundleInputs() []BundleSource {
+	if e == nil {
+		return nil
+	}
+	return copyBundleSources(e.bundle.SourceBundles)
+}
+
 func (c ActionCapability) Available() bool {
 	return c.Allow || c.RequireApproval
 }
