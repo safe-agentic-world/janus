@@ -208,6 +208,37 @@ Operator signals:
 - telemetry emits `mcp.upstream_breaker.transition` events when an upstream moves between states
 - the downstream MCP response error is `UPSTREAM_UNAVAILABLE` while the breaker is open
 
+### Argument Schema Validation
+
+Forwarded `tools/call` arguments are validated at the Nomos boundary against the upstream tool's advertised `inputSchema` before policy evaluation and before any upstream forwarding.
+
+Nomos uses an embedded JSON Schema validator pinned to draft 2020-12 semantics. If an upstream omits `inputSchema`, forwarded calls fail closed with `ARGUMENT_VALIDATION_ERROR` unless that upstream explicitly opts in:
+
+```json
+{
+  "mcp": {
+    "upstream_servers": [
+      {
+        "name": "legacy",
+        "transport": "stdio",
+        "command": "legacy-mcp-server",
+        "allow_missing_tool_schemas": true
+      }
+    ]
+  }
+}
+```
+
+Validation failures are deterministic and do not echo raw argument values into responses, audit, explain output, telemetry, or logs. Internally, Nomos records only bounded error shape (`path`, `expected`, `actual kind`) and returns the stable downstream error code `ARGUMENT_VALIDATION_ERROR`.
+
+Validated arguments are canonicalized with the same canonical JSON primitive used for action fingerprints. The `mcp.call` action params include:
+
+- `tool_arguments`: canonicalized argument object
+- `tool_arguments_hash`: SHA-256 of the canonical argument object
+- `tool_schema_validated`: whether an upstream schema was enforced
+
+This means two calls with the same logical arguments but different JSON key order produce the same action fingerprint and approval binding. The validator also enforces argument byte, depth, and node limits so crafted arguments cannot force unbounded validation work.
+
 ### Environment Isolation
 
 Nomos now isolates upstream stdio processes from the parent environment by default. For each upstream server:

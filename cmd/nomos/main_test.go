@@ -131,23 +131,25 @@ func TestToMCPUpstreamServersAppliesTimeoutDefaultsAndOverrides(t *testing.T) {
 			FailureThreshold: 2,
 			OpenTimeoutMS:    1000,
 		},
+		AllowMissingToolSchemas: true,
 	}})
 	if len(got) != 1 {
 		t.Fatalf("expected one runtime upstream server, got %+v", got)
 	}
 	want := mcp.UpstreamServerConfig{
-		Name:              "retail",
-		Transport:         "stdio",
-		InitializeTimeout: 5 * time.Second,
-		EnumerateTimeout:  12 * time.Second,
-		CallTimeout:       45 * time.Second,
-		StreamTimeout:     30 * time.Second,
-		BreakerEnabled:    false,
-		BreakerThreshold:  2,
-		BreakerWindow:     60 * time.Second,
-		BreakerOpenTime:   time.Second,
+		Name:                    "retail",
+		Transport:               "stdio",
+		InitializeTimeout:       5 * time.Second,
+		EnumerateTimeout:        12 * time.Second,
+		CallTimeout:             45 * time.Second,
+		StreamTimeout:           30 * time.Second,
+		BreakerEnabled:          false,
+		BreakerThreshold:        2,
+		BreakerWindow:           60 * time.Second,
+		BreakerOpenTime:         time.Second,
+		AllowMissingToolSchemas: true,
 	}
-	if got[0].Name != want.Name || got[0].Transport != want.Transport || got[0].InitializeTimeout != want.InitializeTimeout || got[0].EnumerateTimeout != want.EnumerateTimeout || got[0].CallTimeout != want.CallTimeout || got[0].StreamTimeout != want.StreamTimeout || got[0].BreakerEnabled != want.BreakerEnabled || got[0].BreakerThreshold != want.BreakerThreshold || got[0].BreakerWindow != want.BreakerWindow || got[0].BreakerOpenTime != want.BreakerOpenTime {
+	if got[0].Name != want.Name || got[0].Transport != want.Transport || got[0].InitializeTimeout != want.InitializeTimeout || got[0].EnumerateTimeout != want.EnumerateTimeout || got[0].CallTimeout != want.CallTimeout || got[0].StreamTimeout != want.StreamTimeout || got[0].BreakerEnabled != want.BreakerEnabled || got[0].BreakerThreshold != want.BreakerThreshold || got[0].BreakerWindow != want.BreakerWindow || got[0].BreakerOpenTime != want.BreakerOpenTime || got[0].AllowMissingToolSchemas != want.AllowMissingToolSchemas {
 		t.Fatalf("unexpected runtime upstream config: got %+v want %+v", got[0], want)
 	}
 }

@@ -61,6 +61,7 @@
         "args": [
           "path/to/your/retail_mcp_server.py"
         ],
+        "allow_missing_tool_schemas": false,
         "env_allowlist": [
           "PATH",
           "HOME"

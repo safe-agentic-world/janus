@@ -931,9 +931,10 @@ func TestLoadConfigAppliesMCPBreakerDefaultsAndOverrides(t *testing.T) {
 			},
 			"upstream_servers": []any{
 				map[string]any{
-					"name":      "retail",
-					"transport": "stdio",
-					"command":   "helper",
+					"name":                       "retail",
+					"transport":                  "stdio",
+					"command":                    "helper",
+					"allow_missing_tool_schemas": true,
 					"breaker": map[string]any{
 						"failure_threshold": 2,
 						"open_timeout_ms":   5000,
@@ -967,6 +968,9 @@ func TestLoadConfigAppliesMCPBreakerDefaultsAndOverrides(t *testing.T) {
 	server := cfg.MCP.UpstreamServers[0]
 	if server.Breaker.FailureThreshold != 2 || server.Breaker.FailureWindowMS != 0 || server.Breaker.OpenTimeoutMS != 5000 {
 		t.Fatalf("unexpected per-server breaker config: %+v", server.Breaker)
+	}
+	if !server.AllowMissingToolSchemas {
+		t.Fatalf("expected per-server missing-schema opt-in")
 	}
 }
 

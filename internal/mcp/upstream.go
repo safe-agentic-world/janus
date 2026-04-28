@@ -12,11 +12,12 @@ import (
 )
 
 type upstreamTool struct {
-	ServerName     string
-	ToolName       string
-	DownstreamName string
-	Description    string
-	InputSchema    map[string]any
+	ServerName              string
+	ToolName                string
+	DownstreamName          string
+	Description             string
+	InputSchema             map[string]any
+	AllowMissingInputSchema bool
 }
 
 func writeUpstreamRPCRequest(writer *bufio.Writer, method, id string, params map[string]any) error {

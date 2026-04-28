@@ -232,22 +232,23 @@ type MCPBreakerConfig struct {
 }
 
 type MCPUpstreamServerConfig struct {
-	Name         string                 `json:"name"`
-	Transport    string                 `json:"transport"`
-	Command      string                 `json:"command,omitempty"`
-	Args         []string               `json:"args,omitempty"`
-	EnvAllowlist []string               `json:"env_allowlist,omitempty"`
-	Env          map[string]string      `json:"env,omitempty"`
-	Workdir      string                 `json:"workdir,omitempty"`
-	Endpoint     string                 `json:"endpoint,omitempty"`
-	AllowedHosts []string               `json:"allowed_hosts,omitempty"`
-	TLSInsecure  bool                   `json:"tls_insecure,omitempty"`
-	TLSCAFile    string                 `json:"tls_ca_file,omitempty"`
-	TLSCertFile  string                 `json:"tls_cert_file,omitempty"`
-	TLSKeyFile   string                 `json:"tls_key_file,omitempty"`
-	Timeouts     MCPTimeoutConfig       `json:"timeouts,omitempty"`
-	Breaker      MCPBreakerConfig       `json:"breaker,omitempty"`
-	Auth         *MCPUpstreamAuthConfig `json:"auth,omitempty"`
+	Name                    string                 `json:"name"`
+	Transport               string                 `json:"transport"`
+	Command                 string                 `json:"command,omitempty"`
+	Args                    []string               `json:"args,omitempty"`
+	EnvAllowlist            []string               `json:"env_allowlist,omitempty"`
+	Env                     map[string]string      `json:"env,omitempty"`
+	Workdir                 string                 `json:"workdir,omitempty"`
+	Endpoint                string                 `json:"endpoint,omitempty"`
+	AllowedHosts            []string               `json:"allowed_hosts,omitempty"`
+	TLSInsecure             bool                   `json:"tls_insecure,omitempty"`
+	TLSCAFile               string                 `json:"tls_ca_file,omitempty"`
+	TLSCertFile             string                 `json:"tls_cert_file,omitempty"`
+	TLSKeyFile              string                 `json:"tls_key_file,omitempty"`
+	Timeouts                MCPTimeoutConfig       `json:"timeouts,omitempty"`
+	Breaker                 MCPBreakerConfig       `json:"breaker,omitempty"`
+	AllowMissingToolSchemas bool                   `json:"allow_missing_tool_schemas,omitempty"`
+	Auth                    *MCPUpstreamAuthConfig `json:"auth,omitempty"`
 }
 
 type MCPUpstreamAuthConfig struct {

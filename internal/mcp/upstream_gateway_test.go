@@ -83,6 +83,126 @@ func TestHandleForwardedToolAllow(t *testing.T) {
 	}
 }
 
+func TestHandleForwardedToolValidatesAndCanonicalizesArgumentsForPolicy(t *testing.T) {
+	dir := t.TempDir()
+	server := newUpstreamGatewayTestServer(t, dir, `{"version":"v1","rules":[{"id":"allow-refund-by-arg","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"params_match":{"tool_arguments.order_id":{"equals":"ORD-1001"}}}]}`, false)
+	t.Cleanup(func() { _ = server.Close() })
+
+	first := server.handleRequest(Request{
+		ID:     "canonical-a",
+		Method: "upstream_retail_refund_request",
+		Params: []byte(`{"reason":"damaged","order_id":"ORD-1001"}`),
+	})
+	if first.Error != "" {
+		t.Fatalf("unexpected first error: %+v", first)
+	}
+	firstResp := first.Result.(action.Response)
+	if firstResp.Decision != "ALLOW" || firstResp.ExecutionMode != "mcp_forwarded" {
+		t.Fatalf("expected arg-matched forwarded allow, got %+v", firstResp)
+	}
+
+	second := server.handleRequest(Request{
+		ID:     "canonical-b",
+		Method: "upstream_retail_refund_request",
+		Params: []byte(`{"order_id":"ORD-1001","reason":"damaged"}`),
+	})
+	if second.Error != "" {
+		t.Fatalf("unexpected second error: %+v", second)
+	}
+	secondResp := second.Result.(action.Response)
+	if firstResp.ApprovalFingerprint != secondResp.ApprovalFingerprint {
+		t.Fatalf("expected canonicalized arguments to preserve fingerprint parity: %s != %s", firstResp.ApprovalFingerprint, secondResp.ApprovalFingerprint)
+	}
+
+	denied := server.handleRequest(Request{
+		ID:     "canonical-deny",
+		Method: "upstream_retail_refund_request",
+		Params: []byte(`{"order_id":"ORD-2002","reason":"damaged"}`),
+	})
+	if denied.Error != "" {
+		t.Fatalf("unexpected deny error: %+v", denied)
+	}
+	if got := denied.Result.(action.Response); got.Decision != "DENY" {
+		t.Fatalf("expected params_match miss to deny before forwarding, got %+v", got)
+	}
+}
+
+func TestHandleForwardedToolRejectsInvalidArgumentsBeforePolicy(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	recorder := &recordingSink{}
+	server, err := NewServerWithRuntimeOptionsAndRecorder(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		UpstreamServers: []UpstreamServerConfig{{
+			Name:      "retail",
+			Transport: "stdio",
+			Command:   os.Args[0],
+			Args:      []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "retail"},
+			Env:       map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+			Workdir:   dir,
+		}},
+	}, recorder)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	resp := server.handleRequest(Request{
+		ID:     "invalid-args",
+		Method: "upstream_retail_refund_request",
+		Params: []byte(`{"order_id":"ORD-1001","reason":42}`),
+	})
+	if resp.Error != upstreamArgumentValidationError {
+		t.Fatalf("expected argument validation error, got %+v", resp)
+	}
+	for _, event := range recorder.snapshot() {
+		if event.EventType == "action.decision" {
+			t.Fatalf("argument validation must happen before policy decision audit, got %+v", event)
+		}
+	}
+}
+
+func TestHandleForwardedToolMissingSchemaFailsClosedAndOptInPassesThrough(t *testing.T) {
+	dir := t.TempDir()
+	bundle := `{"version":"v1","rules":[{"id":"allow-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+
+	failClosed := newUpstreamGatewayTestServerWithMode(t, dir, bundle, "no-schema-retail", false, false)
+	t.Cleanup(func() { _ = failClosed.Close() })
+	blocked := failClosed.handleRequest(Request{
+		ID:     "missing-schema",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
+	})
+	if blocked.Error != upstreamArgumentValidationError {
+		t.Fatalf("expected missing schema to fail closed, got %+v", blocked)
+	}
+
+	optInDir := t.TempDir()
+	optIn := newUpstreamGatewayTestServerWithMode(t, optInDir, bundle, "no-schema-retail", false, true)
+	t.Cleanup(func() { _ = optIn.Close() })
+	allowed := optIn.handleRequest(Request{
+		ID:     "missing-schema-opt-in",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
+	})
+	if allowed.Error != "" {
+		t.Fatalf("expected missing schema opt-in to pass through, got %+v", allowed)
+	}
+	if got := allowed.Result.(action.Response); got.Decision != "ALLOW" || got.ExecutionMode != "mcp_forwarded" {
+		t.Fatalf("expected opt-in forwarded allow, got %+v", got)
+	}
+}
+
 func TestHandleForwardedToolDenySkipsUpstreamExecution(t *testing.T) {
 	dir := t.TempDir()
 	server := newUpstreamGatewayTestServer(t, dir, `{"version":"v1","rules":[{"id":"deny-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"DENY","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`, false)
@@ -376,6 +496,11 @@ func TestDownstreamToolNameUsesCrossVendorSafeCharacters(t *testing.T) {
 
 func newUpstreamGatewayTestServer(t *testing.T, dir, bundle string, approvals bool) *Server {
 	t.Helper()
+	return newUpstreamGatewayTestServerWithMode(t, dir, bundle, "retail", approvals, false)
+}
+
+func newUpstreamGatewayTestServerWithMode(t *testing.T, dir, bundle, mode string, approvals bool, allowMissingSchemas bool) *Server {
+	t.Helper()
 	bundlePath := filepath.Join(dir, "bundle.json")
 	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
@@ -388,11 +513,12 @@ func newUpstreamGatewayTestServer(t *testing.T, dir, bundle string, approvals bo
 			Name:      "retail",
 			Transport: "stdio",
 			Command:   os.Args[0],
-			Args:      []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "retail"},
+			Args:      []string{"-test.run=TestUpstreamMCPHelperProcess", "--", mode},
 			Env: map[string]string{
 				"GO_WANT_UPSTREAM_MCP_HELPER": "1",
 			},
-			Workdir: dir,
+			Workdir:                 dir,
+			AllowMissingToolSchemas: allowMissingSchemas,
 		}},
 	}
 	if approvals {
@@ -497,7 +623,7 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 	}
 	mode := os.Args[3]
 	switch mode {
-	case "retail", "framed-retail", "stateful-retail", "env-inspect", "hang-init", "hang-call":
+	case "retail", "framed-retail", "stateful-retail", "no-schema-retail", "env-inspect", "hang-init", "hang-call":
 	default:
 		return
 	}
@@ -547,10 +673,12 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 				},
 			}, nil)
 		case "tools/list":
-			tools := []map[string]any{{
+			refundTool := map[string]any{
 				"name":        "refund.request",
 				"description": "Submit a retail refund request.",
-				"inputSchema": map[string]any{
+			}
+			if mode != "no-schema-retail" {
+				refundTool["inputSchema"] = map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"order_id": map[string]any{"type": "string"},
@@ -558,8 +686,9 @@ func TestUpstreamMCPHelperProcess(t *testing.T) {
 					},
 					"required":             []string{"order_id", "reason"},
 					"additionalProperties": true,
-				},
-			}}
+				}
+			}
+			tools := []map[string]any{refundTool}
 			if mode == "stateful-retail" && listVersion >= 1 {
 				tools = append(tools, map[string]any{
 					"name":        "refund.status",

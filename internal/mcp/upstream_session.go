@@ -858,11 +858,12 @@ func parseUpstreamTools(config UpstreamServerConfig, result any) ([]upstreamTool
 		description, _ := raw["description"].(string)
 		schema, _ := raw["inputSchema"].(map[string]any)
 		tools = append(tools, upstreamTool{
-			ServerName:     config.Name,
-			ToolName:       toolName,
-			DownstreamName: downstreamToolName(config.Name, toolName),
-			Description:    description,
-			InputSchema:    cloneMap(schema),
+			ServerName:              config.Name,
+			ToolName:                toolName,
+			DownstreamName:          downstreamToolName(config.Name, toolName),
+			Description:             description,
+			InputSchema:             cloneMap(schema),
+			AllowMissingInputSchema: config.AllowMissingToolSchemas,
 		})
 	}
 	return tools, nil
