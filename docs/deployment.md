@@ -119,6 +119,12 @@ This is a migration change for older configs that implicitly depended on `os.Env
 2. add fixed values in `env`
 3. prefer absolute command paths for stdio upstreams if `PATH` is no longer available to the child
 
+## Upstream Circuit Breakers
+
+Use `mcp.breaker` to stop repeatedly hammering failing upstream MCP servers. Defaults are enabled with `failure_threshold=5`, `failure_window_ms=60000`, and `open_timeout_ms=30000`; override the same fields per upstream under `mcp.upstream_servers[].breaker`.
+
+Open breakers fail closed with `UPSTREAM_UNAVAILABLE` before forwarding. This short-circuits only the upstream call path after policy allows the action; it does not alter policy semantics or return cached stale responses. Recovery requires a successful half-open probe.
+
 ## Container Packaging
 
 Nomos does not currently publish or maintain an official container image path.

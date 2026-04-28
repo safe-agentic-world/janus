@@ -77,7 +77,13 @@
     ]
   },
   "mcp": {
-    "enabled": true
+    "enabled": true,
+    "breaker": {
+      "enabled": true,
+      "failure_threshold": 5,
+      "failure_window_ms": 60000,
+      "open_timeout_ms": 30000
+    }
   },
   "upstream": {
     "routes": [

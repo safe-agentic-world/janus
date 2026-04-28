@@ -180,6 +180,32 @@ func (c RateLimitsConfig) Rules() ([]ratelimit.Rule, error) {
 	return rules, nil
 }
 
+func validateMCPBreakerConfig(cfg MCPBreakerConfig, label string, global bool) error {
+	enabled := cfg.Enabled != nil && *cfg.Enabled
+	if global || enabled {
+		if cfg.FailureThreshold <= 0 {
+			return errors.New(label + ".failure_threshold must be > 0")
+		}
+		if cfg.FailureWindowMS <= 0 {
+			return errors.New(label + ".failure_window_ms must be > 0")
+		}
+		if cfg.OpenTimeoutMS <= 0 {
+			return errors.New(label + ".open_timeout_ms must be > 0")
+		}
+		return nil
+	}
+	if cfg.FailureThreshold < 0 {
+		return errors.New(label + ".failure_threshold must be >= 0")
+	}
+	if cfg.FailureWindowMS < 0 {
+		return errors.New(label + ".failure_window_ms must be >= 0")
+	}
+	if cfg.OpenTimeoutMS < 0 {
+		return errors.New(label + ".open_timeout_ms must be >= 0")
+	}
+	return nil
+}
+
 type RedactionConfig struct {
 	Patterns []string `json:"patterns"`
 }
@@ -187,6 +213,7 @@ type RedactionConfig struct {
 type MCPConfig struct {
 	Enabled         bool                      `json:"enabled"`
 	Timeouts        MCPTimeoutConfig          `json:"timeouts,omitempty"`
+	Breaker         MCPBreakerConfig          `json:"breaker,omitempty"`
 	UpstreamServers []MCPUpstreamServerConfig `json:"upstream_servers,omitempty"`
 }
 
@@ -195,6 +222,13 @@ type MCPTimeoutConfig struct {
 	EnumerateMS  int `json:"enumerate_timeout_ms,omitempty"`
 	CallMS       int `json:"call_timeout_ms,omitempty"`
 	StreamMS     int `json:"stream_timeout_ms,omitempty"`
+}
+
+type MCPBreakerConfig struct {
+	Enabled          *bool `json:"enabled,omitempty"`
+	FailureThreshold int   `json:"failure_threshold,omitempty"`
+	FailureWindowMS  int   `json:"failure_window_ms,omitempty"`
+	OpenTimeoutMS    int   `json:"open_timeout_ms,omitempty"`
 }
 
 type MCPUpstreamServerConfig struct {
@@ -212,6 +246,7 @@ type MCPUpstreamServerConfig struct {
 	TLSCertFile  string                 `json:"tls_cert_file,omitempty"`
 	TLSKeyFile   string                 `json:"tls_key_file,omitempty"`
 	Timeouts     MCPTimeoutConfig       `json:"timeouts,omitempty"`
+	Breaker      MCPBreakerConfig       `json:"breaker,omitempty"`
 	Auth         *MCPUpstreamAuthConfig `json:"auth,omitempty"`
 }
 
@@ -366,6 +401,19 @@ func (c *Config) SetDefaults() error {
 	}
 	if c.MCP.Timeouts.StreamMS == 0 {
 		c.MCP.Timeouts.StreamMS = 30000
+	}
+	defaultEnabled := true
+	if c.MCP.Breaker.Enabled == nil {
+		c.MCP.Breaker.Enabled = &defaultEnabled
+	}
+	if c.MCP.Breaker.FailureThreshold == 0 {
+		c.MCP.Breaker.FailureThreshold = 5
+	}
+	if c.MCP.Breaker.FailureWindowMS == 0 {
+		c.MCP.Breaker.FailureWindowMS = 60000
+	}
+	if c.MCP.Breaker.OpenTimeoutMS == 0 {
+		c.MCP.Breaker.OpenTimeoutMS = 30000
 	}
 	if c.Telemetry.Enabled && c.Telemetry.Sink == "" {
 		c.Telemetry.Sink = "stdout"
@@ -553,6 +601,14 @@ func (c Config) Validate() error {
 			if timeout.value < 0 {
 				return errors.New(timeout.label + " must be >= 0")
 			}
+		}
+	}
+	if err := validateMCPBreakerConfig(c.MCP.Breaker, "mcp.breaker", true); err != nil {
+		return err
+	}
+	for _, server := range c.MCP.UpstreamServers {
+		if err := validateMCPBreakerConfig(server.Breaker, "mcp.upstream_servers.breaker", false); err != nil {
+			return err
 		}
 	}
 	if strings.TrimSpace(c.Policy.BundlePath) != "" && len(c.Policy.BundlePaths) > 0 {

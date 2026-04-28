@@ -25,6 +25,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
@@ -184,7 +185,8 @@ func runMCP(args []string) {
 		ApprovalStorePath:     cfg.Approvals.StorePath,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
-		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.UpstreamServers),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
+		Telemetry:             buildMCPRuntimeTelemetry(cfg),
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -259,7 +261,8 @@ func runMCPServe(args []string) {
 		ApprovalStorePath:     cfg.Approvals.StorePath,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
-		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.UpstreamServers),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
+		Telemetry:             buildMCPRuntimeTelemetry(cfg),
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -873,6 +876,21 @@ func buildProtocolSafeMCPRecorder(cfg gateway.Config) (audit.Recorder, error) {
 	return audit.NewWriter(protocolSafeMCPSink(cfg.Audit.Sink), redactor)
 }
 
+func buildMCPRuntimeTelemetry(cfg gateway.Config) *telemetry.Emitter {
+	redactor, err := redact.NewRedactor(cfg.Redaction.Patterns)
+	if err != nil {
+		return telemetry.NewEmitter(nil)
+	}
+	exporter, err := telemetry.NewExporter(telemetry.Config{
+		Enabled: cfg.Telemetry.Enabled,
+		Sink:    protocolSafeMCPSink(cfg.Telemetry.Sink),
+	}, redactor)
+	if err != nil {
+		return telemetry.NewEmitter(nil)
+	}
+	return telemetry.NewEmitter(exporter)
+}
+
 func protocolSafeMCPSink(sink string) string {
 	parts := strings.Split(strings.TrimSpace(sink), ",")
 	out := make([]string, 0, len(parts))
@@ -908,7 +926,7 @@ func toMCPUpstreamRoutes(routes []gateway.UpstreamRoute) []mcp.UpstreamRoute {
 	return out
 }
 
-func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
+func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, breakerDefaults gateway.MCPBreakerConfig, servers []gateway.MCPUpstreamServerConfig) []mcp.UpstreamServerConfig {
 	if len(servers) == 0 {
 		return nil
 	}
@@ -936,6 +954,10 @@ func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, servers []gateway.M
 			EnumerateTimeout:  timeoutDurationFromMS(coalesceTimeout(defaults.EnumerateMS, server.Timeouts.EnumerateMS)),
 			CallTimeout:       timeoutDurationFromMS(coalesceTimeout(defaults.CallMS, server.Timeouts.CallMS)),
 			StreamTimeout:     timeoutDurationFromMS(coalesceTimeout(defaults.StreamMS, server.Timeouts.StreamMS)),
+			BreakerEnabled:    coalesceBreakerEnabled(breakerDefaults.Enabled, server.Breaker.Enabled),
+			BreakerThreshold:  coalesceTimeout(breakerDefaults.FailureThreshold, server.Breaker.FailureThreshold),
+			BreakerWindow:     timeoutDurationFromMS(coalesceTimeout(breakerDefaults.FailureWindowMS, server.Breaker.FailureWindowMS)),
+			BreakerOpenTime:   timeoutDurationFromMS(coalesceTimeout(breakerDefaults.OpenTimeoutMS, server.Breaker.OpenTimeoutMS)),
 		}
 		if server.Auth != nil {
 			mapped.AuthType = server.Auth.Type
@@ -952,6 +974,16 @@ func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, servers []gateway.M
 		out = append(out, mapped)
 	}
 	return out
+}
+
+func coalesceBreakerEnabled(defaultValue, overrideValue *bool) bool {
+	if overrideValue != nil {
+		return *overrideValue
+	}
+	if defaultValue != nil {
+		return *defaultValue
+	}
+	return true
 }
 
 func coalesceTimeout(defaultMS, overrideMS int) int {

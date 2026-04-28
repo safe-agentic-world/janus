@@ -47,6 +47,12 @@
   },
   "mcp": {
     "enabled": true,
+    "breaker": {
+      "enabled": true,
+      "failure_threshold": 5,
+      "failure_window_ms": 60000,
+      "open_timeout_ms": 30000
+    },
     "upstream_servers": [
       {
         "name": "retail",
@@ -62,6 +68,11 @@
         "env": {
           "REFUND_BASE_URL": "http://127.0.0.1:8002",
           "COMP_SERVICE_BASE_URL": "http://127.0.0.1:8002"
+        },
+        "breaker": {
+          "failure_threshold": 3,
+          "failure_window_ms": 60000,
+          "open_timeout_ms": 10000
         }
       }
     ]

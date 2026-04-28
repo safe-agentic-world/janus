@@ -170,7 +170,7 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	svc := service.New(engine, reader, writerExec, patcher, execRunner, httpRunner, recorder, logger.redactor, approvalStore, nil, sandboxProfile, nil)
 	svc.SetSandboxEvidence(runtimeOptions.SandboxEvidence, []string{workspaceRoot})
 	svc.SetExecCompatibilityMode(runtimeOptions.ExecCompatibilityMode)
-	upstream, err := newUpstreamSupervisor(runtimeOptions.UpstreamServers, logger)
+	upstream, err := newUpstreamSupervisor(runtimeOptions.UpstreamServers, logger, runtimeOptions.Telemetry)
 	if err != nil {
 		return nil, err
 	}
@@ -1048,9 +1048,9 @@ func classifyForwardedToolError(err error) string {
 	}
 	switch {
 	case errors.Is(err, errUpstreamUnavailable):
-		return "upstream_unavailable"
+		return "UPSTREAM_UNAVAILABLE"
 	case errors.Is(err, errUpstreamClosed):
-		return "upstream_unavailable"
+		return "UPSTREAM_UNAVAILABLE"
 	case errors.Is(err, errUpstreamTimeout):
 		return "UPSTREAM_TIMEOUT"
 	case errors.Is(err, errUpstreamCanceled):
