@@ -36,6 +36,7 @@ type Rule struct {
 	Agents       []string       `json:"agents,omitempty" yaml:"agents,omitempty"`
 	Environments []string       `json:"environments,omitempty" yaml:"environments,omitempty"`
 	RiskFlags    []string       `json:"risk_flags,omitempty" yaml:"risk_flags,omitempty"`
+	ParamsMatch  map[string]any `json:"params_match,omitempty" yaml:"params_match,omitempty"`
 	ExecMatch    *ExecMatch     `json:"exec_match,omitempty" yaml:"exec_match,omitempty"`
 	Obligations  map[string]any `json:"obligations,omitempty" yaml:"obligations,omitempty"`
 	SourcePath   string         `json:"-" yaml:"-"`
@@ -254,6 +255,9 @@ func (b Bundle) Validate() error {
 		}
 		if rule.Decision != DecisionAllow && rule.Decision != DecisionDeny && rule.Decision != DecisionRequireApproval {
 			return fmt.Errorf("rule %s has invalid decision", rule.ID)
+		}
+		if err := validateParamsMatch(rule); err != nil {
+			return err
 		}
 		if rule.ExecMatch != nil {
 			if rule.ActionType != "process.exec" && rule.ActionType != "*" {

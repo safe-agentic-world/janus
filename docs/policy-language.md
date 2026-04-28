@@ -318,6 +318,7 @@ Notes:
 - `<server>` is lowercased during normalization.
 - resource URIs are normalized as opaque MCP resource identities, so `mcp://retail/resource/note://retail/customer-42` is the canonical policy form.
 - prompt names and completion refs are matched exactly after deterministic normalization.
+- forwarded tool arguments are validated against upstream `inputSchema` before policy evaluation, then exposed in action params as canonicalized `tool_arguments`.
 - `mcp.sample` is intentionally high-friction: if no rule matches, Nomos denies it by default.
 - discovery filtering for `tools/list` is conservative by design: it may under-report tools that are not policy-visible for the current principal, but it must never over-report a tool the caller cannot actually invoke.
 
@@ -346,6 +347,35 @@ rules:
     resource: mcp://retail/sample
     decision: REQUIRE_APPROVAL
 ```
+
+### Matching Forwarded Tool Arguments
+
+Rules can match canonicalized action params with `params_match`. This is most useful for `mcp.call`, where validated upstream arguments are available under `tool_arguments` and their canonical digest is available as `tool_arguments_hash`.
+
+Example:
+
+```yaml
+version: v1
+rules:
+  - id: allow-specific-refund-reason
+    action_type: mcp.call
+    resource: mcp://retail/refund.request
+    decision: ALLOW
+    params_match:
+      tool_arguments.reason:
+        in: ["damaged", "lost"]
+      tool_arguments.vip_customer:
+        present: false
+```
+
+Supported `params_match` conditions:
+
+- bare scalar/object/array values are exact canonical equality checks
+- `equals` compares against one canonical value
+- `in` compares against a non-empty set of canonical values
+- `present` checks whether the canonical params path exists
+
+Paths are dot-separated object keys. Matching uses normalized canonical params, so key order does not matter and approval fingerprints stay aligned with the same action fingerprinting rules.
 
 ## Sampling Trust Inversion
 

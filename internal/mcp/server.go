@@ -626,22 +626,32 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	}
 	var check map[string]any
 	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&check); err != nil {
+		return Response{ID: req.ID, Error: "invalid_params"}
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return Response{ID: req.ID, Error: "invalid_params"}
 	}
 	approvalID := extractForwardedApprovalID(check)
 	delete(check, "approval_id")
 	sanitizedArgs := mustJSONBytes(check)
+	validatedArgs, err := validateUpstreamToolArguments(tool, sanitizedArgs)
+	if err != nil {
+		return Response{ID: req.ID, Error: upstreamArgumentValidationError}
+	}
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + req.ID,
 		ActionType:    "mcp.call",
 		Resource:      "mcp://" + tool.ServerName + "/" + tool.ToolName,
 		Params: mustJSONBytes(map[string]any{
-			"upstream_server": tool.ServerName,
-			"upstream_tool":   tool.ToolName,
-			"tool_arguments":  check,
+			"upstream_server":       tool.ServerName,
+			"upstream_tool":         tool.ToolName,
+			"tool_arguments":        validatedArgs.CanonicalValue,
+			"tool_arguments_hash":   validatedArgs.Hash,
+			"tool_schema_validated": len(tool.InputSchema) > 0,
 		}),
 		TraceID: "mcp_" + req.ID,
 	}
@@ -657,7 +667,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	if resp.Decision != policy.DecisionAllow {
 		return Response{ID: req.ID, Result: resp}
 	}
-	output, err := s.upstream.callToolWithRequests(ctx, tool.ServerName, tool.ToolName, sanitizedArgs, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
+	output, err := s.upstream.callToolWithRequests(ctx, tool.ServerName, tool.ToolName, validatedArgs.ForwardBytes, s.newUpstreamRequestHandler(session, tool.ServerName, approvalID))
 	if err != nil {
 		return Response{ID: req.ID, Error: classifyForwardedToolError(err)}
 	}

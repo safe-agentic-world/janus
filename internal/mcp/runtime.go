@@ -37,32 +37,33 @@ type UpstreamRoute struct {
 }
 
 type UpstreamServerConfig struct {
-	Name              string
-	Transport         string
-	Command           string
-	Args              []string
-	EnvAllowlist      []string
-	Env               map[string]string
-	Workdir           string
-	Endpoint          string
-	AllowedHosts      []string
-	TLSInsecure       bool
-	TLSCAFile         string
-	TLSCertFile       string
-	TLSKeyFile        string
-	AuthType          string
-	AuthToken         string
-	AuthHeader        string
-	AuthValue         string
-	AuthHeaders       map[string]string
-	InitializeTimeout time.Duration
-	EnumerateTimeout  time.Duration
-	CallTimeout       time.Duration
-	StreamTimeout     time.Duration
-	BreakerEnabled    bool
-	BreakerThreshold  int
-	BreakerWindow     time.Duration
-	BreakerOpenTime   time.Duration
+	Name                    string
+	Transport               string
+	Command                 string
+	Args                    []string
+	EnvAllowlist            []string
+	Env                     map[string]string
+	Workdir                 string
+	Endpoint                string
+	AllowedHosts            []string
+	TLSInsecure             bool
+	TLSCAFile               string
+	TLSCertFile             string
+	TLSKeyFile              string
+	AuthType                string
+	AuthToken               string
+	AuthHeader              string
+	AuthValue               string
+	AuthHeaders             map[string]string
+	InitializeTimeout       time.Duration
+	EnumerateTimeout        time.Duration
+	CallTimeout             time.Duration
+	StreamTimeout           time.Duration
+	BreakerEnabled          bool
+	BreakerThreshold        int
+	BreakerWindow           time.Duration
+	BreakerOpenTime         time.Duration
+	AllowMissingToolSchemas bool
 }
 
 type logLevel int

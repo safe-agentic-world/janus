@@ -58,6 +58,7 @@
         "name": "retail",
         "transport": "streamable_http",
         "endpoint": "https://retail.mcp.example.com/mcp",
+        "allow_missing_tool_schemas": false,
         "allowed_hosts": [
           "retail.mcp.example.com"
         ],

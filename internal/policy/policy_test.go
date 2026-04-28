@@ -260,6 +260,48 @@ func TestPolicyExecMatchRejectsInvalidExecParams(t *testing.T) {
 	}
 }
 
+func TestPolicyParamsMatchUsesCanonicalParams(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "allow-refund-arg",
+				ActionType: "mcp.call",
+				Resource:   "mcp://retail/refund.request",
+				Decision:   DecisionAllow,
+				ParamsMatch: map[string]any{
+					"tool_arguments.order_id": map[string]any{"equals": "ORD-1001"},
+					"tool_arguments.reason":   map[string]any{"in": []any{"damaged", "lost"}},
+				},
+			},
+		},
+	}
+	engine := NewEngine(bundle)
+	allowed := engine.Evaluate(normalize.NormalizedAction{
+		ActionType:  "mcp.call",
+		Resource:    "mcp://retail/refund.request",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+		Params:      []byte(`{"tool_arguments":{"reason":"damaged","order_id":"ORD-1001"},"tool_arguments_hash":"h","upstream_server":"retail","upstream_tool":"refund.request"}`),
+	})
+	if allowed.Decision != DecisionAllow {
+		t.Fatalf("expected params_match allow, got %+v", allowed)
+	}
+	denied := engine.Evaluate(normalize.NormalizedAction{
+		ActionType:  "mcp.call",
+		Resource:    "mcp://retail/refund.request",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+		Params:      []byte(`{"tool_arguments":{"order_id":"ORD-2002","reason":"damaged"},"tool_arguments_hash":"h","upstream_server":"retail","upstream_tool":"refund.request"}`),
+	})
+	if denied.Decision != DecisionDeny {
+		t.Fatalf("expected params_match miss to deny, got %+v", denied)
+	}
+}
+
 func TestPolicyExecMatchDerivesExecConstraintsForAllowDecision(t *testing.T) {
 	bundle := Bundle{
 		Version: "v1",
