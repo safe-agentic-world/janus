@@ -12,6 +12,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/sandbox"
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
 type RuntimeOptions struct {
@@ -26,6 +27,7 @@ type RuntimeOptions struct {
 	ApprovalTTLSeconds    int
 	UpstreamRoutes        []UpstreamRoute
 	UpstreamServers       []UpstreamServerConfig
+	Telemetry             *telemetry.Emitter
 }
 
 type UpstreamRoute struct {
@@ -57,6 +59,10 @@ type UpstreamServerConfig struct {
 	EnumerateTimeout  time.Duration
 	CallTimeout       time.Duration
 	StreamTimeout     time.Duration
+	BreakerEnabled    bool
+	BreakerThreshold  int
+	BreakerWindow     time.Duration
+	BreakerOpenTime   time.Duration
 }
 
 type logLevel int
@@ -105,7 +111,17 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 		ApprovalTTLSeconds:    options.ApprovalTTLSeconds,
 		UpstreamRoutes:        append([]UpstreamRoute(nil), options.UpstreamRoutes...),
 		UpstreamServers:       append([]UpstreamServerConfig(nil), options.UpstreamServers...),
+		Telemetry:             options.Telemetry,
 	}, nil
+}
+
+func (c UpstreamServerConfig) breakerConfig() upstreamBreakerConfig {
+	return upstreamBreakerConfig{
+		Enabled:          c.BreakerEnabled,
+		FailureThreshold: c.BreakerThreshold,
+		FailureWindow:    c.BreakerWindow,
+		OpenTimeout:      c.BreakerOpenTime,
+	}
 }
 
 func parseLogLevel(value string) (logLevel, error) {

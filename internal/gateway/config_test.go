@@ -909,6 +909,106 @@ func TestLoadConfigAppliesMCPTimeoutDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAppliesMCPBreakerDefaultsAndOverrides(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway":  map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":   map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{"sandbox_enabled": true},
+		"audit":    map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"breaker": map[string]any{
+				"enabled":           true,
+				"failure_threshold": 4,
+				"failure_window_ms": 90000,
+				"open_timeout_ms":   15000,
+			},
+			"upstream_servers": []any{
+				map[string]any{
+					"name":      "retail",
+					"transport": "stdio",
+					"command":   "helper",
+					"breaker": map[string]any{
+						"failure_threshold": 2,
+						"open_timeout_ms":   5000,
+					},
+				},
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(path, os.Getenv, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.MCP.Breaker.Enabled == nil || !*cfg.MCP.Breaker.Enabled {
+		t.Fatalf("expected global breaker enabled, got %+v", cfg.MCP.Breaker)
+	}
+	if cfg.MCP.Breaker.FailureThreshold != 4 || cfg.MCP.Breaker.FailureWindowMS != 90000 || cfg.MCP.Breaker.OpenTimeoutMS != 15000 {
+		t.Fatalf("unexpected global breaker config: %+v", cfg.MCP.Breaker)
+	}
+	server := cfg.MCP.UpstreamServers[0]
+	if server.Breaker.FailureThreshold != 2 || server.Breaker.FailureWindowMS != 0 || server.Breaker.OpenTimeoutMS != 5000 {
+		t.Fatalf("unexpected per-server breaker config: %+v", server.Breaker)
+	}
+}
+
+func TestLoadConfigRejectsInvalidMCPBreakerConfig(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(`{"version":"v1","rules":[{"id":"allow","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW"}]}`), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	path := filepath.Join(dir, "config.json")
+	configJSON := mustMarshal(map[string]any{
+		"gateway":  map[string]any{"listen": ":8080", "transport": "http"},
+		"policy":   map[string]any{"policy_bundle_path": bundlePath},
+		"executor": map[string]any{"sandbox_enabled": true},
+		"audit":    map[string]any{"sink": "stdout"},
+		"mcp": map[string]any{
+			"enabled": true,
+			"breaker": map[string]any{
+				"enabled":           true,
+				"failure_threshold": -1,
+				"failure_window_ms": 60000,
+				"open_timeout_ms":   30000,
+			},
+		},
+		"upstream":  map[string]any{"routes": []any{}},
+		"approvals": map[string]any{"enabled": false},
+		"identity": map[string]any{
+			"principal":     "system",
+			"agent":         "nomos",
+			"environment":   "dev",
+			"api_keys":      map[string]any{"key1": "system"},
+			"agent_secrets": map[string]any{"nomos": "secret"},
+		},
+	})
+	if err := os.WriteFile(path, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadConfig(path, os.Getenv, ""); err == nil || !strings.Contains(err.Error(), "mcp.breaker.failure_threshold must be > 0") {
+		t.Fatalf("expected breaker validation error, got %v", err)
+	}
+}
+
 func TestLoadConfigAcceptsRateLimitRules(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")

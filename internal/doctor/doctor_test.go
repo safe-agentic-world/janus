@@ -85,6 +85,7 @@ func TestRunWarnsOnEmptyEnvWithRelativeUpstreamCommand(t *testing.T) {
 	if report.OverallStatus != "READY" {
 		t.Fatalf("expected READY, got %s", report.OverallStatus)
 	}
+	assertCheckPassed(t, report, "mcp.upstream_breaker.retail")
 	for _, check := range report.Checks {
 		if check.ID == "mcp.upstream_env_isolation.retail" {
 			if check.Status != "WARN" {

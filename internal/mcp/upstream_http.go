@@ -262,7 +262,7 @@ func (c *upstreamHTTPConn) handshake() error {
 		return errors.New("upstream initialize returned empty response")
 	}
 	if resp.Error != nil {
-		return errors.New(resp.Error.Message)
+		return newUpstreamApplicationError(resp.Error)
 	}
 	if err := c.sendNotificationRaw(context.Background(), c.timeoutOrDefault(c.config.CallTimeout, defaultUpstreamCallTimeout), "notifications/initialized", map[string]any{}); err != nil {
 		return err
@@ -289,7 +289,7 @@ func (c *upstreamHTTPConn) callMethod(ctx context.Context, timeout time.Duration
 		return nil, errUpstreamUnavailable
 	}
 	if resp.Error != nil {
-		return nil, errors.New(resp.Error.Message)
+		return nil, newUpstreamApplicationError(resp.Error)
 	}
 	return resp.Result, nil
 }

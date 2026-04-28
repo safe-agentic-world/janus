@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
 var (
@@ -358,7 +361,7 @@ func (c *upstreamConn) sendRequest(ctx context.Context, timeout time.Duration, i
 			return nil, msg.err
 		}
 		if msg.resp != nil && msg.resp.Error != nil {
-			return msg.resp, errors.New(msg.resp.Error.Message)
+			return msg.resp, newUpstreamApplicationError(msg.resp.Error)
 		}
 		return msg.resp, nil
 	case <-ctx.Done():
@@ -439,6 +442,7 @@ type upstreamSession struct {
 	config         UpstreamServerConfig
 	logger         *runtimeLogger
 	onNotification func(config UpstreamServerConfig, method string, params json.RawMessage)
+	breaker        *upstreamBreaker
 
 	mu                sync.Mutex
 	callMu            sync.Mutex
@@ -453,7 +457,7 @@ type upstreamSession struct {
 	clock             func() time.Time
 }
 
-func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, notifyFn func(UpstreamServerConfig, string, json.RawMessage), clock func() time.Time) *upstreamSession {
+func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, notifyFn func(UpstreamServerConfig, string, json.RawMessage), clock func() time.Time, emitter *telemetry.Emitter) *upstreamSession {
 	if clock == nil {
 		clock = time.Now
 	}
@@ -461,6 +465,7 @@ func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, noti
 		config:         config,
 		logger:         logger,
 		onNotification: notifyFn,
+		breaker:        newUpstreamBreaker(config.Name, config.breakerConfig(), clock, emitter),
 		clock:          clock,
 		backoffInitial: defaultUpstreamBackoffInitial,
 		backoffMax:     defaultUpstreamBackoffMax,
@@ -480,6 +485,13 @@ func (s *upstreamSession) envShapeHash() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.envShapeHashValue
+}
+
+func (s *upstreamSession) breakerSnapshot() upstreamBreakerSnapshot {
+	if s == nil || s.breaker == nil {
+		return upstreamBreakerSnapshot{State: upstreamBreakerDisabled}
+	}
+	return s.breaker.snapshot()
 }
 
 func (s *upstreamSession) transportForTest() upstreamTransport {
@@ -582,15 +594,21 @@ func (s *upstreamSession) call(ctx context.Context, method string, params map[st
 }
 
 func (s *upstreamSession) callWithRequests(ctx context.Context, method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
+	permit, err := s.breaker.beforeCall()
+	if err != nil {
+		return nil, err
+	}
 	s.callMu.Lock()
 	defer s.callMu.Unlock()
 	conn, err := s.ensureConn()
 	if err != nil {
+		s.breaker.afterCall(permit, err)
 		return nil, err
 	}
 	conn.setRequestHandler(handler)
 	defer conn.setRequestHandler(nil)
 	result, callErr := conn.callMethod(ctx, s.timeoutForMethod(ctx, method), method, params)
+	s.breaker.afterCall(permit, callErr)
 	if callErr == nil {
 		return result, nil
 	}
@@ -651,8 +669,9 @@ type upstreamNotificationEvent struct {
 }
 
 type upstreamSupervisor struct {
-	logger *runtimeLogger
-	clock  func() time.Time
+	logger  *runtimeLogger
+	clock   func() time.Time
+	emitter *telemetry.Emitter
 
 	mu            sync.RWMutex
 	sessions      map[string]*upstreamSession
@@ -667,10 +686,11 @@ type upstreamSupervisor struct {
 	closeCh    chan struct{}
 }
 
-func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger) (*upstreamSupervisor, error) {
+func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger, emitter *telemetry.Emitter) (*upstreamSupervisor, error) {
 	sup := &upstreamSupervisor{
 		logger:        logger,
 		clock:         time.Now,
+		emitter:       emitter,
 		sessions:      map[string]*upstreamSession{},
 		serversByName: map[string]UpstreamServerConfig{},
 		toolsByName:   map[string]upstreamTool{},
@@ -688,7 +708,7 @@ func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger
 			sup.close()
 			return nil, fmt.Errorf("duplicate upstream mcp server name %q", config.Name)
 		}
-		session := newUpstreamSession(config, logger, sup.handleNotification, sup.clock)
+		session := newUpstreamSession(config, logger, sup.handleNotification, sup.clock, sup.emitter)
 		sup.serversByName[config.Name] = config
 		sup.sessions[config.Name] = session
 	}
@@ -1125,6 +1145,23 @@ func (s *upstreamSupervisor) setRefreshHookForTest(hook func(server string)) {
 	s.mu.Lock()
 	s.refreshHook = hook
 	s.mu.Unlock()
+}
+
+func (s *upstreamSupervisor) breakerStates() []upstreamBreakerSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]upstreamBreakerSnapshot, 0, len(s.sessions))
+	for name, session := range s.sessions {
+		snapshot := session.breakerSnapshot()
+		if snapshot.Server == "" {
+			snapshot.Server = name
+		}
+		out = append(out, snapshot)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Server < out[j].Server
+	})
+	return out
 }
 
 func (s *upstreamSupervisor) sessionForTest(name string) *upstreamSession {

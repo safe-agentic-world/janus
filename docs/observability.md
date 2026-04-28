@@ -47,8 +47,11 @@ The current implementation emits:
 - policy evaluation events
 - executor run events
 - counters for decisions, rate limits, approvals, retries, and failures
+- upstream MCP breaker transition events
 
 `nomos.rate_limits` counters include stable `result`, `rule_id`, `scope`, `action_type`, and `principal` attributes. `result=allowed` means a matching bucket was consumed; `result=exceeded` means the action was denied with `RATE_LIMIT_EXCEEDED`.
+
+`mcp.upstream_breaker.transition` events include stable `upstream_server`, `from_state`, `to_state`, and `failure_kind` attributes. These events are emitted only on state transitions and do not change policy or execution decisions.
 
 ## W3C Trace Context
 

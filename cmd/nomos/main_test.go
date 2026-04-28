@@ -107,17 +107,29 @@ func TestLoadConfigFailsClosedWithoutBundle(t *testing.T) {
 }
 
 func TestToMCPUpstreamServersAppliesTimeoutDefaultsAndOverrides(t *testing.T) {
+	breakerEnabled := true
+	breakerOverride := false
 	got := toMCPUpstreamServers(gateway.MCPTimeoutConfig{
 		InitializeMS: 5000,
 		EnumerateMS:  5000,
 		CallMS:       30000,
 		StreamMS:     30000,
+	}, gateway.MCPBreakerConfig{
+		Enabled:          &breakerEnabled,
+		FailureThreshold: 5,
+		FailureWindowMS:  60000,
+		OpenTimeoutMS:    30000,
 	}, []gateway.MCPUpstreamServerConfig{{
 		Name:      "retail",
 		Transport: "stdio",
 		Timeouts: gateway.MCPTimeoutConfig{
 			EnumerateMS: 12000,
 			CallMS:      45000,
+		},
+		Breaker: gateway.MCPBreakerConfig{
+			Enabled:          &breakerOverride,
+			FailureThreshold: 2,
+			OpenTimeoutMS:    1000,
 		},
 	}})
 	if len(got) != 1 {
@@ -130,9 +142,13 @@ func TestToMCPUpstreamServersAppliesTimeoutDefaultsAndOverrides(t *testing.T) {
 		EnumerateTimeout:  12 * time.Second,
 		CallTimeout:       45 * time.Second,
 		StreamTimeout:     30 * time.Second,
+		BreakerEnabled:    false,
+		BreakerThreshold:  2,
+		BreakerWindow:     60 * time.Second,
+		BreakerOpenTime:   time.Second,
 	}
-	if got[0].Name != want.Name || got[0].Transport != want.Transport || got[0].InitializeTimeout != want.InitializeTimeout || got[0].EnumerateTimeout != want.EnumerateTimeout || got[0].CallTimeout != want.CallTimeout || got[0].StreamTimeout != want.StreamTimeout {
-		t.Fatalf("unexpected runtime upstream timeouts: got %+v want %+v", got[0], want)
+	if got[0].Name != want.Name || got[0].Transport != want.Transport || got[0].InitializeTimeout != want.InitializeTimeout || got[0].EnumerateTimeout != want.EnumerateTimeout || got[0].CallTimeout != want.CallTimeout || got[0].StreamTimeout != want.StreamTimeout || got[0].BreakerEnabled != want.BreakerEnabled || got[0].BreakerThreshold != want.BreakerThreshold || got[0].BreakerWindow != want.BreakerWindow || got[0].BreakerOpenTime != want.BreakerOpenTime {
+		t.Fatalf("unexpected runtime upstream config: got %+v want %+v", got[0], want)
 	}
 }
 

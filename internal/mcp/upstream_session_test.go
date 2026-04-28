@@ -313,8 +313,8 @@ func TestUpstreamSessionRecoversAfterCrashMidCall(t *testing.T) {
 		Method: "upstream_retail_refund_request",
 		Params: mustJSONBytes(map[string]any{"order_id": "KILL", "reason": "boom"}),
 	})
-	if crash.Error != "upstream_unavailable" {
-		t.Fatalf("expected upstream_unavailable error, got error=%q result=%+v", crash.Error, crash.Result)
+	if crash.Error != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("expected UPSTREAM_UNAVAILABLE error, got error=%q result=%+v", crash.Error, crash.Result)
 	}
 
 	recover := server.handleRequest(Request{
@@ -339,6 +339,60 @@ func TestUpstreamSessionRecoversAfterCrashMidCall(t *testing.T) {
 	}
 	if connAfter == connBefore {
 		t.Fatal("expected new upstream conn after crash, still holding crashed conn")
+	}
+}
+
+func TestUpstreamSessionBreakerFastFailsOpenState(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	if err := os.WriteFile(bundlePath, []byte(statefulForwardedAllowBundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		UpstreamServers: []UpstreamServerConfig{{
+			Name:             "retail",
+			Transport:        "stdio",
+			Command:          os.Args[0],
+			Args:             []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "stateful-retail"},
+			Env:              map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+			Workdir:          dir,
+			BreakerEnabled:   true,
+			BreakerThreshold: 1,
+			BreakerWindow:    time.Minute,
+			BreakerOpenTime:  time.Minute,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	crash := server.handleRequest(Request{
+		ID:     "crash",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "KILL", "reason": "trip breaker"}),
+	})
+	if crash.Error != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("expected crash to surface UPSTREAM_UNAVAILABLE, got %+v", crash)
+	}
+	session := server.upstream.sessionForTest("retail")
+	if snapshot := session.breakerSnapshot(); snapshot.State != upstreamBreakerOpen {
+		t.Fatalf("expected breaker open after crash, got %+v", snapshot)
+	}
+	fastFail := server.handleRequest(Request{
+		ID:     "fast-fail",
+		Method: "upstream_retail_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-2", "reason": "should not restart"}),
+	})
+	if fastFail.Error != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("expected open breaker fast-fail, got %+v", fastFail)
 	}
 }
 

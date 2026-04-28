@@ -58,6 +58,12 @@ Config shape:
 {
   "mcp": {
     "enabled": true,
+    "breaker": {
+      "enabled": true,
+      "failure_threshold": 5,
+      "failure_window_ms": 60000,
+      "open_timeout_ms": 30000
+    },
     "upstream_servers": [
       {
         "name": "retail",
@@ -129,10 +135,10 @@ Auth material passed through the config is injected only into upstream HTTP requ
 
 ### Security Expectations
 
-- TLS verification is on by default and uses the host's system root store. TLS verification failures during handshake, session startup, or call time cause the upstream session to fail closed — forwarded calls return `upstream_unavailable` rather than silently downgrading.
+- TLS verification is on by default and uses the host's system root store. TLS verification failures during handshake, session startup, or call time cause the upstream session to fail closed; forwarded calls return `UPSTREAM_UNAVAILABLE` rather than silently downgrading.
 - When `tls_ca_file` is set, Nomos extends the trust store with that CA bundle rather than disabling verification. When `tls_cert_file` and `tls_key_file` are set, Nomos presents that client certificate to upstream servers requiring mTLS.
 - Upstream host allowlists are enforced **before** any JSON-RPC payload is sent. An allowlist violation prevents the upstream request entirely.
-- Upstream auth failures (HTTP `401`/`403`) surface as deterministic `upstream_unavailable` errors. Nomos does NOT retry with alternate credentials.
+- Upstream auth failures (HTTP `401`/`403`) surface as deterministic `UPSTREAM_UNAVAILABLE` errors. Nomos does NOT retry with alternate credentials.
 - Streamed responses are read through the normal redaction and per-rule `output_max_bytes` / `output_max_lines` caps before they leave Nomos to the agent, logs, or audit sinks. A streamed secret in a tool result is redacted the same as a buffered secret.
 - Upstream stdio children do not inherit the parent process environment by default. If you need `PATH` or other process-level settings, add them explicitly through `env_allowlist` or `env`.
 
@@ -166,6 +172,41 @@ Timeout and cancellation failures are explicit:
 - `UPSTREAM_TIMEOUT` means the upstream did not respond before the configured deadline
 - `UPSTREAM_CANCELED` means the downstream request was canceled before the upstream completed
 - both are fail-closed and are not retried silently
+
+### Upstream Circuit Breakers
+
+Nomos tracks a deterministic circuit breaker per upstream session. The breaker has three active states:
+
+- `closed`: calls are forwarded normally
+- `open`: calls fail fast with `UPSTREAM_UNAVAILABLE`
+- `half-open`: one in-flight probe is allowed after the open timeout expires
+
+Breaker defaults are safe for shared gateways:
+
+```json
+{
+  "mcp": {
+    "breaker": {
+      "enabled": true,
+      "failure_threshold": 5,
+      "failure_window_ms": 60000,
+      "open_timeout_ms": 30000
+    }
+  }
+}
+```
+
+You can override those values per upstream with `mcp.upstream_servers[].breaker`. Set `enabled` to `false` globally or for one upstream to return to the previous restart/backoff-only behavior.
+
+Transport failures, protocol errors, and timeouts contribute to the breaker window. Upstream application-level JSON-RPC errors do not trip the breaker on their own, because those are valid tool outcomes rather than evidence that the transport is unhealthy.
+
+Recovery requires a successful half-open probe. The timer only allows the probe; it does not close the breaker by itself. While the breaker is open, Nomos does not return stale cached responses and does not re-run policy decisions. The already-allowed forwarded call is short-circuited before upstream forwarding, with policy semantics unchanged.
+
+Operator signals:
+
+- `nomos doctor` reports the configured initial breaker state for each upstream
+- telemetry emits `mcp.upstream_breaker.transition` events when an upstream moves between states
+- the downstream MCP response error is `UPSTREAM_UNAVAILABLE` while the breaker is open
 
 ### Environment Isolation
 
@@ -228,16 +269,16 @@ When the upstream server emits `notifications/tools/list_changed`, the superviso
 
 ## Upstream Unavailable Behavior
 
-If the upstream process crashes, closes stdin/stdout, or sends an unframable response, the session is marked unavailable. All in-flight forwarded calls bound to that session return a structured `upstream_unavailable` error to the caller. Policy decisions already recorded in audit are not re-executed.
+If the upstream process crashes, closes stdin/stdout, or sends an unframable response, the session is marked unavailable. All in-flight forwarded calls bound to that session return a structured `UPSTREAM_UNAVAILABLE` error to the caller. Policy decisions already recorded in audit are not re-executed.
 
-The next forwarded call triggers a lazy session restart with bounded exponential backoff. While a restart is pending, additional forwarded calls return `upstream_unavailable` rather than hanging, so failures stay deterministic and fail-closed.
+The next forwarded call triggers a lazy session restart with bounded exponential backoff, unless the upstream breaker is open. While a restart is pending or the breaker is open, additional forwarded calls return `UPSTREAM_UNAVAILABLE` rather than hanging, so failures stay deterministic and fail-closed.
 
-You will see `upstream_unavailable` surface in:
+You will see `UPSTREAM_UNAVAILABLE` surface in:
 
 - the downstream MCP response `error` field for the failing forwarded tool call
 - audit and explain output when the forwarded call reaches the supervisor after policy has allowed it
 
-This is distinct from a policy `DENY`: `upstream_unavailable` means policy allowed the forwarded call but the upstream transport was not in a usable state at the moment of execution. Retry by the client, not a policy change, is the appropriate operator response.
+This is distinct from a policy `DENY`: `UPSTREAM_UNAVAILABLE` means policy allowed the forwarded call but the upstream transport was not in a usable state at the moment of execution. Retry by the client, not a policy change, is the appropriate operator response.
 
 ## Approval Retry
 

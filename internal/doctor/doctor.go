@@ -222,6 +222,21 @@ func Run(options Options) (Report, error) {
 	mark("mcp.stdio_structure_valid", mcpEnabled, "mcp stdio structure valid", "enable mcp mode and keep standard nomos mcp invocation")
 	if cfgErr == nil {
 		for _, upstream := range cfg.MCP.UpstreamServers {
+			breaker := effectiveMCPBreaker(cfg.MCP.Breaker, upstream.Breaker)
+			breakerState := "closed"
+			status := "PASS"
+			hint := "breaker is additive and only short-circuits forwarding; policy decisions are unchanged"
+			if !breaker.enabled {
+				breakerState = "disabled"
+				status = "WARN"
+				hint = "enable mcp.breaker or mcp.upstream_servers[].breaker to fast-fail flaky upstreams"
+			}
+			report.Checks = append(report.Checks, Check{
+				ID:      "mcp.upstream_breaker." + strings.TrimSpace(upstream.Name),
+				Status:  status,
+				Message: fmt.Sprintf("upstream breaker state %s threshold=%d window_ms=%d open_ms=%d", breakerState, breaker.failureThreshold, breaker.failureWindowMS, breaker.openTimeoutMS),
+				Hint:    hint,
+			})
 			if strings.TrimSpace(upstream.Transport) != "stdio" {
 				continue
 			}
@@ -315,6 +330,36 @@ func Run(options Options) (Report, error) {
 
 	report.Checks = stableChecks(report.Checks)
 	return report, nil
+}
+
+type effectiveBreakerConfig struct {
+	enabled          bool
+	failureThreshold int
+	failureWindowMS  int
+	openTimeoutMS    int
+}
+
+func effectiveMCPBreaker(global gateway.MCPBreakerConfig, override gateway.MCPBreakerConfig) effectiveBreakerConfig {
+	enabled := true
+	if global.Enabled != nil {
+		enabled = *global.Enabled
+	}
+	if override.Enabled != nil {
+		enabled = *override.Enabled
+	}
+	return effectiveBreakerConfig{
+		enabled:          enabled,
+		failureThreshold: coalescePositive(global.FailureThreshold, override.FailureThreshold),
+		failureWindowMS:  coalescePositive(global.FailureWindowMS, override.FailureWindowMS),
+		openTimeoutMS:    coalescePositive(global.OpenTimeoutMS, override.OpenTimeoutMS),
+	}
+}
+
+func coalescePositive(defaultValue, overrideValue int) int {
+	if overrideValue > 0 {
+		return overrideValue
+	}
+	return defaultValue
 }
 
 func pathResolves(path string) (bool, string) {
