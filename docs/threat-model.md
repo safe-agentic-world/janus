@@ -21,6 +21,7 @@ For a control-by-control security review mapped to the OWASP Agentic Top 10, see
 4. Malicious actor tampering with policy bundles before load.
 5. Abusive high-volume callers attempting resource exhaustion.
 6. Insider or process attempting to exfiltrate secrets through logs.
+7. Upstream tool or service returning adversarial instructions to steer the downstream agent.
 
 ## Trusted Computing Base (TCB)
 
@@ -39,7 +40,14 @@ For a control-by-control security review mapped to the OWASP Agentic Top 10, see
 - Per principal/agent/environment circuit breaker to cut repeated execution failures.
 - Optional policy bundle signature verification before policy activation.
 - Redaction before returning/logging and audit storage rules disallowing raw secrets.
+- Response-side scanning for forwarded upstream MCP content before downstream delivery.
 - Audit hash chaining (`prev_event_hash`, `event_hash`) for tamper evidence.
+
+## Response-Side Trust Boundary
+
+Upstream MCP responses are untrusted input even after the upstream call itself is policy-authorized. Nomos treats returned text as a separate trust boundary: content is redacted, scanned for known injection/exfiltration patterns, sanitized according to `response_scan_mode`, and then delivered to the downstream agent.
+
+Audit and telemetry record rule IDs and locations only. Raw matched response content is not stored in audit metadata, explain output, logs, or telemetry.
 
 ## Residual Risks
 
@@ -47,6 +55,7 @@ For a control-by-control security review mapped to the OWASP Agentic Top 10, see
 - In-memory rate-limit and breaker state is process-local; distributed coordination is out of scope.
 - mTLS protects transport path but does not replace application-level authorization.
 - Signature verification protects bundle integrity only if operator key management is strong.
+- Pattern-based response scanning does not claim ML-grade detection; operators should treat it as deterministic mitigation for known classes of adversarial text.
 
 ## Non-Goals
 
@@ -81,6 +90,7 @@ Use this checklist before release.
 
 - [ ] Audit sinks configured with redaction-safe destinations.
 - [ ] No raw credentials in outputs/logs; only credential lease IDs are surfaced.
+- [ ] Response scan mode set appropriately for high-risk upstream MCP servers.
 - [ ] Audit tamper-evidence chain fields present (`prev_event_hash`, `event_hash`).
 
 ### Operational
