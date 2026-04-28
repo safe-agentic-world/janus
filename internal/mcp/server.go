@@ -24,7 +24,9 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/responsescan"
 	"github.com/safe-agentic-world/nomos/internal/service"
+	"github.com/safe-agentic-world/nomos/internal/telemetry"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
@@ -41,6 +43,8 @@ type Server struct {
 	assuranceLevel      string
 	upstreamRoutes      []UpstreamRoute
 	upstream            *upstreamSupervisor
+	responseScanner     *responsescan.Scanner
+	telemetry           *telemetry.Emitter
 	logger              *runtimeLogger
 	pid                 int
 	ownsResources       bool
@@ -147,6 +151,10 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	if err != nil {
 		return nil, err
 	}
+	responseScanner, err := responsescan.DefaultScanner()
+	if err != nil {
+		return nil, err
+	}
 	engine := policy.NewEngine(bundle)
 	reader := executor.NewFSReader(workspaceRoot, maxBytes, maxLines)
 	writerExec := executor.NewFSWriter(workspaceRoot, maxBytes)
@@ -187,6 +195,8 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		assuranceLevel:      "NONE",
 		upstreamRoutes:      append([]UpstreamRoute(nil), runtimeOptions.UpstreamRoutes...),
 		upstream:            upstream,
+		responseScanner:     responseScanner,
+		telemetry:           runtimeOptions.Telemetry,
 		logger:              logger,
 		pid:                 os.Getpid(),
 		ownsResources:       true,
@@ -673,7 +683,12 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	}
 	resp.ExecutionMode = "mcp_forwarded"
 	resp.ReportPath = ""
-	resp.Output, resp.Truncated = redactAndLimitForwardedOutput(s.logger.redactor, output, resp.Obligations)
+	redacted := redactForwardedOutput(s.logger.redactor, output)
+	scanned := s.scanForwardedResponse(redacted, resp.Obligations, actionReq, tool)
+	if scanned.Denied {
+		return Response{ID: req.ID, Error: responseScanDeniedError}
+	}
+	resp.Output, resp.Truncated = limitForwardedOutput(scanned.Text, resp.Obligations)
 	resp.Obligations = nil
 	return Response{ID: req.ID, Result: resp}
 }
@@ -1091,11 +1106,33 @@ func forwardedToolDescription(tool upstreamTool) string {
 	return description + " Governed by Nomos before forwarding to upstream server " + strconv.Quote(tool.ServerName) + "."
 }
 
+const responseScanDeniedError = "RESPONSE_SCAN_DENIED"
+
+type forwardedResponseScanResult struct {
+	Text            string
+	Mode            responsescan.Mode
+	RulePackVersion string
+	Findings        []responsescan.Finding
+	Denied          bool
+	Misconfigured   bool
+	InputTruncated  bool
+	MaxDepth        int
+	ResultClass     string
+}
+
 func redactAndLimitForwardedOutput(redactor *redact.Redactor, text string, obligations map[string]any) (string, bool) {
+	return limitForwardedOutput(redactForwardedOutput(redactor, text), obligations)
+}
+
+func redactForwardedOutput(redactor *redact.Redactor, text string) string {
 	if redactor == nil {
 		redactor = redact.DefaultRedactor()
 	}
-	out := redactor.RedactText(text)
+	return redactor.RedactText(text)
+}
+
+func limitForwardedOutput(text string, obligations map[string]any) (string, bool) {
+	out := text
 	truncated := false
 	if maxBytes, ok := forwardedIntObligation(obligations["output_max_bytes"]); ok && maxBytes >= 0 && len(out) > maxBytes {
 		out = trimToBytes(out, maxBytes)
@@ -1109,6 +1146,153 @@ func redactAndLimitForwardedOutput(redactor *redact.Redactor, text string, oblig
 		}
 	}
 	return out, truncated
+}
+
+func (s *Server) scanForwardedResponse(text string, obligations map[string]any, actionReq action.Request, tool upstreamTool) forwardedResponseScanResult {
+	mode, ok := responseScanMode(obligations)
+	result := forwardedResponseScanResult{
+		Text:            text,
+		Mode:            mode,
+		RulePackVersion: responsescan.RulePackVersion,
+	}
+	if !ok || s == nil || s.responseScanner == nil {
+		result.Denied = true
+		result.Misconfigured = true
+		result.ResultClass = responseScanDeniedError
+		s.recordResponseScan(actionReq, tool, result)
+		return result
+	}
+	sanitized, err := s.responseScanner.Sanitize(text, mode)
+	result.RulePackVersion = sanitized.Result.RulePackVersion
+	if result.RulePackVersion == "" {
+		result.RulePackVersion = responsescan.RulePackVersion
+	}
+	result.Findings = sanitized.Result.Findings
+	result.InputTruncated = sanitized.Result.InputTruncated
+	result.MaxDepth = sanitized.Result.MaxDepth
+	result.Text = sanitized.Text
+	if err != nil || sanitized.Denied {
+		result.Denied = true
+		result.ResultClass = responseScanDeniedError
+		s.recordResponseScan(actionReq, tool, result)
+		s.emitResponseScanTelemetry(actionReq.TraceID, mode, result.RulePackVersion, result.Findings)
+		return result
+	}
+	if len(result.Findings) > 0 {
+		result.ResultClass = "RESPONSE_SCAN_SANITIZED"
+		s.recordResponseScan(actionReq, tool, result)
+		s.emitResponseScanTelemetry(actionReq.TraceID, mode, result.RulePackVersion, result.Findings)
+		return result
+	}
+	if result.InputTruncated {
+		result.ResultClass = "RESPONSE_SCAN_PARTIAL"
+		s.recordResponseScan(actionReq, tool, result)
+	}
+	return result
+}
+
+func responseScanMode(obligations map[string]any) (responsescan.Mode, bool) {
+	if obligations == nil {
+		return responsescan.NormalizeMode(nil)
+	}
+	value, exists := obligations["response_scan_mode"]
+	if !exists {
+		return responsescan.NormalizeMode(nil)
+	}
+	return responsescan.NormalizeMode(value)
+}
+
+func (s *Server) recordResponseScan(actionReq action.Request, tool upstreamTool, result forwardedResponseScanResult) {
+	if s == nil || s.service == nil {
+		return
+	}
+	metadata := map[string]any{
+		"upstream_server":                    tool.ServerName,
+		"upstream_tool":                      tool.ToolName,
+		"response_scan_mode":                 string(result.Mode),
+		"response_scan_rule_pack_version":    result.RulePackVersion,
+		"response_scan_finding_count":        len(result.Findings),
+		"response_scan_input_truncated":      result.InputTruncated,
+		"response_scan_max_depth":            result.MaxDepth,
+		"response_scan_misconfigured":        result.Misconfigured,
+		"response_scan_downstream_tool_name": tool.DownstreamName,
+	}
+	if len(result.Findings) > 0 {
+		metadata["response_scan_findings"] = auditResponseScanFindings(result.Findings)
+	}
+	classification := result.ResultClass
+	if classification == "" {
+		classification = "RESPONSE_SCAN_OK"
+	}
+	_ = s.service.RecordAuditEvent(audit.Event{
+		SchemaVersion:        "v1",
+		Timestamp:            time.Now().UTC(),
+		EventType:            "mcp.response_scan",
+		TraceID:              actionReq.TraceID,
+		ActionID:             actionReq.ActionID,
+		Principal:            s.identity.Principal,
+		Agent:                s.identity.Agent,
+		Environment:          s.identity.Environment,
+		ActionType:           actionReq.ActionType,
+		Resource:             actionReq.Resource,
+		ResultClassification: classification,
+		ExecutorMetadata:     metadata,
+	})
+}
+
+func auditResponseScanFindings(findings []responsescan.Finding) []map[string]string {
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(findings))
+	for _, finding := range findings {
+		out = append(out, map[string]string{
+			"rule_id":  finding.RuleID,
+			"location": finding.Location,
+			"severity": finding.Severity,
+		})
+	}
+	return out
+}
+
+func (s *Server) emitResponseScanTelemetry(traceID string, mode responsescan.Mode, version string, findings []responsescan.Finding) {
+	if s == nil || s.telemetry == nil || !s.telemetry.Enabled() || len(findings) == 0 {
+		return
+	}
+	type aggregate struct {
+		count    int64
+		severity string
+	}
+	counts := map[string]aggregate{}
+	for _, finding := range findings {
+		entry := counts[finding.RuleID]
+		entry.count++
+		if entry.severity == "" || finding.Severity > entry.severity {
+			entry.severity = finding.Severity
+		}
+		counts[finding.RuleID] = entry
+	}
+	ruleIDs := make([]string, 0, len(counts))
+	for ruleID := range counts {
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	slices.Sort(ruleIDs)
+	for _, ruleID := range ruleIDs {
+		entry := counts[ruleID]
+		s.telemetry.Metric(telemetry.Metric{
+			SignalType: "metric",
+			Name:       "nomos.response_scan_findings",
+			Kind:       "counter",
+			Value:      entry.count,
+			TraceID:    traceID,
+			Attributes: map[string]string{
+				"rule_id":           ruleID,
+				"severity":          entry.severity,
+				"mode":              string(mode),
+				"rule_pack_version": version,
+			},
+		})
+	}
 }
 
 func forwardedIntObligation(value any) (int, bool) {
