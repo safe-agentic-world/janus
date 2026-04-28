@@ -174,6 +174,10 @@ func runMCP(args []string) {
 	if err != nil {
 		cliFatalf("load config: %v", err)
 	}
+	credentialBroker, err := gateway.BuildCredentialBroker(cfg, time.Now)
+	if err != nil {
+		cliFatalf("init credential broker: %v", err)
+	}
 	runtimeOptions, err := mcp.ParseRuntimeOptions(mcp.RuntimeOptions{
 		LogLevel:              resolved.LogLevel,
 		Quiet:                 resolved.Quiet,
@@ -186,6 +190,7 @@ func runMCP(args []string) {
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
+		CredentialBroker:      credentialBroker,
 		Telemetry:             buildMCPRuntimeTelemetry(cfg),
 	})
 	if err != nil {
@@ -251,6 +256,10 @@ func runMCPServe(args []string) {
 	if strings.TrimSpace(listen) == "" {
 		cliFatal("--listen is required for 'nomos mcp serve --http'")
 	}
+	credentialBroker, err := gateway.BuildCredentialBroker(cfg, time.Now)
+	if err != nil {
+		cliFatalf("init credential broker: %v", err)
+	}
 	runtimeOptions, err := mcp.ParseRuntimeOptions(mcp.RuntimeOptions{
 		LogLevel:              "info",
 		LogFormat:             "text",
@@ -262,6 +271,7 @@ func runMCPServe(args []string) {
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
+		CredentialBroker:      credentialBroker,
 		Telemetry:             buildMCPRuntimeTelemetry(cfg),
 	})
 	if err != nil {
@@ -970,6 +980,20 @@ func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, breakerDefaults gat
 				for k, v := range server.Auth.Values {
 					mapped.AuthHeaders[k] = v
 				}
+			}
+		}
+		if server.Credentials != nil {
+			profile := strings.TrimSpace(server.Credentials.Profile)
+			if profile == "" {
+				profile = strings.TrimSpace(server.Credentials.SecretID)
+			}
+			mapped.Credentials = &mcp.UpstreamCredentialsConfig{
+				Profile:             profile,
+				Mode:                strings.TrimSpace(server.Credentials.Mode),
+				Header:              strings.TrimSpace(server.Credentials.Header),
+				Env:                 strings.TrimSpace(server.Credentials.Env),
+				FileName:            strings.TrimSpace(server.Credentials.FileName),
+				RefreshBeforeExpiry: timeoutDurationFromMS(server.Credentials.RefreshBeforeExpiryMS),
 			}
 		}
 		out = append(out, mapped)

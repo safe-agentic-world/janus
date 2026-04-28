@@ -86,17 +86,10 @@ func (b *Broker) MaterializeEnv(leaseIDs []string, envAllowlist []string, princi
 	}
 	env := map[string]string{}
 	values := make([]string, 0)
-	now := b.now().UTC()
 	for _, id := range leaseIDs {
-		lease, ok := b.leases[id]
-		if !ok {
-			return nil, nil, errors.New("credential lease not found")
-		}
-		if now.After(lease.ExpiresAt) {
-			return nil, nil, errors.New("credential lease expired")
-		}
-		if lease.Principal != principal || lease.Agent != agent || lease.Environment != environment || lease.TraceID != traceID {
-			return nil, nil, errors.New("credential lease binding mismatch")
+		lease, err := b.boundLeaseLocked(id, principal, agent, environment, traceID)
+		if err != nil {
+			return nil, nil, err
 		}
 		secret := b.secrets[lease.SecretID]
 		if _, ok := allowed[secret.EnvKey]; ok {
@@ -105,6 +98,37 @@ func (b *Broker) MaterializeEnv(leaseIDs []string, envAllowlist []string, princi
 		}
 	}
 	return env, values, nil
+}
+
+func (b *Broker) MaterializeValue(leaseID, principal, agent, environment, traceID string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	lease, err := b.boundLeaseLocked(leaseID, principal, agent, environment, traceID)
+	if err != nil {
+		return "", err
+	}
+	return b.secrets[lease.SecretID].Value, nil
+}
+
+func (b *Broker) Release(leaseID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.leases, leaseID)
+	return nil
+}
+
+func (b *Broker) boundLeaseLocked(leaseID, principal, agent, environment, traceID string) (Lease, error) {
+	lease, ok := b.leases[leaseID]
+	if !ok {
+		return Lease{}, errors.New("credential lease not found")
+	}
+	if b.now().UTC().After(lease.ExpiresAt) {
+		return Lease{}, errors.New("credential lease expired")
+	}
+	if lease.Principal != principal || lease.Agent != agent || lease.Environment != environment || lease.TraceID != traceID {
+		return Lease{}, errors.New("credential lease binding mismatch")
+	}
+	return lease, nil
 }
 
 func newLeaseID() (string, error) {

@@ -232,23 +232,24 @@ type MCPBreakerConfig struct {
 }
 
 type MCPUpstreamServerConfig struct {
-	Name                    string                 `json:"name"`
-	Transport               string                 `json:"transport"`
-	Command                 string                 `json:"command,omitempty"`
-	Args                    []string               `json:"args,omitempty"`
-	EnvAllowlist            []string               `json:"env_allowlist,omitempty"`
-	Env                     map[string]string      `json:"env,omitempty"`
-	Workdir                 string                 `json:"workdir,omitempty"`
-	Endpoint                string                 `json:"endpoint,omitempty"`
-	AllowedHosts            []string               `json:"allowed_hosts,omitempty"`
-	TLSInsecure             bool                   `json:"tls_insecure,omitempty"`
-	TLSCAFile               string                 `json:"tls_ca_file,omitempty"`
-	TLSCertFile             string                 `json:"tls_cert_file,omitempty"`
-	TLSKeyFile              string                 `json:"tls_key_file,omitempty"`
-	Timeouts                MCPTimeoutConfig       `json:"timeouts,omitempty"`
-	Breaker                 MCPBreakerConfig       `json:"breaker,omitempty"`
-	AllowMissingToolSchemas bool                   `json:"allow_missing_tool_schemas,omitempty"`
-	Auth                    *MCPUpstreamAuthConfig `json:"auth,omitempty"`
+	Name                    string                        `json:"name"`
+	Transport               string                        `json:"transport"`
+	Command                 string                        `json:"command,omitempty"`
+	Args                    []string                      `json:"args,omitempty"`
+	EnvAllowlist            []string                      `json:"env_allowlist,omitempty"`
+	Env                     map[string]string             `json:"env,omitempty"`
+	Workdir                 string                        `json:"workdir,omitempty"`
+	Endpoint                string                        `json:"endpoint,omitempty"`
+	AllowedHosts            []string                      `json:"allowed_hosts,omitempty"`
+	TLSInsecure             bool                          `json:"tls_insecure,omitempty"`
+	TLSCAFile               string                        `json:"tls_ca_file,omitempty"`
+	TLSCertFile             string                        `json:"tls_cert_file,omitempty"`
+	TLSKeyFile              string                        `json:"tls_key_file,omitempty"`
+	Timeouts                MCPTimeoutConfig              `json:"timeouts,omitempty"`
+	Breaker                 MCPBreakerConfig              `json:"breaker,omitempty"`
+	AllowMissingToolSchemas bool                          `json:"allow_missing_tool_schemas,omitempty"`
+	Auth                    *MCPUpstreamAuthConfig        `json:"auth,omitempty"`
+	Credentials             *MCPUpstreamCredentialsConfig `json:"credentials,omitempty"`
 }
 
 type MCPUpstreamAuthConfig struct {
@@ -257,6 +258,16 @@ type MCPUpstreamAuthConfig struct {
 	Header string            `json:"header,omitempty"`
 	Value  string            `json:"value,omitempty"`
 	Values map[string]string `json:"values,omitempty"`
+}
+
+type MCPUpstreamCredentialsConfig struct {
+	Profile               string `json:"profile,omitempty"`
+	SecretID              string `json:"secret_id,omitempty"`
+	Mode                  string `json:"mode"`
+	Header                string `json:"header,omitempty"`
+	Env                   string `json:"env,omitempty"`
+	FileName              string `json:"file_name,omitempty"`
+	RefreshBeforeExpiryMS int    `json:"refresh_before_expiry_ms,omitempty"`
 }
 
 type UpstreamRoute struct {
@@ -715,6 +726,12 @@ func (c Config) Validate() error {
 			return errors.New("upstream.routes.path_prefix must start with /")
 		}
 	}
+	credentialProfiles := map[string]struct{}{}
+	for _, secret := range c.Credentials.Secrets {
+		if id := strings.TrimSpace(secret.ID); id != "" {
+			credentialProfiles[id] = struct{}{}
+		}
+	}
 	if len(c.MCP.UpstreamServers) > 0 {
 		seen := map[string]struct{}{}
 		for _, server := range c.MCP.UpstreamServers {
@@ -799,6 +816,14 @@ func (c Config) Validate() error {
 			default:
 				return errors.New("mcp.upstream_servers.transport must be stdio|streamable_http|sse")
 			}
+			if server.Credentials != nil {
+				if server.Auth != nil {
+					return errors.New("mcp.upstream_servers.auth and credentials are mutually exclusive")
+				}
+				if err := validateMCPUpstreamCredentials(*server.Credentials, transport, c.Credentials.Enabled, credentialProfiles); err != nil {
+					return err
+				}
+			}
 			for _, key := range server.EnvAllowlist {
 				trimmed := strings.TrimSpace(key)
 				if trimmed == "" {
@@ -826,6 +851,63 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateMCPUpstreamCredentials(cfg MCPUpstreamCredentialsConfig, transport string, brokerEnabled bool, profiles map[string]struct{}) error {
+	profile, err := effectiveMCPUpstreamCredentialProfile(cfg)
+	if err != nil {
+		return err
+	}
+	if profile == "" {
+		return errors.New("mcp.upstream_servers.credentials.profile is required")
+	}
+	if !brokerEnabled {
+		return errors.New("mcp.upstream_servers.credentials requires credentials.enabled=true")
+	}
+	if _, ok := profiles[profile]; !ok {
+		return errors.New("mcp.upstream_servers.credentials.profile must reference credentials.secrets.id")
+	}
+	if cfg.RefreshBeforeExpiryMS < 0 {
+		return errors.New("mcp.upstream_servers.credentials.refresh_before_expiry_ms must be >= 0")
+	}
+	mode := strings.TrimSpace(cfg.Mode)
+	switch mode {
+	case "bearer", "header":
+		if transport != "streamable_http" && transport != "sse" {
+			return errors.New("mcp.upstream_servers.credentials bearer/header modes require http transport")
+		}
+		if mode == "header" && strings.TrimSpace(cfg.Header) == "" {
+			return errors.New("mcp.upstream_servers.credentials.header is required for header mode")
+		}
+	case "env", "file":
+		if transport != "stdio" {
+			return errors.New("mcp.upstream_servers.credentials env/file modes require stdio transport")
+		}
+		if strings.TrimSpace(cfg.Env) == "" {
+			return errors.New("mcp.upstream_servers.credentials.env is required for env/file mode")
+		}
+		if strings.ContainsAny(strings.TrimSpace(cfg.Env), "*?[]") {
+			return errors.New("mcp.upstream_servers.credentials.env must use an exact variable name")
+		}
+	case "":
+		return errors.New("mcp.upstream_servers.credentials.mode is required")
+	default:
+		return errors.New("mcp.upstream_servers.credentials.mode must be bearer|header|env|file")
+	}
+	return nil
+}
+
+func effectiveMCPUpstreamCredentialProfile(cfg MCPUpstreamCredentialsConfig) (string, error) {
+	profile := strings.TrimSpace(cfg.Profile)
+	secretID := strings.TrimSpace(cfg.SecretID)
+	switch {
+	case profile != "" && secretID != "" && profile != secretID:
+		return "", errors.New("mcp.upstream_servers.credentials.profile and secret_id must match when both are set")
+	case profile != "":
+		return profile, nil
+	default:
+		return secretID, nil
+	}
 }
 
 func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {

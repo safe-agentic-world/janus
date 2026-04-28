@@ -23,6 +23,7 @@ const (
 	upstreamFailureApplication = "application"
 	upstreamFailureTimeout     = "timeout"
 	upstreamFailureCanceled    = "canceled"
+	upstreamFailureCredential  = "credential"
 )
 
 type upstreamBreakerConfig struct {
@@ -202,6 +203,16 @@ func (b *upstreamBreaker) snapshot() upstreamBreakerSnapshot {
 	}
 }
 
+func (b *upstreamBreaker) forceOpen(kind string) {
+	if b == nil || !b.config.Enabled {
+		return
+	}
+	b.mu.Lock()
+	transition := b.openLocked(kind, b.clock().UTC())
+	b.mu.Unlock()
+	b.emitTransition(transition)
+}
+
 func (b *upstreamBreaker) pruneLocked(now time.Time) {
 	if b.config.FailureWindow <= 0 || len(b.failures) == 0 {
 		return
@@ -278,6 +289,8 @@ func classifyUpstreamBreakerFailure(err error) (string, bool) {
 		return upstreamFailureTimeout, true
 	case errors.Is(err, errUpstreamCanceled):
 		return upstreamFailureCanceled, false
+	case errors.Is(err, errUpstreamCredentialUnavailable):
+		return upstreamFailureCredential, true
 	case errors.Is(err, errUpstreamClosed), errors.Is(err, errUpstreamUnavailable):
 		return upstreamFailureTransport, true
 	}

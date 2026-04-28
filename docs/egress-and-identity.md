@@ -31,6 +31,55 @@ For the strong-guarantee posture, the readiness signal is OIDC enabled in Nomos 
 - Nomos brokers short-lived lease IDs.
 - Credential materialization happens only inside executors and remains subject to redaction before output/logging/audit.
 
+## Upstream MCP Credentials
+
+Upstream MCP servers can authenticate through brokered leases instead of static tokens in config.
+
+Operators provision a broker profile under `credentials.secrets`, then reference that profile from the upstream server:
+
+```json
+{
+  "credentials": {
+    "enabled": true,
+    "secrets": [
+      {
+        "id": "retail_mcp_token",
+        "env_key": "RETAIL_MCP_TOKEN",
+        "value": "<loaded from the operator secret store>",
+        "ttl_seconds": 900
+      }
+    ]
+  },
+  "mcp": {
+    "upstream_servers": [
+      {
+        "name": "retail",
+        "transport": "streamable_http",
+        "endpoint": "https://retail.example.com/mcp",
+        "credentials": {
+          "profile": "retail_mcp_token",
+          "mode": "bearer",
+          "refresh_before_expiry_ms": 30000
+        }
+      }
+    ]
+  }
+}
+```
+
+Do not commit real secret values. In production, populate broker profiles from the operator-controlled secret store or deployment secret injection path.
+
+Supported injection modes:
+
+- `bearer` injects `Authorization: Bearer <leased-secret>` for HTTP MCP transports.
+- `header` injects a configured header name for HTTP MCP transports.
+- `env` injects one explicit environment variable into a stdio upstream, without inheriting the parent environment.
+- `file` writes the leased secret to a Nomos-managed temporary file and injects the file path through the configured environment variable.
+
+Each upstream lease is bound to the Nomos principal, agent, environment, upstream server, and upstream session id. Nomos refreshes leases before expiry using the session clock, audits only lease IDs, and releases active leases on upstream shutdown when the broker supports release.
+
+If lease acquisition or refresh fails, the upstream session fails closed with `UPSTREAM_CREDENTIAL_UNAVAILABLE`. Refresh failure opens the upstream circuit breaker rather than retrying with alternate credentials.
+
 ## Why Both Layers Matter
 
 Nomos alone cannot stop an untrusted workload from bypassing mediation if the environment allows unrestricted egress, direct credential access, or unrestricted process escape.

@@ -22,8 +22,21 @@ func TestBrokerCheckoutAndMaterializeBinding(t *testing.T) {
 	if env["API_TOKEN"] != "v1" {
 		t.Fatalf("unexpected env value: %v", env)
 	}
+	value, err := b.MaterializeValue(lease.ID, "p1", "a1", "dev", "t1")
+	if err != nil {
+		t.Fatalf("materialize value: %v", err)
+	}
+	if value != "v1" {
+		t.Fatalf("unexpected materialized value: %q", value)
+	}
 	if _, _, err := b.MaterializeEnv([]string{lease.ID}, []string{"API_TOKEN"}, "p1", "a1", "dev", "other"); err == nil {
 		t.Fatal("expected binding mismatch error")
+	}
+	if err := b.Release(lease.ID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := b.MaterializeValue(lease.ID, "p1", "a1", "dev", "t1"); err == nil {
+		t.Fatal("expected released lease to be unavailable")
 	}
 }
 
