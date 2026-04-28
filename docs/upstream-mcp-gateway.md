@@ -130,6 +130,7 @@ The remote HTTP example above is a working template for `streamable_http` upstre
   - `{ "type": "bearer", "token": "..." }` → adds `Authorization: Bearer <token>`.
   - `{ "type": "header", "header": "X-Api-Key", "value": "..." }` → adds a single static header.
   - `{ "type": "header", "values": { "X-Api-Key": "...", "X-Tenant": "..." } }` → adds multiple static headers.
+- `credentials` is an optional brokered auth injection hook and is mutually exclusive with `auth`. It references `credentials.secrets[].id` by `profile` and supports `bearer`, `header`, `env`, and `file` injection modes.
 
 Auth material passed through the config is injected only into upstream HTTP requests. It is NEVER written to audit records, explain output, or logs.
 
@@ -147,7 +148,7 @@ Auth material passed through the config is injected only into upstream HTTP requ
 - Prefer `https` endpoints with a trusted certificate chain. Reserve `tls_insecure` for local smoke tests against development servers.
 - Prefer a private CA plus `tls_ca_file` over `tls_insecure` for internal upstreams, and use `tls_cert_file` plus `tls_key_file` only for upstreams that require client-authenticated TLS.
 - Set `allowed_hosts` to the exact hostnames you intend to forward to. This is a transport-layer allowlist, not a substitute for a policy rule — the policy bundle is still the only authorization source.
-- Store upstream auth tokens outside the config file when possible (templated in at deploy time, or brokered via the M54 credential flow in future revisions). The v1 `auth` block is a stable injection point for that integration.
+- Prefer brokered upstream credentials over static `auth` tokens. Brokered leases are bound to the principal, upstream server, and session id; audit records contain lease IDs only.
 - Policy bundles do not need any changes to move an upstream from `stdio` to `streamable_http`: `mcp.call` resource identity is `mcp://<server>/<tool>` regardless of transport.
 
 ### Upstream Timeouts

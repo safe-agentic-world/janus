@@ -36,7 +36,9 @@ type upstreamHTTPConn struct {
 	httpClient   *http.Client
 	legacySSE    bool
 	notifyFn     func(method string, params json.RawMessage)
+	authMu       sync.RWMutex
 	authHeaders  map[string]string
+	credHeaders  map[string]string
 
 	sessionID    atomic.Value // string
 	postURL      atomic.Value // *neturl.URL
@@ -136,6 +138,7 @@ func startUpstreamHTTPConn(config UpstreamServerConfig, notify func(method strin
 		legacySSE:    legacySSE,
 		notifyFn:     notify,
 		authHeaders:  authHeaders,
+		credHeaders:  cloneStringMap(config.CredentialHeaders),
 		pending:      map[string]chan rpcMessage{},
 		ctx:          ctx,
 		cancel:       cancel,
@@ -196,6 +199,12 @@ func upstreamTLSConfig(config UpstreamServerConfig) (*tls.Config, error) {
 func (c *upstreamHTTPConn) doneCh() <-chan struct{} { return c.done }
 
 func (c *upstreamHTTPConn) envShapeHash() string { return "" }
+
+func (c *upstreamHTTPConn) setCredentialHeaders(headers map[string]string) {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	c.credHeaders = cloneStringMap(headers)
+}
 
 func (c *upstreamHTTPConn) setRequestHandler(handler upstreamRequestHandler) {
 	c.mu.Lock()
@@ -392,9 +401,14 @@ func (c *upstreamHTTPConn) doPOST(ctx context.Context, timeout time.Duration, bo
 func (c *upstreamHTTPConn) applyRequestHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", upstreamHTTPUserAgent)
 	req.Header.Set("MCP-Protocol-Version", upstreamHTTPProtocolVersion)
+	c.authMu.RLock()
 	for k, v := range c.authHeaders {
 		req.Header.Set(k, v)
 	}
+	for k, v := range c.credHeaders {
+		req.Header.Set(k, v)
+	}
+	c.authMu.RUnlock()
 	if sid, _ := c.sessionID.Load().(string); sid != "" {
 		req.Header.Set("MCP-Session-Id", sid)
 	}

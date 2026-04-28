@@ -6,7 +6,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/credentials"
 )
 
-func buildCredentialBroker(cfg Config, now func() time.Time) (*credentials.Broker, error) {
+func BuildCredentialBroker(cfg Config, now func() time.Time) (*credentials.Broker, error) {
 	if !cfg.Credentials.Enabled {
 		return nil, nil
 	}
@@ -20,4 +20,8 @@ func buildCredentialBroker(cfg Config, now func() time.Time) (*credentials.Broke
 		})
 	}
 	return credentials.NewBroker(secrets, now)
+}
+
+func buildCredentialBroker(cfg Config, now func() time.Time) (*credentials.Broker, error) {
+	return BuildCredentialBroker(cfg, now)
 }

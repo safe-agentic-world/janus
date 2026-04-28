@@ -796,6 +796,12 @@ func TestLoadConfigSupportsMCPUpstreamServers(t *testing.T) {
 			"sandbox_enabled": true,
 		},
 		"audit": map[string]any{"sink": "stdout"},
+		"credentials": map[string]any{
+			"enabled": true,
+			"secrets": []any{
+				map[string]any{"id": "retail_mcp_token", "env_key": "RETAIL_MCP_TOKEN", "value": "retail-token", "ttl_seconds": 900},
+			},
+		},
 		"mcp": map[string]any{
 			"enabled": true,
 			"upstream_servers": []any{
@@ -809,6 +815,11 @@ func TestLoadConfigSupportsMCPUpstreamServers(t *testing.T) {
 					"tls_ca_file":   ".\\ca.pem",
 					"tls_cert_file": ".\\client.pem",
 					"tls_key_file":  ".\\client-key.pem",
+					"credentials": map[string]any{
+						"profile":                  "retail_mcp_token",
+						"mode":                     "bearer",
+						"refresh_before_expiry_ms": 30000,
+					},
 				},
 			},
 		},
@@ -848,6 +859,9 @@ func TestLoadConfigSupportsMCPUpstreamServers(t *testing.T) {
 	}
 	if server.Env["RETAIL_ENV"] != "demo" {
 		t.Fatalf("expected upstream env, got %+v", server.Env)
+	}
+	if server.Credentials == nil || server.Credentials.Profile != "retail_mcp_token" || server.Credentials.Mode != "bearer" || server.Credentials.RefreshBeforeExpiryMS != 30000 {
+		t.Fatalf("expected upstream brokered credentials config, got %+v", server.Credentials)
 	}
 }
 

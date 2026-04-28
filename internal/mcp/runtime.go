@@ -27,6 +27,7 @@ type RuntimeOptions struct {
 	ApprovalTTLSeconds    int
 	UpstreamRoutes        []UpstreamRoute
 	UpstreamServers       []UpstreamServerConfig
+	CredentialBroker      UpstreamCredentialBroker
 	Telemetry             *telemetry.Emitter
 }
 
@@ -55,6 +56,8 @@ type UpstreamServerConfig struct {
 	AuthHeader              string
 	AuthValue               string
 	AuthHeaders             map[string]string
+	Credentials             *UpstreamCredentialsConfig
+	CredentialHeaders       map[string]string
 	InitializeTimeout       time.Duration
 	EnumerateTimeout        time.Duration
 	CallTimeout             time.Duration
@@ -64,6 +67,15 @@ type UpstreamServerConfig struct {
 	BreakerWindow           time.Duration
 	BreakerOpenTime         time.Duration
 	AllowMissingToolSchemas bool
+}
+
+type UpstreamCredentialsConfig struct {
+	Profile             string
+	Mode                string
+	Header              string
+	Env                 string
+	FileName            string
+	RefreshBeforeExpiry time.Duration
 }
 
 type logLevel int
@@ -112,6 +124,7 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 		ApprovalTTLSeconds:    options.ApprovalTTLSeconds,
 		UpstreamRoutes:        append([]UpstreamRoute(nil), options.UpstreamRoutes...),
 		UpstreamServers:       append([]UpstreamServerConfig(nil), options.UpstreamServers...),
+		CredentialBroker:      options.CredentialBroker,
 		Telemetry:             options.Telemetry,
 	}, nil
 }

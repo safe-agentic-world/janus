@@ -16,14 +16,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/safe-agentic-world/nomos/internal/audit"
+	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
 var (
-	errUpstreamClosed      = errors.New("upstream mcp session closed")
-	errUpstreamUnavailable = errors.New("upstream mcp session unavailable")
-	errUpstreamTimeout     = errors.New("UPSTREAM_TIMEOUT")
-	errUpstreamCanceled    = errors.New("UPSTREAM_CANCELED")
+	errUpstreamClosed                = errors.New("upstream mcp session closed")
+	errUpstreamUnavailable           = errors.New("upstream mcp session unavailable")
+	errUpstreamTimeout               = errors.New("UPSTREAM_TIMEOUT")
+	errUpstreamCanceled              = errors.New("UPSTREAM_CANCELED")
+	errUpstreamCredentialUnavailable = errors.New("UPSTREAM_CREDENTIAL_UNAVAILABLE")
 )
 
 const (
@@ -443,6 +446,7 @@ type upstreamSession struct {
 	logger         *runtimeLogger
 	onNotification func(config UpstreamServerConfig, method string, params json.RawMessage)
 	breaker        *upstreamBreaker
+	credentials    *upstreamCredentialManager
 
 	mu                sync.Mutex
 	callMu            sync.Mutex
@@ -457,7 +461,7 @@ type upstreamSession struct {
 	clock             func() time.Time
 }
 
-func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, notifyFn func(UpstreamServerConfig, string, json.RawMessage), clock func() time.Time, emitter *telemetry.Emitter) *upstreamSession {
+func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, notifyFn func(UpstreamServerConfig, string, json.RawMessage), clock func() time.Time, emitter *telemetry.Emitter, id identity.VerifiedIdentity, credentialBroker UpstreamCredentialBroker, recorder audit.Recorder) *upstreamSession {
 	if clock == nil {
 		clock = time.Now
 	}
@@ -466,6 +470,7 @@ func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, noti
 		logger:         logger,
 		onNotification: notifyFn,
 		breaker:        newUpstreamBreaker(config.Name, config.breakerConfig(), clock, emitter),
+		credentials:    newUpstreamCredentialManager(config, id, credentialBroker, recorder, clock),
 		clock:          clock,
 		backoffInitial: defaultUpstreamBackoffInitial,
 		backoffMax:     defaultUpstreamBackoffMax,
@@ -528,7 +533,7 @@ func (s *upstreamSession) backoffElapsedLocked() bool {
 	return s.clock().Sub(s.lastFailureAt) >= wait
 }
 
-func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
+func (s *upstreamSession) ensureConn(material upstreamCredentialMaterial) (upstreamTransport, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -562,7 +567,8 @@ func (s *upstreamSession) ensureConn() (upstreamTransport, error) {
 	s.starting = true
 	s.mu.Unlock()
 
-	conn, startErr := startUpstreamTransport(s.config, func(method string, params json.RawMessage) {
+	startConfig := upstreamConfigWithCredentialMaterial(s.config, material)
+	conn, startErr := startUpstreamTransport(startConfig, func(method string, params json.RawMessage) {
 		if s.onNotification != nil {
 			s.onNotification(s.config, method, params)
 		}
@@ -600,7 +606,13 @@ func (s *upstreamSession) callWithRequests(ctx context.Context, method string, p
 	}
 	s.callMu.Lock()
 	defer s.callMu.Unlock()
-	conn, err := s.ensureConn()
+	material, refreshed, err := s.ensureCredentialMaterial()
+	if err != nil {
+		s.breaker.forceOpen(upstreamFailureCredential)
+		return nil, err
+	}
+	s.applyCredentialRefresh(material, refreshed)
+	conn, err := s.ensureConn(material)
 	if err != nil {
 		s.breaker.afterCall(permit, err)
 		return nil, err
@@ -620,6 +632,37 @@ func (s *upstreamSession) callWithRequests(ctx context.Context, method string, p
 		s.mu.Unlock()
 	}
 	return nil, callErr
+}
+
+func (s *upstreamSession) ensureCredentialMaterial() (upstreamCredentialMaterial, bool, error) {
+	if s.credentials == nil {
+		return upstreamCredentialMaterial{}, false, nil
+	}
+	return s.credentials.ensure()
+}
+
+func (s *upstreamSession) applyCredentialRefresh(material upstreamCredentialMaterial, refreshed bool) {
+	if !refreshed {
+		return
+	}
+	s.mu.Lock()
+	conn := s.conn
+	if conn == nil {
+		s.mu.Unlock()
+		return
+	}
+	if updater, ok := conn.(interface{ setCredentialHeaders(map[string]string) }); ok {
+		updater.setCredentialHeaders(material.Headers)
+		s.mu.Unlock()
+		return
+	}
+	if !material.RestartOnRefresh {
+		s.mu.Unlock()
+		return
+	}
+	s.conn = nil
+	s.mu.Unlock()
+	conn.close()
 }
 
 func (s *upstreamSession) timeoutForMethod(ctx context.Context, method string) time.Duration {
@@ -660,6 +703,9 @@ func (s *upstreamSession) close() {
 	if conn != nil {
 		conn.close()
 	}
+	if s.credentials != nil {
+		s.credentials.close()
+	}
 }
 
 type upstreamNotificationEvent struct {
@@ -686,7 +732,7 @@ type upstreamSupervisor struct {
 	closeCh    chan struct{}
 }
 
-func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger, emitter *telemetry.Emitter) (*upstreamSupervisor, error) {
+func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger, emitter *telemetry.Emitter, id identity.VerifiedIdentity, credentialBroker UpstreamCredentialBroker, recorder audit.Recorder) (*upstreamSupervisor, error) {
 	sup := &upstreamSupervisor{
 		logger:        logger,
 		clock:         time.Now,
@@ -708,7 +754,7 @@ func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger
 			sup.close()
 			return nil, fmt.Errorf("duplicate upstream mcp server name %q", config.Name)
 		}
-		session := newUpstreamSession(config, logger, sup.handleNotification, sup.clock, sup.emitter)
+		session := newUpstreamSession(config, logger, sup.handleNotification, sup.clock, sup.emitter, id, credentialBroker, recorder)
 		sup.serversByName[config.Name] = config
 		sup.sessions[config.Name] = session
 	}
