@@ -74,13 +74,15 @@ func newUpstreamBreaker(server string, config upstreamBreakerConfig, clock func(
 	if !config.Enabled {
 		state = upstreamBreakerDisabled
 	}
-	return &upstreamBreaker{
+	breaker := &upstreamBreaker{
 		server:  strings.TrimSpace(server),
 		config:  config,
 		clock:   clock,
 		emitter: emitter,
 		state:   state,
 	}
+	emitUpstreamBreakerGauge(emitter, breaker.server, breaker.state, breaker.config.Enabled)
+	return breaker
 }
 
 func normalizeUpstreamBreakerConfig(config upstreamBreakerConfig) upstreamBreakerConfig {
@@ -253,14 +255,16 @@ func (b *upstreamBreaker) transitionLocked(next, kind string, now time.Time) *te
 	if b.emitter == nil || !b.emitter.Enabled() {
 		return nil
 	}
+	upstreamServer := boundedTelemetryLabel(b.server)
+	traceID := "mcp_upstream_" + upstreamServer
 	event := telemetry.Event{
 		SignalType:  "trace",
 		EventName:   "mcp.upstream_breaker.transition",
-		TraceID:     "mcp_upstream_" + b.server,
-		Correlation: "mcp_upstream_" + b.server,
+		TraceID:     traceID,
+		Correlation: traceID,
 		Status:      next,
 		Attributes: map[string]any{
-			"upstream_server": b.server,
+			"upstream_server": upstreamServer,
 			"from_state":      prev,
 			"to_state":        next,
 			"failure_kind":    kind,
@@ -270,6 +274,10 @@ func (b *upstreamBreaker) transitionLocked(next, kind string, now time.Time) *te
 }
 
 func (b *upstreamBreaker) emitTransition(event *telemetry.Event) {
+	if b == nil {
+		return
+	}
+	emitUpstreamBreakerGauge(b.emitter, b.server, b.state, b.config.Enabled)
 	if event == nil || b.emitter == nil {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -192,8 +193,51 @@ func (l *runtimeLogger) Warn(message string) {
 	l.write(logLevelWarn, "warn", message)
 }
 
+func (l *runtimeLogger) Info(message string) {
+	l.write(logLevelInfo, "info", message)
+}
+
 func (l *runtimeLogger) Debug(message string) {
 	l.write(logLevelDebug, "debug", message)
+}
+
+func (l *runtimeLogger) Structured(level logLevel, event string, fields map[string]any) {
+	if l == nil || level > l.level {
+		return
+	}
+	label := logLevelLabel(level)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	payload := map[string]any{
+		"component": "nomos.mcp",
+		"level":     label,
+		"event":     strings.TrimSpace(event),
+	}
+	for key, value := range fields {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		payload[key] = value
+	}
+	if l.format == "json" {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		l.writeLocked(string(data))
+		return
+	}
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", key, payload[key]))
+	}
+	l.writeLocked("[Nomos] " + strings.ToUpper(label) + " " + strings.Join(parts, " "))
 }
 
 func (l *runtimeLogger) ReadyBanner(environment, policyBundleHash string, policyBundleSources []string, engineVersion string, pid int) {
@@ -242,4 +286,17 @@ func (l *runtimeLogger) writeLocked(line string) {
 		redacted += "\n"
 	}
 	_, _ = io.WriteString(l.errOut, redacted)
+}
+
+func logLevelLabel(level logLevel) string {
+	switch level {
+	case logLevelError:
+		return "error"
+	case logLevelWarn:
+		return "warn"
+	case logLevelDebug:
+		return "debug"
+	default:
+		return "info"
+	}
 }
