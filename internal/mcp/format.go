@@ -27,6 +27,29 @@ func formatToolResult(name string, result any) (string, error) {
 	return formatActionToolResult(name, resp), nil
 }
 
+func formatToolResultContent(name string, result any) ([]map[string]any, error) {
+	resp, ok := result.(action.Response)
+	if ok {
+		return actionResponseContentBlocks(name, resp), nil
+	}
+	text, err := formatToolResult(name, result)
+	if err != nil {
+		return nil, err
+	}
+	return []map[string]any{{"type": "text", "text": text}}, nil
+}
+
+func actionResponseContentBlocks(name string, resp action.Response) []map[string]any {
+	blocks := []map[string]any{{
+		"type": "text",
+		"text": formatActionToolResult(name, resp),
+	}}
+	for _, block := range resp.MCPContentBlocks {
+		blocks = append(blocks, cloneContentBlock(block))
+	}
+	return blocks
+}
+
 func formatActionToolResult(name string, resp action.Response) string {
 	actionLabel := toolActionLabel(name)
 	headline := fmt.Sprintf("%s %s %s", colorDecision(resp.Decision), actionLabel, formatDecisionSummary(actionLabel, resp))

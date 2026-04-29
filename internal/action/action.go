@@ -239,23 +239,24 @@ func DecodeAction(data []byte) (Action, error) {
 }
 
 type Response struct {
-	Decision            string         `json:"decision"`
-	Reason              string         `json:"reason,omitempty"`
-	TraceID             string         `json:"trace_id,omitempty"`
-	ActionID            string         `json:"action_id,omitempty"`
-	ExecutionMode       string         `json:"execution_mode,omitempty"`
-	ReportPath          string         `json:"report_path,omitempty"`
-	Output              string         `json:"output,omitempty"`
-	Truncated           bool           `json:"truncated,omitempty"`
-	BytesWritten        int            `json:"bytes_written,omitempty"`
-	Stdout              string         `json:"stdout,omitempty"`
-	Stderr              string         `json:"stderr,omitempty"`
-	ExitCode            int            `json:"exit_code,omitempty"`
-	StatusCode          int            `json:"status_code,omitempty"`
-	Obligations         map[string]any `json:"obligations,omitempty"`
-	ApprovalID          string         `json:"approval_id,omitempty"`
-	ApprovalFingerprint string         `json:"approval_fingerprint,omitempty"`
-	ApprovalExpiresAt   string         `json:"approval_expires_at,omitempty"`
-	CredentialLeaseID   string         `json:"credential_lease_id,omitempty"`
-	CredentialLeaseIDs  []string       `json:"credential_lease_ids,omitempty"`
+	Decision            string           `json:"decision"`
+	Reason              string           `json:"reason,omitempty"`
+	TraceID             string           `json:"trace_id,omitempty"`
+	ActionID            string           `json:"action_id,omitempty"`
+	ExecutionMode       string           `json:"execution_mode,omitempty"`
+	ReportPath          string           `json:"report_path,omitempty"`
+	Output              string           `json:"output,omitempty"`
+	Truncated           bool             `json:"truncated,omitempty"`
+	BytesWritten        int              `json:"bytes_written,omitempty"`
+	Stdout              string           `json:"stdout,omitempty"`
+	Stderr              string           `json:"stderr,omitempty"`
+	ExitCode            int              `json:"exit_code,omitempty"`
+	StatusCode          int              `json:"status_code,omitempty"`
+	Obligations         map[string]any   `json:"obligations,omitempty"`
+	MCPContentBlocks    []map[string]any `json:"mcp_content_blocks,omitempty"`
+	ApprovalID          string           `json:"approval_id,omitempty"`
+	ApprovalFingerprint string           `json:"approval_fingerprint,omitempty"`
+	ApprovalExpiresAt   string           `json:"approval_expires_at,omitempty"`
+	CredentialLeaseID   string           `json:"credential_lease_id,omitempty"`
+	CredentialLeaseIDs  []string         `json:"credential_lease_ids,omitempty"`
 }

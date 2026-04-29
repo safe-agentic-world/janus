@@ -55,6 +55,11 @@ Optional replay/safety fields:
 - `mcp.completion`
 - `mcp.sample`
 
+Additional MCP gateway events:
+
+- `mcp.content_blocks`
+- `mcp.response_scan`
+
 ## Result Classification
 
 Current set:
@@ -76,6 +81,35 @@ Current set:
 - `params_redacted_summary` and `result_redacted_summary` are optional and size-capped.
 - Never store raw secrets or auth headers; events are redacted before storage/transmission.
 - `executor_metadata` must remain minimal and redacted.
+- MCP content block payloads are never stored raw in audit. `mcp.content_blocks` records delivered and blocked blocks by kind, size, digest, blocked status, and truncation status only.
+
+## MCP Content Metadata
+
+For forwarded upstream MCP `tools/call` responses and governed `sampling/createMessage` responses, Nomos emits an `mcp.content_blocks` event after redaction, content-block governance, response scanning, and cap enforcement.
+
+`executor_metadata` includes:
+
+- `upstream_server`
+- `upstream_tool`
+- `mcp_content_block_count`
+- `mcp_content_blocks`
+- `mcp_content_allowed_block_kinds`
+- `mcp_content_block_policy_misconfigured`
+- `mcp_content_truncated`
+- `mcp_content_downstream_tool_name`
+
+Each `mcp_content_blocks[]` item includes:
+
+- `index`
+- `kind`
+- `type`
+- `size_bytes`
+- `digest`
+- `blocked`
+- `blocked_kind`
+- `truncated`
+
+`digest` is deterministic for the delivered block content. Binary image/audio digests are computed over decoded bytes. Text digests are computed over delivered text after redaction, response scanning, and caps. Resource and placeholder digests use canonical JSON of the delivered block. Raw base64, resource text, and prompt-like content are not written to audit metadata.
 
 ## Sinks
 

@@ -22,6 +22,8 @@ They are part of the authorization result and MUST remain deterministic for the 
 - `output_max_lines`
 - `approval_scope_class`
 - `credential_lease_ids`
+- `mcp_allowed_content_block_kinds`
+- `response_scan_mode`
 
 ## Exec Match vs Exec Allowlist
 
@@ -62,6 +64,38 @@ This lets operators express:
 - derived exec constraints are the deterministic union of matched rule-level argv patterns for the selected decision class
 - EXEC allowlists are intersected or otherwise reduced to the stricter effective set
 - NET allowlists are intersected or otherwise reduced to the stricter effective set
+
+## MCP Content Blocks
+
+`mcp_allowed_content_block_kinds` controls which upstream MCP `tools/call` content block kinds may be delivered downstream. The same obligation is applied to governed `sampling/createMessage` responses before Nomos relays them back to an upstream server.
+
+Allowed values:
+
+- `text`
+- `image`
+- `audio`
+- `resource`
+- `tool_result`
+
+Default behavior is conservative:
+
+- if the obligation is absent, only `text` blocks are allowed
+- `image`, `audio`, `resource`, and `tool_result` blocks require explicit allowance
+- denied blocks are replaced by a structured text placeholder that names the blocked kind and reason
+- malformed or unknown block kinds are blocked
+- invalid obligation values fail closed to the default `text`-only policy and are marked in audit metadata
+
+Example:
+
+```json
+{
+  "mcp_allowed_content_block_kinds": ["text", "image", "resource"],
+  "output_max_bytes": 65536,
+  "response_scan_mode": "strip"
+}
+```
+
+Text block content is redacted and response-scanned before delivery. Resource text fields are handled the same way so text cannot bypass redaction by being relabeled as a resource block. Image, audio, and resource blob payloads are byte-capped and audited by digest and size, never by raw payload.
 
 ## Execution Contract
 

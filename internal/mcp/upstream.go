@@ -20,6 +20,17 @@ type upstreamTool struct {
 	AllowMissingInputSchema bool
 }
 
+type upstreamToolCallResult struct {
+	Blocks []rawMCPContentBlock
+}
+
+type rawMCPContentBlock struct {
+	Type      string
+	Kind      string
+	Payload   map[string]any
+	Malformed bool
+}
+
 func writeUpstreamRPCRequest(writer *bufio.Writer, method, id string, params map[string]any) error {
 	req := map[string]any{
 		"jsonrpc": "2.0",
@@ -111,6 +122,70 @@ func readMCPPayload(reader *bufio.Reader) ([]byte, error) {
 		default:
 			return readFramedPayload(reader)
 		}
+	}
+}
+
+func parseUpstreamCallResult(result any) (upstreamToolCallResult, error) {
+	payload, ok := result.(map[string]any)
+	if !ok {
+		data, err := json.Marshal(result)
+		if err != nil {
+			return upstreamToolCallResult{}, err
+		}
+		return upstreamToolCallResult{Blocks: []rawMCPContentBlock{textRawMCPContentBlock(string(data))}}, nil
+	}
+	if isError, _ := payload["isError"].(bool); isError {
+		return upstreamToolCallResult{}, errors.New("upstream tool returned error")
+	}
+	content, ok := payload["content"].([]any)
+	if !ok || len(content) == 0 {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return upstreamToolCallResult{}, err
+		}
+		return upstreamToolCallResult{Blocks: []rawMCPContentBlock{textRawMCPContentBlock(string(data))}}, nil
+	}
+	blocks := parseRawMCPContentBlocks(content)
+	return upstreamToolCallResult{Blocks: blocks}, nil
+}
+
+func parseRawMCPContentBlocks(content any) []rawMCPContentBlock {
+	switch typed := content.(type) {
+	case []any:
+		blocks := make([]rawMCPContentBlock, 0, len(typed))
+		for _, item := range typed {
+			blocks = append(blocks, parseRawMCPContentBlock(item))
+		}
+		return blocks
+	case map[string]any:
+		return []rawMCPContentBlock{parseRawMCPContentBlock(typed)}
+	default:
+		return []rawMCPContentBlock{{Type: "unknown", Kind: "unknown", Malformed: true}}
+	}
+}
+
+func parseRawMCPContentBlock(item any) rawMCPContentBlock {
+	block, ok := item.(map[string]any)
+	if !ok {
+		return rawMCPContentBlock{Type: "unknown", Kind: "unknown", Malformed: true}
+	}
+	blockType, _ := block["type"].(string)
+	blockType = strings.TrimSpace(blockType)
+	return rawMCPContentBlock{
+		Type:    blockType,
+		Kind:    canonicalMCPContentKind(blockType),
+		Payload: cloneContentBlock(block),
+	}
+}
+
+func textRawMCPContentBlock(text string) rawMCPContentBlock {
+	return rawMCPContentBlock{
+		Type: "text",
+		Kind: "text",
+		Payload: map[string]any{
+			"type": "text",
+			"text": text,
+		},
 	}
 }
 

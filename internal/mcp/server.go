@@ -384,7 +384,7 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 			},
 		}
 	case "tools/call":
-		resp, err := s.handleToolsCall(req, session)
+		content, err := s.handleToolsCall(req, session)
 		if err != nil {
 			return &rpcResponse{
 				JSONRPC: "2.0",
@@ -399,7 +399,7 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 			JSONRPC: "2.0",
 			ID:      parseRPCID(req.ID),
 			Result: map[string]any{
-				"content": []map[string]string{{"type": "text", "text": resp}},
+				"content": content,
 				"isError": false,
 			},
 		}
@@ -418,10 +418,10 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 	}
 }
 
-func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (string, error) {
+func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) ([]map[string]any, error) {
 	name, args, err := parseToolCallParams(req.Params)
 	if err != nil {
-		return "", errors.New("invalid params")
+		return nil, errors.New("invalid params")
 	}
 	if session != nil && s.isForwardedTool(canonicalToolName(name)) {
 		resp := s.handleForwardedToolWithSession(Request{
@@ -431,9 +431,9 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 			Ctx:    req.Ctx,
 		}, session)
 		if resp.Error != "" {
-			return "", errors.New(toolErrorMessage(canonicalToolName(name), resp.Error))
+			return nil, errors.New(toolErrorMessage(canonicalToolName(name), resp.Error))
 		}
-		return formatToolResult(canonicalToolName(name), resp.Result)
+		return formatToolResultContent(canonicalToolName(name), resp.Result)
 	}
 	if len(args) == 0 {
 		args = []byte(`{}`)
@@ -446,9 +446,9 @@ func (s *Server) handleToolsCall(req rpcRequest, session *downstreamSession) (st
 	}
 	legacyResp := s.handleRequestWithSession(legacyReq, session)
 	if legacyResp.Error != "" {
-		return "", errors.New(toolErrorMessage(canonicalToolName(name), legacyResp.Error))
+		return nil, errors.New(toolErrorMessage(canonicalToolName(name), legacyResp.Error))
 	}
-	return formatToolResult(canonicalToolName(name), legacyResp.Result)
+	return formatToolResultContent(canonicalToolName(name), legacyResp.Result)
 }
 
 func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
@@ -683,13 +683,17 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	}
 	resp.ExecutionMode = "mcp_forwarded"
 	resp.ReportPath = ""
-	redacted := redactForwardedOutput(s.logger.redactor, output)
-	scanned := s.scanForwardedResponse(redacted, resp.Obligations, actionReq, tool)
-	if scanned.Denied {
+	governed := s.governForwardedContent(output, resp.Obligations, actionReq, tool)
+	if governed.Denied {
 		return Response{ID: req.ID, Error: responseScanDeniedError}
 	}
-	resp.Output, resp.Truncated = limitForwardedOutput(scanned.Text, resp.Obligations)
+	resp.Output = governed.Text
+	resp.Truncated = governed.Truncated
+	if len(governed.Blocks) > 0 {
+		resp.MCPContentBlocks = governed.Blocks
+	}
 	resp.Obligations = nil
+	s.recordMCPContentBlocks(actionReq, tool, resp, governed)
 	return Response{ID: req.ID, Result: resp}
 }
 

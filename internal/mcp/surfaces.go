@@ -430,6 +430,12 @@ func (s *Server) handleSamplingRPC(req rpcRequest, session *downstreamSession, s
 	if resp == nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: "downstream sampling returned no response"}}
 	}
+	if denied, governedResp := s.governSamplingResponseContent(resp, actionResp, serverName); denied {
+		governedResp.ID = parseRPCID(req.ID)
+		return governedResp
+	} else if governedResp != nil {
+		resp = governedResp
+	}
 	resp.JSONRPC = "2.0"
 	resp.ID = parseRPCID(req.ID)
 	return resp
