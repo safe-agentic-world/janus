@@ -19,6 +19,7 @@ This document defines the `nomos policy explain` output contract.
 - `assurance_level`
 - `obligations_preview`
 - `exec_authorization` (`process.exec` only)
+- `argument_preview` (`mcp.call` only)
 
 For non-allow outcomes, Nomos also emits:
 
@@ -80,6 +81,12 @@ For `process.exec`, Nomos emits an `exec_authorization` object with:
 - `conflict`
 
 This keeps exec explain output explicit without exposing raw argv payloads or broader policy internals.
+
+## argument_preview
+
+For `mcp.call`, Nomos emits the same redacted canonical argument preview used by approval records.
+
+The preview is derived from normalized `params.tool_arguments`, includes `tool_arguments_hash` and `params_hash`, and is size-capped. It is informational only; explain output does not create approvals, execute actions, or re-evaluate a modified request.
 
 ## minimal_allowing_change
 

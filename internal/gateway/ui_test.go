@@ -45,17 +45,18 @@ func TestUITraceRejectsAnonymousAccess(t *testing.T) {
 func TestUIApprovalsListAndDecisionFlow(t *testing.T) {
 	gw := newUITestGateway(t)
 	_, err := gw.approvals.CreateOrGetPending(context.Background(), approval.PendingRequest{
-		Fingerprint: "fp1",
-		ScopeType:   approval.ScopeFingerprint,
-		ScopeKey:    "fp1",
-		TraceID:     "trace-ui-1",
-		ActionID:    "act-ui-1",
-		ActionType:  "net.http_request",
-		Resource:    "url://shop.example.com/refunds/ord-1",
-		ParamsHash:  "params1",
-		Principal:   "system",
-		Agent:       "nomos",
-		Environment: "dev",
+		Fingerprint:         "fp1",
+		ScopeType:           approval.ScopeFingerprint,
+		ScopeKey:            "fp1",
+		TraceID:             "trace-ui-1",
+		ActionID:            "act-ui-1",
+		ActionType:          "net.http_request",
+		Resource:            "url://shop.example.com/refunds/ord-1",
+		ParamsHash:          "params1",
+		ArgumentPreviewJSON: `{"kind":"mcp_call_arguments","tool_arguments":{"authorization":"Bearer very-secret-token","order_id":"ORD-1"}}`,
+		Principal:           "system",
+		Agent:               "nomos",
+		Environment:         "dev",
 	})
 	if err != nil {
 		t.Fatalf("create pending approval: %v", err)
@@ -79,6 +80,12 @@ func TestUIApprovalsListAndDecisionFlow(t *testing.T) {
 	}
 	if listPayload.Approvals[0].ApprovalID == "" {
 		t.Fatal("expected approval id")
+	}
+	if len(listPayload.Approvals[0].ArgumentPreview) == 0 || !strings.Contains(string(listPayload.Approvals[0].ArgumentPreview), "ORD-1") {
+		t.Fatalf("expected argument preview in approval list, got %+v", listPayload.Approvals[0])
+	}
+	if strings.Contains(listW.Body.String(), "very-secret-token") {
+		t.Fatalf("approval list leaked unredacted argument preview: %s", listW.Body.String())
 	}
 
 	decideReq := httptest.NewRequest(http.MethodPost, "/api/ui/approvals/decide", strings.NewReader(`{"approval_id":"`+listPayload.Approvals[0].ApprovalID+`","decision":"approve"}`))
@@ -193,6 +200,24 @@ func TestUIStaticShellServesIndex(t *testing.T) {
 	}
 }
 
+func TestUIStaticAppRendersArgumentPreview(t *testing.T) {
+	gw := newUITestGateway(t)
+	req := httptest.NewRequest(http.MethodGet, "/ui/app.js", nil)
+	w := httptest.NewRecorder()
+
+	gw.handleUIStatic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"argument_preview", "Forwarded arguments", "details"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected app.js to render %q in argument preview flow, got %s", want, body)
+		}
+	}
+}
+
 func TestUITraceListAndDetail(t *testing.T) {
 	gw := newUITestGateway(t)
 	sqlitePath := audit.FirstSQLiteSinkPath(gw.cfg.Audit.Sink)
@@ -287,6 +312,27 @@ func TestUIExplainDoesNotExecuteActions(t *testing.T) {
 	}
 	if before != after {
 		t.Fatalf("expected explain-only call not to write audit events: before=%d after=%d", before, after)
+	}
+}
+
+func TestUIExplainIncludesRedactedMCPArgumentPreview(t *testing.T) {
+	gw := newUITestGateway(t)
+	body := `{"schema_version":"v1","action_id":"explain-ui-mcp-1","action_type":"mcp.call","resource":"mcp://retail/refund.request","params":{"upstream_server":"retail","upstream_tool":"refund.request","tool_arguments":{"authorization":"Bearer very-secret-token","order_id":"ORD-1001"},"tool_arguments_hash":"hash","tool_schema_validated":true},"principal":"system","agent":"nomos","environment":"dev","context":{"extensions":{}},"trace_id":"trace-explain-ui-mcp-1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/ui/explain", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer ui-key")
+	w := httptest.NewRecorder()
+
+	gw.handleUIExplain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "argument_preview") || !strings.Contains(respBody, "ORD-1001") {
+		t.Fatalf("expected mcp argument preview, got %s", respBody)
+	}
+	if strings.Contains(respBody, "very-secret-token") {
+		t.Fatalf("expected redacted mcp argument preview, got %s", respBody)
 	}
 }
 

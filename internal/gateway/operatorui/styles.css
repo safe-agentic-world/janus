@@ -135,6 +135,16 @@ button[disabled] {
   margin-bottom: 4px;
 }
 
+.argument-preview {
+  margin-top: 10px;
+}
+
+.argument-preview summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 700;
+}
+
 .badge {
   display: inline-block;
   margin-top: 6px;
@@ -160,6 +170,13 @@ button[disabled] {
   border-radius: 14px;
   background: #f7f2ea;
   border: 1px solid #eadfce;
+}
+
+.json.compact {
+  min-height: 0;
+  margin-top: 8px;
+  max-height: 220px;
+  font: 0.85rem/1.35 "Courier New", monospace;
 }
 
 .editor {

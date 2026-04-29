@@ -14,6 +14,22 @@ Nomos binds approvals to deterministic targets so an approval for one normalized
 
 Any change to normalized inputs (including params) produces a new fingerprint and requires a new approval.
 
+## MCP Argument Preview
+
+For approval-gated `mcp.call` actions, approval records include an `argument_preview_json` payload.
+
+The preview is derived from the normalized canonical `params.tool_arguments` field, the same canonical params blob used for `action_fingerprint` and `params_hash`.
+
+Preview guarantees:
+
+- only `mcp.call` approvals include argument previews; non-MCP approvals are unchanged
+- secrets are redacted before storage and rendering
+- known sensitive argument fields such as authorization, cookies, tokens, API keys, passwords, credentials, and private keys are replaced with `[REDACTED]`
+- previews are size-capped and mark `truncated: true` when Nomos cannot safely render the full argument shape
+- `tool_arguments_hash` and `params_hash` remain visible so operators can bind what they see to the canonical action that will execute
+
+Approval previews are presentation data only. Operator UI, CLI, and explain rendering do not re-evaluate policy and do not provide an alternate execution path.
+
 ## Scope
 
 Nomos supports two narrowly scoped bindings:
@@ -25,7 +41,7 @@ Approvals are never global.
 ## Resume Flow
 
 1. Policy returns `REQUIRE_APPROVAL`.
-2. Nomos persists a pending approval with TTL in sqlite.
+2. Nomos persists a pending approval with TTL in sqlite, including a redacted MCP argument preview when the action is `mcp.call`.
 3. External approver records `APPROVE` or `DENY` via approval endpoint/webhook.
 4. Agent retries the same action with `context.extensions.approval = {"approval_id":"..."}`.
 5. Nomos recomputes normalized action and fingerprint and only resumes when approval binding matches and TTL is valid.
@@ -52,6 +68,16 @@ Teams payload schema:
 - `comment` (string, optional)
 
 Unknown fields are rejected for deterministic validation behavior.
+
+## Approval CLI
+
+Operators can inspect pending approvals with:
+
+```bash
+nomos approvals list --store ./nomos-approvals.db
+```
+
+The JSON output includes `argument_preview` for `mcp.call` approvals and omits it for non-MCP approvals.
 
 ## Params Patch (Future)
 

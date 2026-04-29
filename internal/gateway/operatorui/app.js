@@ -72,6 +72,7 @@ function renderApprovals(items) {
       </div>
       <button type="button">Inspect</button>
     `;
+    appendArgumentPreview(node.querySelector(".approval-copy"), item.argument_preview);
     node.querySelector("button").addEventListener("click", async () => {
       selectedApproval = item;
       selectedActionId = item.action_id;
@@ -81,6 +82,22 @@ function renderApprovals(items) {
     });
     approvalsEl.appendChild(node);
   }
+}
+
+function appendArgumentPreview(container, preview) {
+  if (!preview) {
+    return;
+  }
+  const details = document.createElement("details");
+  details.className = "argument-preview";
+  const summary = document.createElement("summary");
+  summary.textContent = "Forwarded arguments";
+  const pre = document.createElement("pre");
+  pre.className = "json compact";
+  pre.textContent = pretty(preview);
+  details.appendChild(summary);
+  details.appendChild(pre);
+  container.appendChild(details);
 }
 
 async function loadReadiness() {
