@@ -334,23 +334,32 @@ func otlpLogPayload(event Event) map[string]any {
 }
 
 func otlpMetricPayload(metric Metric) map[string]any {
+	now := uint64(time.Now().UTC().UnixNano())
 	dataPoint := map[string]any{
-		"asInt":             metric.Value,
-		"timeUnixNano":      uint64(time.Now().UTC().UnixNano()),
+		"timeUnixNano":      now,
 		"attributes":        otlpStringMapAttributes(metric.Attributes),
-		"startTimeUnixNano": uint64(time.Now().UTC().UnixNano()),
+		"startTimeUnixNano": now,
 	}
 	metricBody := map[string]any{
 		"name": metric.Name,
 	}
 	switch strings.TrimSpace(metric.Kind) {
 	case "counter":
+		dataPoint["asInt"] = metric.Value
 		metricBody["sum"] = map[string]any{
 			"aggregationTemporality": 2,
 			"isMonotonic":            true,
 			"dataPoints":             []any{dataPoint},
 		}
+	case "histogram":
+		dataPoint["count"] = 1
+		dataPoint["sum"] = float64(metric.Value)
+		metricBody["histogram"] = map[string]any{
+			"aggregationTemporality": 2,
+			"dataPoints":             []any{dataPoint},
+		}
 	default:
+		dataPoint["asInt"] = metric.Value
 		metricBody["gauge"] = map[string]any{
 			"dataPoints": []any{dataPoint},
 		}

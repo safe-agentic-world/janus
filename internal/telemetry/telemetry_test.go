@@ -131,3 +131,50 @@ func TestOTLPExporterPostsRedactedSignals(t *testing.T) {
 		t.Fatalf("expected redaction marker in otlp payload, got %s", string(traceJSON))
 	}
 }
+
+func TestOTLPExporterPostsHistogramMetrics(t *testing.T) {
+	requests := map[string][]map[string]any{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		requests[r.URL.Path] = append(requests[r.URL.Path], body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	exporter, err := NewExporter(Config{
+		Enabled: true,
+		Sink:    "otlp:" + server.URL,
+	}, redact.DefaultRedactor())
+	if err != nil {
+		t.Fatalf("new exporter: %v", err)
+	}
+
+	err = exporter.ExportMetric(Metric{
+		SignalType: "metric",
+		Name:       "nomos.mcp.upstream.latency_ms",
+		Kind:       "histogram",
+		Value:      42,
+		TraceID:    "trace-histogram",
+		Attributes: map[string]string{"upstream_server": "retail"},
+	})
+	if err != nil {
+		t.Fatalf("export histogram metric: %v", err)
+	}
+	if len(requests["/v1/metrics"]) != 1 {
+		t.Fatalf("expected 1 metric export, got %d", len(requests["/v1/metrics"]))
+	}
+	body, err := json.Marshal(requests["/v1/metrics"][0])
+	if err != nil {
+		t.Fatalf("marshal metric body: %v", err)
+	}
+	if !strings.Contains(string(body), `"histogram"`) {
+		t.Fatalf("expected histogram OTLP payload, got %s", string(body))
+	}
+	if !strings.Contains(string(body), `"sum":42`) {
+		t.Fatalf("expected histogram sample sum, got %s", string(body))
+	}
+}

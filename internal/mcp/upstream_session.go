@@ -444,10 +444,12 @@ func (c *upstreamConn) timeoutOrDefault(timeout, fallback time.Duration) time.Du
 
 type upstreamSession struct {
 	config         UpstreamServerConfig
+	id             string
 	logger         *runtimeLogger
 	onNotification func(config UpstreamServerConfig, method string, params json.RawMessage)
 	breaker        *upstreamBreaker
 	credentials    *upstreamCredentialManager
+	emitter        *telemetry.Emitter
 
 	mu                sync.Mutex
 	callMu            sync.Mutex
@@ -466,16 +468,20 @@ func newUpstreamSession(config UpstreamServerConfig, logger *runtimeLogger, noti
 	if clock == nil {
 		clock = time.Now
 	}
-	return &upstreamSession{
+	session := &upstreamSession{
 		config:         config,
+		id:             nextUpstreamSessionID(config.Name),
 		logger:         logger,
 		onNotification: notifyFn,
 		breaker:        newUpstreamBreaker(config.Name, config.breakerConfig(), clock, emitter),
 		credentials:    newUpstreamCredentialManager(config, id, credentialBroker, recorder, clock),
+		emitter:        emitter,
 		clock:          clock,
 		backoffInitial: defaultUpstreamBackoffInitial,
 		backoffMax:     defaultUpstreamBackoffMax,
 	}
+	emitUpstreamLifecycleObservability(session.emitter, session.logger, session.config, session.id, "created", "success", nil)
+	return session
 }
 
 func (s *upstreamSession) connForTest() *upstreamConn {
@@ -569,30 +575,39 @@ func (s *upstreamSession) ensureConn(material upstreamCredentialMaterial) (upstr
 	s.mu.Unlock()
 
 	startConfig := upstreamConfigWithCredentialMaterial(s.config, material)
+	connectStarted := s.clock()
 	conn, startErr := startUpstreamTransport(startConfig, func(method string, params json.RawMessage) {
 		if s.onNotification != nil {
 			s.onNotification(s.config, method, params)
 		}
 	})
+	connectElapsed := s.clock().Sub(connectStarted)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.starting = false
 	if s.closed {
 		if conn != nil {
 			go conn.close()
 		}
+		s.mu.Unlock()
+		emitUpstreamLifecycleObservability(s.emitter, s.logger, s.config, s.id, "connect", "error", errUpstreamClosed)
 		return nil, errUpstreamClosed
 	}
 	if startErr != nil {
 		s.attempts++
 		s.lastFailureAt = s.clock()
+		s.mu.Unlock()
+		emitUpstreamLifecycleObservability(s.emitter, s.logger, s.config, s.id, "connect", "error", startErr)
+		emitUpstreamRequestObservability(s.emitter, s.logger, s.config, s.id, "initialize", connectElapsed, startErr)
 		return nil, startErr
 	}
 	s.conn = conn
 	s.envShapeHashValue = conn.envShapeHash()
 	s.attempts = 0
 	s.lastFailureAt = time.Time{}
+	s.mu.Unlock()
+	emitUpstreamLifecycleObservability(s.emitter, s.logger, s.config, s.id, "connect", "success", nil)
+	emitUpstreamRequestObservability(s.emitter, s.logger, s.config, s.id, "initialize", connectElapsed, nil)
 	return conn, nil
 }
 
@@ -601,8 +616,10 @@ func (s *upstreamSession) call(ctx context.Context, method string, params map[st
 }
 
 func (s *upstreamSession) callWithRequests(ctx context.Context, method string, params map[string]any, handler upstreamRequestHandler) (any, error) {
+	started := s.clock()
 	permit, err := s.breaker.beforeCall()
 	if err != nil {
+		emitUpstreamRequestObservability(s.emitter, s.logger, s.config, s.id, method, s.clock().Sub(started), err)
 		return nil, err
 	}
 	s.callMu.Lock()
@@ -610,18 +627,21 @@ func (s *upstreamSession) callWithRequests(ctx context.Context, method string, p
 	material, refreshed, err := s.ensureCredentialMaterial()
 	if err != nil {
 		s.breaker.forceOpen(upstreamFailureCredential)
+		emitUpstreamRequestObservability(s.emitter, s.logger, s.config, s.id, method, s.clock().Sub(started), err)
 		return nil, err
 	}
 	s.applyCredentialRefresh(material, refreshed)
 	conn, err := s.ensureConn(material)
 	if err != nil {
 		s.breaker.afterCall(permit, err)
+		emitUpstreamRequestObservability(s.emitter, s.logger, s.config, s.id, method, s.clock().Sub(started), err)
 		return nil, err
 	}
 	conn.setRequestHandler(handler)
 	defer conn.setRequestHandler(nil)
 	result, callErr := conn.callMethod(ctx, s.timeoutForMethod(ctx, method), method, params)
 	s.breaker.afterCall(permit, callErr)
+	emitUpstreamRequestObservability(s.emitter, s.logger, s.config, s.id, method, s.clock().Sub(started), callErr)
 	if callErr == nil {
 		return result, nil
 	}
@@ -707,6 +727,7 @@ func (s *upstreamSession) close() {
 	if s.credentials != nil {
 		s.credentials.close()
 	}
+	emitUpstreamLifecycleObservability(s.emitter, s.logger, s.config, s.id, "closed", "success", nil)
 }
 
 type upstreamNotificationEvent struct {
