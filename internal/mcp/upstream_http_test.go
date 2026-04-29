@@ -34,6 +34,7 @@ type upstreamHTTPTestServer struct {
 	httpServer         *httptest.Server
 	streaming          bool
 	hangStreamResponse bool
+	authMu             sync.RWMutex
 	authHeader         string
 	authValue          string
 	toolOutput         string
@@ -82,8 +83,16 @@ func newUpstreamHTTPTestServer(t *testing.T, streaming bool, tlsMode string) *up
 }
 
 func (s *upstreamHTTPTestServer) requireAuth(header, value string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 	s.authHeader = header
 	s.authValue = value
+}
+
+func (s *upstreamHTTPTestServer) currentAuth() (string, string) {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.authHeader, s.authValue
 }
 
 func (s *upstreamHTTPTestServer) endpoint() string {
@@ -94,8 +103,9 @@ func (s *upstreamHTTPTestServer) handle(w http.ResponseWriter, r *http.Request) 
 	if got := r.Header.Get("MCP-Protocol-Version"); got == upstreamHTTPProtocolVersion {
 		s.protoCalls.Add(1)
 	}
-	if s.authHeader != "" {
-		if r.Header.Get(s.authHeader) != s.authValue {
+	authHeader, authValue := s.currentAuth()
+	if authHeader != "" {
+		if r.Header.Get(authHeader) != authValue {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -218,8 +228,9 @@ func (s *upstreamHTTPTestServer) handleLegacySSEPost(w http.ResponseWriter, r *h
 	if got := r.Header.Get("MCP-Protocol-Version"); got == upstreamHTTPProtocolVersion {
 		s.protoCalls.Add(1)
 	}
-	if s.authHeader != "" {
-		if r.Header.Get(s.authHeader) != s.authValue {
+	authHeader, authValue := s.currentAuth()
+	if authHeader != "" {
+		if r.Header.Get(authHeader) != authValue {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
