@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -23,6 +24,7 @@ import (
 
 type Service struct {
 	policy                *policy.Engine
+	policyEngine          atomic.Pointer[policy.Engine]
 	externalPolicy        ExternalPolicyEvaluator
 	fsReader              *executor.FSReader
 	fsWriter              *executor.FSWriter
@@ -61,8 +63,7 @@ func New(policyEngine *policy.Engine, fsReader *executor.FSReader, fsWriter *exe
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{
-		policy:                policyEngine,
+	svc := &Service{
 		fsReader:              fsReader,
 		fsWriter:              fsWriter,
 		patcher:               patcher,
@@ -77,6 +78,31 @@ func New(policyEngine *policy.Engine, fsReader *executor.FSReader, fsWriter *exe
 		execCompatibilityMode: policy.ExecCompatibilityLegacyAllowlistFallback,
 		now:                   now,
 	}
+	svc.policy = policyEngine
+	svc.policyEngine.Store(policyEngine)
+	return svc
+}
+
+func (s *Service) currentPolicyEngine() *policy.Engine {
+	if s == nil {
+		return nil
+	}
+	if engine := s.policyEngine.Load(); engine != nil {
+		return engine
+	}
+	return s.policy
+}
+
+func (s *Service) SetPolicyEngine(engine *policy.Engine) error {
+	if s == nil {
+		return errors.New("service not initialized")
+	}
+	if engine == nil {
+		return errors.New("policy engine is required")
+	}
+	s.policy = engine
+	s.policyEngine.Store(engine)
+	return nil
 }
 
 func (s *Service) SetAssuranceLevel(level string) {
@@ -131,7 +157,8 @@ func (s *Service) SetExecCompatibilityMode(mode string) {
 }
 
 func (s *Service) Process(actionInput action.Action) (action.Response, error) {
-	if s.policy == nil || s.recorder == nil || s.redactor == nil {
+	engine := s.currentPolicyEngine()
+	if engine == nil || s.recorder == nil || s.redactor == nil {
 		return action.Response{}, errors.New("service not initialized")
 	}
 	started := s.now().UTC()
@@ -194,9 +221,9 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 				ReasonCode:          "RATE_LIMIT_EXCEEDED",
 				MatchedRuleIDs:      []string{},
 				Obligations:         map[string]any{},
-				PolicyBundleHash:    s.policy.BundleHash(),
-				PolicyBundleSources: s.policy.BundleSources(),
-				PolicyBundleInputs:  s.policy.BundleInputs(),
+				PolicyBundleHash:    engine.BundleHash(),
+				PolicyBundleSources: engine.BundleSources(),
+				PolicyBundleInputs:  engine.BundleInputs(),
 			}
 			auditCtx.decision = decision
 			auditCtx.sandboxMode, auditCtx.networkMode = visibilityModes(decision.Obligations, s.sandboxProfile, normalized.ActionType)
@@ -223,7 +250,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		}
 	}
 
-	decision := s.policy.Evaluate(normalized)
+	decision := engine.Evaluate(normalized)
 	if s.externalPolicy != nil {
 		externalDecision, err := s.externalPolicy.Evaluate(normalized)
 		if err != nil {

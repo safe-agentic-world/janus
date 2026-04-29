@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -714,18 +715,26 @@ type upstreamNotificationEvent struct {
 	params json.RawMessage
 }
 
+type upstreamReloadResult struct {
+	RegistryVersion uint64
+	Added           []string
+	Removed         []string
+	Kept            []string
+}
+
 type upstreamSupervisor struct {
 	logger  *runtimeLogger
 	clock   func() time.Time
 	emitter *telemetry.Emitter
 
-	mu            sync.RWMutex
-	sessions      map[string]*upstreamSession
-	serversByName map[string]UpstreamServerConfig
-	toolsByName   map[string]upstreamTool
-	tools         []upstreamTool
-	closed        bool
-	refreshHook   func(server string)
+	mu              sync.RWMutex
+	sessions        map[string]*upstreamSession
+	serversByName   map[string]UpstreamServerConfig
+	toolsByName     map[string]upstreamTool
+	tools           []upstreamTool
+	registryVersion uint64
+	closed          bool
+	refreshHook     func(server string)
 
 	notifyCh   chan upstreamNotificationEvent
 	notifyDone chan struct{}
@@ -734,26 +743,28 @@ type upstreamSupervisor struct {
 
 func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger, emitter *telemetry.Emitter, id identity.VerifiedIdentity, credentialBroker UpstreamCredentialBroker, recorder audit.Recorder) (*upstreamSupervisor, error) {
 	sup := &upstreamSupervisor{
-		logger:        logger,
-		clock:         time.Now,
-		emitter:       emitter,
-		sessions:      map[string]*upstreamSession{},
-		serversByName: map[string]UpstreamServerConfig{},
-		toolsByName:   map[string]upstreamTool{},
-		tools:         []upstreamTool{},
-		notifyCh:      make(chan upstreamNotificationEvent, upstreamNotifyBufferSize),
-		notifyDone:    make(chan struct{}),
-		closeCh:       make(chan struct{}),
+		logger:          logger,
+		clock:           time.Now,
+		emitter:         emitter,
+		sessions:        map[string]*upstreamSession{},
+		serversByName:   map[string]UpstreamServerConfig{},
+		toolsByName:     map[string]upstreamTool{},
+		tools:           []upstreamTool{},
+		registryVersion: 1,
+		notifyCh:        make(chan upstreamNotificationEvent, upstreamNotifyBufferSize),
+		notifyDone:      make(chan struct{}),
+		closeCh:         make(chan struct{}),
 	}
 	go sup.notificationLoop()
 	if len(configs) == 0 {
 		return sup, nil
 	}
+	configs, err := normalizeUpstreamRegistryConfigs(configs)
+	if err != nil {
+		sup.close()
+		return nil, err
+	}
 	for _, config := range configs {
-		if _, exists := sup.serversByName[config.Name]; exists {
-			sup.close()
-			return nil, fmt.Errorf("duplicate upstream mcp server name %q", config.Name)
-		}
 		session := newUpstreamSession(config, logger, sup.handleNotification, sup.clock, sup.emitter, id, credentialBroker, recorder)
 		sup.serversByName[config.Name] = config
 		sup.sessions[config.Name] = session
@@ -774,6 +785,24 @@ func newUpstreamSupervisor(configs []UpstreamServerConfig, logger *runtimeLogger
 		}
 	}
 	return sup, nil
+}
+
+func normalizeUpstreamRegistryConfigs(configs []UpstreamServerConfig) ([]UpstreamServerConfig, error) {
+	normalized := make([]UpstreamServerConfig, 0, len(configs))
+	seen := make(map[string]struct{}, len(configs))
+	for _, config := range configs {
+		name := strings.TrimSpace(config.Name)
+		if name == "" {
+			return nil, errors.New("upstream mcp server name is required")
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("duplicate upstream mcp server name %q", name)
+		}
+		config.Name = name
+		seen[name] = struct{}{}
+		normalized = append(normalized, config)
+	}
+	return normalized, nil
 }
 
 func (s *upstreamSupervisor) handleNotification(config UpstreamServerConfig, method string, params json.RawMessage) {
@@ -874,11 +903,173 @@ func (s *upstreamSupervisor) enumerateTools(ctx context.Context, serverName stri
 	if !ok || !configOK {
 		return nil, fmt.Errorf("upstream mcp session missing for %q", serverName)
 	}
+	return enumerateToolsForSession(ctx, config, session)
+}
+
+func enumerateToolsForSession(ctx context.Context, config UpstreamServerConfig, session *upstreamSession) ([]upstreamTool, error) {
+	if session == nil {
+		return nil, fmt.Errorf("upstream mcp session missing for %q", config.Name)
+	}
 	result, err := session.call(ctx, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
 	return parseUpstreamTools(config, result)
+}
+
+func (s *upstreamSupervisor) registryVersionSnapshot() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registryVersion
+}
+
+func (s *upstreamSupervisor) reload(ctx context.Context, configs []UpstreamServerConfig, id identity.VerifiedIdentity, credentialBroker UpstreamCredentialBroker, recorder audit.Recorder) (upstreamReloadResult, error) {
+	if s == nil {
+		return upstreamReloadResult{}, errors.New("upstream supervisor not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	configs, err := normalizeUpstreamRegistryConfigs(configs)
+	if err != nil {
+		return upstreamReloadResult{}, err
+	}
+	configsByName := make(map[string]UpstreamServerConfig, len(configs))
+	for _, config := range configs {
+		configsByName[config.Name] = config
+	}
+
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return upstreamReloadResult{}, errUpstreamClosed
+	}
+	existingSessions := make(map[string]*upstreamSession, len(s.sessions))
+	for name, session := range s.sessions {
+		existingSessions[name] = session
+	}
+	existingConfigs := make(map[string]UpstreamServerConfig, len(s.serversByName))
+	for name, config := range s.serversByName {
+		existingConfigs[name] = config
+	}
+	existingToolsByServer := make(map[string][]upstreamTool, len(s.serversByName))
+	for _, tool := range s.tools {
+		existingToolsByServer[tool.ServerName] = append(existingToolsByServer[tool.ServerName], tool)
+	}
+	currentVersion := s.registryVersion
+	s.mu.RUnlock()
+
+	result := upstreamReloadResult{RegistryVersion: currentVersion}
+	replaced := make(map[string]bool)
+	newConfigs := make([]UpstreamServerConfig, 0)
+	for _, config := range configs {
+		existing, ok := existingConfigs[config.Name]
+		switch {
+		case !ok:
+			result.Added = append(result.Added, config.Name)
+			newConfigs = append(newConfigs, config)
+		case reflect.DeepEqual(existing, config):
+			result.Kept = append(result.Kept, config.Name)
+		default:
+			replaced[config.Name] = true
+			result.Added = append(result.Added, config.Name)
+			result.Removed = append(result.Removed, config.Name)
+			newConfigs = append(newConfigs, config)
+		}
+	}
+	for name := range existingConfigs {
+		if _, ok := configsByName[name]; !ok {
+			result.Removed = append(result.Removed, name)
+		}
+	}
+
+	newSessions := make(map[string]*upstreamSession, len(newConfigs))
+	newToolsByServer := make(map[string][]upstreamTool, len(newConfigs))
+	closeNewSessions := func() {
+		for _, session := range newSessions {
+			session.close()
+		}
+	}
+	for _, config := range newConfigs {
+		session := newUpstreamSession(config, s.logger, s.handleNotification, s.clock, s.emitter, id, credentialBroker, recorder)
+		newSessions[config.Name] = session
+		tools, err := enumerateToolsForSession(ctx, config, session)
+		if err != nil {
+			closeNewSessions()
+			return result, fmt.Errorf("load upstream mcp server %q: %w", config.Name, err)
+		}
+		newToolsByServer[config.Name] = tools
+	}
+
+	finalSessions := make(map[string]*upstreamSession, len(configs))
+	finalConfigs := make(map[string]UpstreamServerConfig, len(configs))
+	finalToolsByName := make(map[string]upstreamTool)
+	finalTools := make([]upstreamTool, 0)
+	for _, config := range configs {
+		session := newSessions[config.Name]
+		tools := newToolsByServer[config.Name]
+		if session == nil {
+			session = existingSessions[config.Name]
+			tools = existingToolsByServer[config.Name]
+		}
+		if session == nil {
+			closeNewSessions()
+			return result, fmt.Errorf("upstream mcp session missing for %q", config.Name)
+		}
+		finalSessions[config.Name] = session
+		finalConfigs[config.Name] = config
+		for _, tool := range tools {
+			if _, exists := finalToolsByName[tool.DownstreamName]; exists {
+				closeNewSessions()
+				return result, fmt.Errorf("duplicate forwarded tool name %q", tool.DownstreamName)
+			}
+			finalToolsByName[tool.DownstreamName] = tool
+			finalTools = append(finalTools, tool)
+		}
+	}
+
+	removedSessions := make([]*upstreamSession, 0)
+	for name, session := range existingSessions {
+		if _, ok := configsByName[name]; !ok || replaced[name] {
+			removedSessions = append(removedSessions, session)
+		}
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		closeNewSessions()
+		return result, errUpstreamClosed
+	}
+	s.sessions = finalSessions
+	s.serversByName = finalConfigs
+	s.toolsByName = finalToolsByName
+	s.tools = finalTools
+	s.registryVersion++
+	result.RegistryVersion = s.registryVersion
+	s.mu.Unlock()
+
+	sort.Strings(result.Added)
+	sort.Strings(result.Removed)
+	sort.Strings(result.Kept)
+	for _, session := range removedSessions {
+		drainRemovedUpstreamSession(session)
+	}
+	return result, nil
+}
+
+func drainRemovedUpstreamSession(session *upstreamSession) {
+	if session == nil {
+		return
+	}
+	go func() {
+		session.callMu.Lock()
+		defer session.callMu.Unlock()
+		session.close()
+	}()
 }
 
 func parseUpstreamTools(config UpstreamServerConfig, result any) ([]upstreamTool, error) {

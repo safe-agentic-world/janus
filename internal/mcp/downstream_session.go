@@ -67,7 +67,8 @@ func newHTTPDownstreamSession(server *Server, id identity.VerifiedIdentity, sess
 func (s *downstreamSession) serve() error {
 	defer close(s.done)
 	defer s.writer.Flush()
-	s.server.logger.ReadyBanner(s.server.identity.Environment, s.server.policyBundleHash, s.server.policyBundleSources, version.Current().Version, s.server.pid)
+	policyBundleHash, policyBundleSources := s.server.policyMetadata()
+	s.server.logger.ReadyBanner(s.server.identity.Environment, policyBundleHash, policyBundleSources, version.Current().Version, s.server.pid)
 	for {
 		payload, mode, err := readStdioPayload(s.reader)
 		if err != nil {

@@ -177,7 +177,7 @@ func (g *Gateway) handleUIReadiness(w http.ResponseWriter, r *http.Request) {
 			report = next
 		}
 	}
-	g.writeUIJSON(w, buildUIReadinessResponse(report, g.cfg, g.policyBundleHash, g.policyBundleSources, g.assuranceLevel, principal))
+	g.writeUIJSON(w, buildUIReadinessResponse(report, g.cfg, g.PolicyBundleHash(), g.PolicyBundleSources(), g.assuranceLevel, principal))
 }
 
 func (g *Gateway) handleUIApprovals(w http.ResponseWriter, r *http.Request) {

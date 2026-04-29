@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 )
+
+var errGatewayPolicyUnavailable = errors.New("gateway policy unavailable")
 
 type explainResponse struct {
 	ActionID              string         `json:"action_id"`
@@ -69,6 +72,10 @@ func (g *Gateway) explainAction(act action.Action) (explainResponse, error) {
 	if err != nil {
 		return explainResponse{}, err
 	}
-	explanation := g.policy.Explain(normalized)
+	state := g.currentPolicyState()
+	if state == nil || state.Engine == nil {
+		return explainResponse{}, errGatewayPolicyUnavailable
+	}
+	explanation := state.Engine.Explain(normalized)
 	return buildExplainResponse(explanation, normalized, g.cfg, g.assuranceLevel), nil
 }

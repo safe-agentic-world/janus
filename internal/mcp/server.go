@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -31,23 +33,57 @@ import (
 )
 
 type Server struct {
-	service             *service.Service
-	approvals           *approval.Store
-	identity            identity.VerifiedIdentity
-	approvalsEnabled    bool
-	sandboxEnabled      bool
-	outputMaxBytes      int
-	outputMaxLines      int
-	policyBundleHash    string
-	policyBundleSources []string
-	assuranceLevel      string
-	upstreamRoutes      []UpstreamRoute
-	upstream            *upstreamSupervisor
-	responseScanner     *responsescan.Scanner
-	telemetry           *telemetry.Emitter
-	logger              *runtimeLogger
-	pid                 int
-	ownsResources       bool
+	service               *service.Service
+	approvals             *approval.Store
+	identity              identity.VerifiedIdentity
+	approvalsEnabled      bool
+	sandboxEnabled        bool
+	outputMaxBytes        int
+	outputMaxLines        int
+	policyBundleHash      string
+	policyBundleSources   []string
+	assuranceLevel        string
+	upstreamRoutes        []UpstreamRoute
+	upstream              *upstreamSupervisor
+	state                 *serverStateHolder
+	reloadMu              *sync.Mutex
+	recorder              audit.Recorder
+	credentialBroker      UpstreamCredentialBroker
+	bundlePaths           []string
+	bundleRoles           []string
+	execCompatibilityMode string
+	responseScanner       *responsescan.Scanner
+	telemetry             *telemetry.Emitter
+	logger                *runtimeLogger
+	pid                   int
+	ownsResources         bool
+}
+
+type serverReloadState struct {
+	PolicyBundleHash    string
+	PolicyBundleSources []string
+	UpstreamRoutes      []UpstreamRoute
+}
+
+type serverStateHolder struct {
+	ptr atomic.Pointer[serverReloadState]
+}
+
+type ReloadOptions struct {
+	BundlePaths    []string
+	RuntimeOptions RuntimeOptions
+	Trigger        string
+}
+
+type ReloadResult struct {
+	Outcome             string   `json:"outcome"`
+	Trigger             string   `json:"trigger"`
+	PolicyBundleHash    string   `json:"policy_bundle_hash"`
+	PolicyBundleSources []string `json:"policy_bundle_sources,omitempty"`
+	RegistryVersion     uint64   `json:"registry_version"`
+	AddedUpstreams      []string `json:"added_upstreams,omitempty"`
+	RemovedUpstreams    []string `json:"removed_upstreams,omitempty"`
+	Error               string   `json:"error,omitempty"`
 }
 
 type Request struct {
@@ -122,6 +158,39 @@ type changeSetParams struct {
 
 const SupportedProtocolVersion = "2024-11-05"
 
+func newServerStateHolder(state *serverReloadState) *serverStateHolder {
+	holder := &serverStateHolder{}
+	holder.store(state)
+	return holder
+}
+
+func newServerReloadState(bundle policy.Bundle, routes []UpstreamRoute) *serverReloadState {
+	return &serverReloadState{
+		PolicyBundleHash:    bundle.Hash,
+		PolicyBundleSources: policy.BundleSourceLabels(bundle),
+		UpstreamRoutes:      append([]UpstreamRoute(nil), routes...),
+	}
+}
+
+func (h *serverStateHolder) load() *serverReloadState {
+	if h == nil {
+		return nil
+	}
+	return h.ptr.Load()
+}
+
+func (h *serverStateHolder) store(state *serverReloadState) {
+	if h == nil || state == nil {
+		return
+	}
+	copied := &serverReloadState{
+		PolicyBundleHash:    state.PolicyBundleHash,
+		PolicyBundleSources: append([]string{}, state.PolicyBundleSources...),
+		UpstreamRoutes:      append([]UpstreamRoute(nil), state.UpstreamRoutes...),
+	}
+	h.ptr.Store(copied)
+}
+
 func NewServer(bundlePath string, identity identity.VerifiedIdentity, workspaceRoot string, maxBytes, maxLines int, approvalsEnabled bool, sandboxEnabled bool, sandboxProfile string) (*Server, error) {
 	return NewServerWithRuntimeOptions(bundlePath, identity, workspaceRoot, maxBytes, maxLines, approvalsEnabled, sandboxEnabled, sandboxProfile, RuntimeOptions{})
 }
@@ -182,24 +251,32 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	if err != nil {
 		return nil, err
 	}
+	state := newServerReloadState(bundle, runtimeOptions.UpstreamRoutes)
 	return &Server{
-		service:             svc,
-		approvals:           approvalStore,
-		identity:            identity,
-		approvalsEnabled:    approvalStore != nil,
-		sandboxEnabled:      sandboxEnabled,
-		outputMaxBytes:      maxBytes,
-		outputMaxLines:      maxLines,
-		policyBundleHash:    bundle.Hash,
-		policyBundleSources: policy.BundleSourceLabels(bundle),
-		assuranceLevel:      "NONE",
-		upstreamRoutes:      append([]UpstreamRoute(nil), runtimeOptions.UpstreamRoutes...),
-		upstream:            upstream,
-		responseScanner:     responseScanner,
-		telemetry:           runtimeOptions.Telemetry,
-		logger:              logger,
-		pid:                 os.Getpid(),
-		ownsResources:       true,
+		service:               svc,
+		approvals:             approvalStore,
+		identity:              identity,
+		approvalsEnabled:      approvalStore != nil,
+		sandboxEnabled:        sandboxEnabled,
+		outputMaxBytes:        maxBytes,
+		outputMaxLines:        maxLines,
+		policyBundleHash:      state.PolicyBundleHash,
+		policyBundleSources:   append([]string{}, state.PolicyBundleSources...),
+		assuranceLevel:        "NONE",
+		upstreamRoutes:        append([]UpstreamRoute(nil), state.UpstreamRoutes...),
+		upstream:              upstream,
+		state:                 newServerStateHolder(state),
+		reloadMu:              &sync.Mutex{},
+		recorder:              recorder,
+		credentialBroker:      runtimeOptions.CredentialBroker,
+		bundlePaths:           append([]string{}, bundlePaths...),
+		bundleRoles:           append([]string{}, runtimeOptions.BundleRoles...),
+		execCompatibilityMode: runtimeOptions.ExecCompatibilityMode,
+		responseScanner:       responseScanner,
+		telemetry:             runtimeOptions.Telemetry,
+		logger:                logger,
+		pid:                   os.Getpid(),
+		ownsResources:         true,
 	}, nil
 }
 
@@ -213,6 +290,33 @@ func (s *Server) CloneForIdentity(id identity.VerifiedIdentity) *Server {
 	return &clone
 }
 
+func (s *Server) currentReloadState() *serverReloadState {
+	if s == nil || s.state == nil {
+		return nil
+	}
+	return s.state.load()
+}
+
+func (s *Server) policyMetadata() (string, []string) {
+	if s == nil {
+		return "", nil
+	}
+	if state := s.currentReloadState(); state != nil {
+		return state.PolicyBundleHash, append([]string{}, state.PolicyBundleSources...)
+	}
+	return s.policyBundleHash, append([]string{}, s.policyBundleSources...)
+}
+
+func (s *Server) currentUpstreamRoutes() []UpstreamRoute {
+	if s == nil {
+		return nil
+	}
+	if state := s.currentReloadState(); state != nil {
+		return append([]UpstreamRoute(nil), state.UpstreamRoutes...)
+	}
+	return append([]UpstreamRoute(nil), s.upstreamRoutes...)
+}
+
 func (s *Server) SetAssuranceLevel(level string) {
 	if s == nil {
 		return
@@ -223,6 +327,158 @@ func (s *Server) SetAssuranceLevel(level string) {
 	}
 	s.assuranceLevel = level
 	s.service.SetAssuranceLevel(level)
+}
+
+func (s *Server) Reload(ctx context.Context, opts ReloadOptions) (ReloadResult, error) {
+	if s == nil || s.service == nil || s.upstream == nil {
+		return ReloadResult{}, errors.New("mcp server not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	trigger := strings.TrimSpace(opts.Trigger)
+	if trigger == "" {
+		trigger = "manual"
+	}
+	if s.reloadMu == nil {
+		s.reloadMu = &sync.Mutex{}
+	}
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	bundlePaths := append([]string{}, opts.BundlePaths...)
+	if len(bundlePaths) == 0 {
+		bundlePaths = append([]string{}, s.bundlePaths...)
+	}
+	if len(bundlePaths) == 0 {
+		err := errors.New("policy bundle path is required")
+		result := s.reloadFailureResult(trigger, err)
+		s.recordReloadAudit(result)
+		return result, err
+	}
+	runtimeOptions := opts.RuntimeOptions
+	if runtimeOptions.ExecCompatibilityMode == "" {
+		runtimeOptions.ExecCompatibilityMode = s.execCompatibilityMode
+	}
+	if len(runtimeOptions.BundleRoles) == 0 && len(s.bundleRoles) > 0 {
+		runtimeOptions.BundleRoles = append([]string{}, s.bundleRoles...)
+	}
+	if runtimeOptions.CredentialBroker == nil {
+		runtimeOptions.CredentialBroker = s.credentialBroker
+	}
+	parsedRuntime, err := ParseRuntimeOptions(runtimeOptions)
+	if err != nil {
+		result := s.reloadFailureResult(trigger, err)
+		s.recordReloadAudit(result)
+		return result, fmt.Errorf("reload validation failed: %w", err)
+	}
+	bundle, err := policy.LoadBundlesWithOptions(bundlePaths, policy.MultiLoadOptions{
+		BundleRoles: parsedRuntime.BundleRoles,
+	})
+	if err != nil {
+		result := s.reloadFailureResult(trigger, err)
+		s.recordReloadAudit(result)
+		return result, fmt.Errorf("reload validation failed: %w", err)
+	}
+	if err := policy.ValidateExecCompatibility(bundle, parsedRuntime.ExecCompatibilityMode); err != nil {
+		result := s.reloadFailureResult(trigger, err)
+		s.recordReloadAudit(result)
+		return result, fmt.Errorf("reload validation failed: %w", err)
+	}
+	nextEngine := policy.NewEngine(bundle)
+	upstreamResult, err := s.upstream.reload(ctx, parsedRuntime.UpstreamServers, s.identity, parsedRuntime.CredentialBroker, s.recorder)
+	if err != nil {
+		result := s.reloadFailureResult(trigger, err)
+		s.recordReloadAudit(result)
+		return result, fmt.Errorf("reload validation failed: %w", err)
+	}
+	if err := s.service.SetPolicyEngine(nextEngine); err != nil {
+		result := s.reloadFailureResult(trigger, err)
+		result.RegistryVersion = upstreamResult.RegistryVersion
+		s.recordReloadAudit(result)
+		return result, err
+	}
+	s.service.SetExecCompatibilityMode(parsedRuntime.ExecCompatibilityMode)
+	nextState := newServerReloadState(bundle, parsedRuntime.UpstreamRoutes)
+	if s.state == nil {
+		s.state = newServerStateHolder(nextState)
+	} else {
+		s.state.store(nextState)
+	}
+	s.policyBundleHash = nextState.PolicyBundleHash
+	s.policyBundleSources = append([]string{}, nextState.PolicyBundleSources...)
+	s.upstreamRoutes = append([]UpstreamRoute(nil), nextState.UpstreamRoutes...)
+	s.bundlePaths = append([]string{}, bundlePaths...)
+	s.bundleRoles = append([]string{}, parsedRuntime.BundleRoles...)
+	s.execCompatibilityMode = parsedRuntime.ExecCompatibilityMode
+	s.credentialBroker = parsedRuntime.CredentialBroker
+
+	result := ReloadResult{
+		Outcome:             "success",
+		Trigger:             trigger,
+		PolicyBundleHash:    nextState.PolicyBundleHash,
+		PolicyBundleSources: append([]string{}, nextState.PolicyBundleSources...),
+		RegistryVersion:     upstreamResult.RegistryVersion,
+		AddedUpstreams:      append([]string{}, upstreamResult.Added...),
+		RemovedUpstreams:    append([]string{}, upstreamResult.Removed...),
+	}
+	s.recordReloadAudit(result)
+	return result, nil
+}
+
+func (s *Server) reloadFailureResult(trigger string, err error) ReloadResult {
+	hash, sources := s.policyMetadata()
+	result := ReloadResult{
+		Outcome:             "failure",
+		Trigger:             trigger,
+		PolicyBundleHash:    hash,
+		PolicyBundleSources: sources,
+		RegistryVersion:     0,
+		Error:               stableMCPReloadError(err),
+	}
+	if s != nil && s.upstream != nil {
+		result.RegistryVersion = s.upstream.registryVersionSnapshot()
+	}
+	return result
+}
+
+func stableMCPReloadError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func (s *Server) recordReloadAudit(result ReloadResult) {
+	if s == nil || s.service == nil {
+		return
+	}
+	metadata := map[string]any{
+		"trigger":          result.Trigger,
+		"outcome":          result.Outcome,
+		"registry_version": result.RegistryVersion,
+	}
+	if len(result.AddedUpstreams) > 0 {
+		metadata["added_upstreams"] = append([]string{}, result.AddedUpstreams...)
+	}
+	if len(result.RemovedUpstreams) > 0 {
+		metadata["removed_upstreams"] = append([]string{}, result.RemovedUpstreams...)
+	}
+	if result.Error != "" {
+		metadata["error"] = result.Error
+	}
+	_ = s.service.RecordAuditEvent(audit.Event{
+		SchemaVersion:       "v1",
+		Timestamp:           time.Now().UTC(),
+		EventType:           "runtime.reload",
+		TraceID:             "runtime.reload",
+		PolicyBundleHash:    result.PolicyBundleHash,
+		PolicyBundleSources: append([]string{}, result.PolicyBundleSources...),
+		Decision:            strings.ToUpper(result.Outcome),
+		Reason:              result.Error,
+		ExecutorMetadata:    metadata,
+		AssuranceLevel:      s.assuranceLevel,
+	})
 }
 
 func (s *Server) Close() error {
@@ -805,7 +1061,7 @@ func (s *Server) handleHTTPRequest(req Request, session *downstreamSession) Resp
 	if err := dec.Decode(&params); err != nil || params.Resource == "" {
 		return Response{ID: req.ID, Error: "invalid_params"}
 	}
-	if err := validateUpstreamRoute(s.upstreamRoutes, params.Resource, params.Method); err != nil {
+	if err := validateUpstreamRoute(s.currentUpstreamRoutes(), params.Resource, params.Method); err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
 	actionReq := action.Request{
@@ -870,7 +1126,8 @@ func (s *Server) handleCapabilities(req Request) Response {
 		}
 		result.ForwardedTools = forwarded
 	}
-	result = service.FinalizeCapabilityEnvelope(result, s.identity, s.policyBundleHash)
+	policyBundleHash, _ := s.policyMetadata()
+	result = service.FinalizeCapabilityEnvelope(result, s.identity, policyBundleHash)
 	return Response{ID: req.ID, Result: result}
 }
 

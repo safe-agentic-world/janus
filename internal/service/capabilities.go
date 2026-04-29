@@ -126,15 +126,22 @@ func actionCapabilityState(actionType string, actionCapability policy.ActionCapa
 
 func (s *Service) ToolCapabilities(id identity.VerifiedIdentity) map[string]ToolCapability {
 	capabilities := make(map[string]ToolCapability, len(capabilityToolDefinitions()))
+	engine := s.currentPolicyEngine()
 	for _, def := range capabilityToolDefinitions() {
-		actionCapability := s.policy.CapabilityForActionType(def.ActionType, id.Principal, id.Agent, id.Environment)
+		actionCapability := policy.ActionCapability{}
+		if engine != nil {
+			actionCapability = engine.CapabilityForActionType(def.ActionType, id.Principal, id.Agent, id.Environment)
+		}
 		capabilities[def.Name] = toolCapabilityState(def, actionCapability)
 	}
 	return capabilities
 }
 
 func (s *Service) ActionCapability(actionType string, id identity.VerifiedIdentity) ToolCapability {
-	actionCapability := s.policy.CapabilityForActionType(actionType, id.Principal, id.Agent, id.Environment)
+	actionCapability := policy.ActionCapability{}
+	if engine := s.currentPolicyEngine(); engine != nil {
+		actionCapability = engine.CapabilityForActionType(actionType, id.Principal, id.Agent, id.Environment)
+	}
 	return actionCapabilityState(actionType, actionCapability)
 }
 
@@ -252,7 +259,12 @@ func (s *Service) ValidateChangeSet(id identity.VerifiedIdentity, paths []string
 			blocked = append(blocked, path)
 			continue
 		}
-		decision := s.policy.Evaluate(normalized)
+		engine := s.currentPolicyEngine()
+		if engine == nil {
+			blocked = append(blocked, path)
+			continue
+		}
+		decision := engine.Evaluate(normalized)
 		if decision.Decision != policy.DecisionAllow {
 			blocked = append(blocked, path)
 		}

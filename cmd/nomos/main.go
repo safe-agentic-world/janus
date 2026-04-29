@@ -104,6 +104,8 @@ func runServe(args []string) {
 	if err := gw.Start(); err != nil {
 		cliFatalf("gateway start: %v", err)
 	}
+	stopGatewayReloadSignals := startGatewayReloadSignalHandler(gw)
+	defer stopGatewayReloadSignals()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
@@ -224,8 +226,16 @@ func runMCP(args []string) {
 		Environment: cfg.Identity.Environment,
 	}
 	assuranceLevel := assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence())
+	server, err := mcp.NewServerForBundlesWithRuntimeOptionsAndRecorder(cfg.Policy.EffectiveBundlePaths(), id, cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines, cfg.Approvals.Enabled, cfg.Executor.SandboxEnabled, cfg.Executor.SandboxProfile, runtimeOptions, recorder)
+	if err != nil {
+		cliFatalf("init mcp server: %v", err)
+	}
+	server.SetAssuranceLevel(assuranceLevel)
+	defer func() { _ = server.Close() }()
+	stopMCPReloadSignals := startMCPReloadSignalHandler(server, resolved.ConfigPath, resolved.PolicyBundle, resolved.LogLevel, logFormat, resolved.Quiet, os.Getenv)
+	defer stopMCPReloadSignals()
 	cliSuccessf("MCP stdio server ready (assurance=%s)", assuranceLevel)
-	if err := mcp.RunStdioForBundlesWithRuntimeOptionsAndRecorder(cfg.Policy.EffectiveBundlePaths(), id, cfg.Executor.WorkspaceRoot, cfg.Executor.MaxOutputBytes, cfg.Executor.MaxOutputLines, cfg.Approvals.Enabled, cfg.Executor.SandboxEnabled, cfg.Executor.SandboxProfile, runtimeOptions, recorder, assuranceLevel); err != nil {
+	if err := server.ServeStdio(os.Stdin, os.Stdout); err != nil {
 		cliFatalf("mcp server error: %v", err)
 	}
 }
@@ -319,9 +329,14 @@ func runMCPServe(args []string) {
 	if err != nil {
 		cliFatalf("init downstream mcp http server: %v", err)
 	}
+	httpServer.SetReloadHandler(func(ctx context.Context) (mcp.ReloadResult, error) {
+		return reloadMCPServerFromConfig(ctx, baseServer, resolved.ConfigPath, resolved.PolicyBundle, "info", "text", false, os.Getenv, "admin")
+	})
 	if err := httpServer.Start(); err != nil {
 		cliFatalf("start downstream mcp http server: %v", err)
 	}
+	stopMCPReloadSignals := startMCPReloadSignalHandler(baseServer, resolved.ConfigPath, resolved.PolicyBundle, "info", "text", false, os.Getenv)
+	defer stopMCPReloadSignals()
 	cliSuccessf("MCP HTTP server ready on %s (assurance=%s)", httpServer.Addr(), assuranceLevel)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -1030,6 +1045,101 @@ func buildProtocolSafeMCPRecorder(cfg gateway.Config) (audit.Recorder, error) {
 		return nil, err
 	}
 	return audit.NewWriter(protocolSafeMCPSink(cfg.Audit.Sink), redactor)
+}
+
+func startGatewayReloadSignalHandler(gw *gateway.Gateway) func() {
+	signals := reloadSignals()
+	if len(signals) == 0 || gw == nil {
+		return func() {}
+	}
+	reloadCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(reloadCh, signals...)
+	go func() {
+		for {
+			select {
+			case <-reloadCh:
+				result, err := gw.ReloadPolicy(context.Background(), "signal")
+				if err != nil {
+					cliWarn(fmt.Sprintf("gateway reload failed: %v", err))
+					continue
+				}
+				cliSuccessf("gateway reloaded (bundle=%s)", result.PolicyBundleHash)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(reloadCh)
+		close(done)
+	}
+}
+
+func startMCPReloadSignalHandler(server *mcp.Server, configPath, policyBundle, logLevel, logFormat string, quiet bool, getenv func(string) string) func() {
+	signals := reloadSignals()
+	if len(signals) == 0 || server == nil {
+		return func() {}
+	}
+	reloadCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(reloadCh, signals...)
+	go func() {
+		for {
+			select {
+			case <-reloadCh:
+				result, err := reloadMCPServerFromConfig(context.Background(), server, configPath, policyBundle, logLevel, logFormat, quiet, getenv, "signal")
+				if err != nil {
+					cliWarn(fmt.Sprintf("mcp reload failed: %v", err))
+					continue
+				}
+				cliSuccessf("mcp reloaded (bundle=%s registry_version=%d)", result.PolicyBundleHash, result.RegistryVersion)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(reloadCh)
+		close(done)
+	}
+}
+
+func reloadMCPServerFromConfig(ctx context.Context, server *mcp.Server, configPath, policyBundleOverride, logLevel, logFormat string, quiet bool, getenv func(string) string, trigger string) (mcp.ReloadResult, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	cfg, err := gateway.LoadConfig(configPath, getenv, policyBundleOverride)
+	if err != nil {
+		return mcp.ReloadResult{}, err
+	}
+	credentialBroker, err := gateway.BuildCredentialBroker(cfg, time.Now)
+	if err != nil {
+		return mcp.ReloadResult{}, err
+	}
+	runtimeOptions, err := mcp.ParseRuntimeOptions(mcp.RuntimeOptions{
+		LogLevel:              logLevel,
+		Quiet:                 quiet,
+		LogFormat:             logFormat,
+		ErrWriter:             os.Stderr,
+		ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
+		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
+		ApprovalStorePath:     cfg.Approvals.StorePath,
+		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
+		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
+		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
+		CredentialBroker:      credentialBroker,
+		Telemetry:             buildMCPRuntimeTelemetry(cfg),
+	})
+	if err != nil {
+		return mcp.ReloadResult{}, err
+	}
+	return server.Reload(ctx, mcp.ReloadOptions{
+		BundlePaths:    cfg.Policy.EffectiveBundlePaths(),
+		RuntimeOptions: runtimeOptions,
+		Trigger:        trigger,
+	})
 }
 
 func buildMCPRuntimeTelemetry(cfg gateway.Config) *telemetry.Emitter {

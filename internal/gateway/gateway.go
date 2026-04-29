@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
@@ -38,6 +41,7 @@ type Gateway struct {
 	writer              audit.Recorder
 	redactor            *redact.Redactor
 	policy              *policy.Engine
+	policyState         atomic.Pointer[gatewayPolicyState]
 	service             *service.Service
 	approvals           *approval.Store
 	auth                *identity.Authenticator
@@ -49,7 +53,31 @@ type Gateway struct {
 	policyBundleHash    string
 	policyBundleSources []string
 	uiReadinessReporter func() (UIReadinessReport, error)
+	reloadMu            sync.Mutex
 	now                 func() time.Time
+}
+
+type gatewayPolicyState struct {
+	Engine        *policy.Engine
+	BundleHash    string
+	BundleSources []string
+}
+
+type ReloadResult struct {
+	Outcome             string   `json:"outcome"`
+	Trigger             string   `json:"trigger"`
+	PolicyBundleHash    string   `json:"policy_bundle_hash"`
+	PolicyBundleSources []string `json:"policy_bundle_sources,omitempty"`
+	RegistryVersion     uint64   `json:"registry_version"`
+	Error               string   `json:"error,omitempty"`
+}
+
+func newGatewayPolicyState(bundle policy.Bundle) *gatewayPolicyState {
+	return &gatewayPolicyState{
+		Engine:        policy.NewEngine(bundle),
+		BundleHash:    bundle.Hash,
+		BundleSources: policy.BundleSourceLabels(bundle),
+	}
 }
 
 func New(cfg Config) (*Gateway, error) {
@@ -77,7 +105,8 @@ func New(cfg Config) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine := policy.NewEngine(bundle)
+	state := newGatewayPolicyState(bundle)
+	engine := state.Engine
 	if err := policy.ValidateExecCompatibility(bundle, cfg.Policy.ExecCompatibilityMode); err != nil {
 		return nil, err
 	}
@@ -164,10 +193,11 @@ func New(cfg Config) (*Gateway, error) {
 		rateLimiter:         newPrincipalLimiter(rateLimit, time.Now),
 		breaker:             newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, time.Now),
 		assuranceLevel:      assuranceLevel,
-		policyBundleHash:    bundle.Hash,
-		policyBundleSources: policy.BundleSourceLabels(bundle),
+		policyBundleHash:    state.BundleHash,
+		policyBundleSources: append([]string{}, state.BundleSources...),
 		now:                 time.Now,
 	}
+	gw.policyState.Store(state)
 	return gw, nil
 }
 
@@ -187,7 +217,8 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	if err != nil {
 		return nil, err
 	}
-	engine := policy.NewEngine(bundle)
+	state := newGatewayPolicyState(bundle)
+	engine := state.Engine
 	if err := policy.ValidateExecCompatibility(bundle, cfg.Policy.ExecCompatibilityMode); err != nil {
 		return nil, err
 	}
@@ -285,10 +316,11 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		rateLimiter:         newPrincipalLimiter(rateLimit, now),
 		breaker:             newPrincipalBreaker(breakerFailures, time.Duration(breakerCooldown)*time.Second, now),
 		assuranceLevel:      assuranceLevel,
-		policyBundleHash:    bundle.Hash,
-		policyBundleSources: policy.BundleSourceLabels(bundle),
+		policyBundleHash:    state.BundleHash,
+		policyBundleSources: append([]string{}, state.BundleSources...),
 		now:                 now,
 	}
+	gw.policyState.Store(state)
 	return gw, nil
 }
 
@@ -296,16 +328,116 @@ func (g *Gateway) PolicyBundleHash() string {
 	if g == nil {
 		return ""
 	}
-	return g.policyBundleHash
+	state := g.policyState.Load()
+	if state == nil {
+		return g.policyBundleHash
+	}
+	return state.BundleHash
 }
 
 func (g *Gateway) PolicyBundleSources() []string {
-	if g == nil || len(g.policyBundleSources) == 0 {
+	if g == nil {
 		return nil
 	}
-	out := make([]string, len(g.policyBundleSources))
-	copy(out, g.policyBundleSources)
+	sources := g.policyBundleSources
+	if state := g.policyState.Load(); state != nil {
+		sources = state.BundleSources
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	out := make([]string, len(sources))
+	copy(out, sources)
 	return out
+}
+
+func (g *Gateway) currentPolicyState() *gatewayPolicyState {
+	if g == nil {
+		return nil
+	}
+	return g.policyState.Load()
+}
+
+func (g *Gateway) loadPolicyState() (*gatewayPolicyState, error) {
+	bundle, err := policy.LoadBundlesWithOptions(g.cfg.Policy.EffectiveBundlePaths(), policy.MultiLoadOptions{
+		VerifySignatures: g.cfg.Policy.VerifySignatures,
+		SignaturePaths:   g.cfg.Policy.EffectiveSignaturePaths(),
+		PublicKeyPath:    g.cfg.Policy.PublicKeyPath,
+		BundleRoles:      g.cfg.Policy.EffectiveBundleRoles(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := policy.ValidateExecCompatibility(bundle, g.cfg.Policy.ExecCompatibilityMode); err != nil {
+		return nil, err
+	}
+	return newGatewayPolicyState(bundle), nil
+}
+
+func (g *Gateway) ReloadPolicy(ctx context.Context, trigger string) (ReloadResult, error) {
+	if g == nil || g.service == nil {
+		return ReloadResult{}, errors.New("gateway not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	trigger = strings.TrimSpace(trigger)
+	if trigger == "" {
+		trigger = "manual"
+	}
+	g.reloadMu.Lock()
+	defer g.reloadMu.Unlock()
+	next, err := g.loadPolicyState()
+	if err != nil {
+		result := ReloadResult{Outcome: "failure", Trigger: trigger, PolicyBundleHash: g.PolicyBundleHash(), PolicyBundleSources: g.PolicyBundleSources(), RegistryVersion: 0, Error: stableReloadError(err)}
+		g.recordReloadAudit(result)
+		return result, fmt.Errorf("reload validation failed: %w", err)
+	}
+	if err := g.service.SetPolicyEngine(next.Engine); err != nil {
+		result := ReloadResult{Outcome: "failure", Trigger: trigger, PolicyBundleHash: g.PolicyBundleHash(), PolicyBundleSources: g.PolicyBundleSources(), RegistryVersion: 0, Error: stableReloadError(err)}
+		g.recordReloadAudit(result)
+		return result, err
+	}
+	g.policyState.Store(next)
+	g.policy = next.Engine
+	g.policyBundleHash = next.BundleHash
+	g.policyBundleSources = append([]string{}, next.BundleSources...)
+	result := ReloadResult{Outcome: "success", Trigger: trigger, PolicyBundleHash: next.BundleHash, PolicyBundleSources: append([]string{}, next.BundleSources...), RegistryVersion: 0}
+	g.recordReloadAudit(result)
+	return result, nil
+}
+
+func stableReloadError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func (g *Gateway) recordReloadAudit(result ReloadResult) {
+	if g == nil || g.writer == nil {
+		return
+	}
+	metadata := map[string]any{
+		"trigger":          result.Trigger,
+		"outcome":          result.Outcome,
+		"registry_version": result.RegistryVersion,
+	}
+	if result.Error != "" {
+		metadata["error"] = result.Error
+	}
+	_ = g.writer.WriteEvent(audit.Event{
+		SchemaVersion:       "v1",
+		Timestamp:           g.now().UTC(),
+		EventType:           "runtime.reload",
+		TraceID:             "runtime.reload",
+		PolicyBundleHash:    result.PolicyBundleHash,
+		PolicyBundleSources: append([]string{}, result.PolicyBundleSources...),
+		Decision:            strings.ToUpper(result.Outcome),
+		Reason:              result.Error,
+		ExecutorMetadata:    metadata,
+		AssuranceLevel:      g.assuranceLevel,
+	})
 }
 
 func (g *Gateway) SetUIReadinessReporter(fn func() (UIReadinessReport, error)) {
@@ -331,6 +463,7 @@ func (g *Gateway) Start() error {
 	mux.HandleFunc("/api/ui/traces", g.handleUITraceList)
 	mux.HandleFunc("/api/ui/traces/", g.handleUITraceDetail)
 	mux.HandleFunc("/api/ui/explain", g.handleUIExplain)
+	mux.HandleFunc("/admin/reload", g.handleAdminReload)
 	mux.HandleFunc("/explain", g.handleExplain)
 	mux.HandleFunc("/run", g.handleAction)
 	mux.HandleFunc("/action", g.handleAction)
@@ -401,6 +534,29 @@ func (g *Gateway) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	info := version.Current()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(info)
+}
+
+func (g *Gateway) handleAdminReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := g.auth.VerifyPrincipalOnly(r); err != nil {
+		g.respondError(w, http.StatusUnauthorized, "auth_error", err.Error())
+		return
+	}
+	if g.cfg.Gateway.TLS.RequireMTLS {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			g.respondError(w, http.StatusUnauthorized, "auth_error", "mTLS client certificate required")
+			return
+		}
+	}
+	result, err := g.ReloadPolicy(r.Context(), "admin")
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (g *Gateway) handleAction(w http.ResponseWriter, r *http.Request) {

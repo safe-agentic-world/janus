@@ -26,6 +26,7 @@ type DownstreamHTTPServer struct {
 	defaultAgent string
 	listen       string
 	sessionLimit *sessionLimiter
+	reload       func(context.Context) (ReloadResult, error)
 
 	server   *http.Server
 	listener net.Listener
@@ -73,6 +74,13 @@ func (s *DownstreamHTTPServer) Addr() string {
 	return s.listener.Addr().String()
 }
 
+func (s *DownstreamHTTPServer) SetReloadHandler(fn func(context.Context) (ReloadResult, error)) {
+	if s == nil {
+		return
+	}
+	s.reload = fn
+}
+
 func (s *DownstreamHTTPServer) Start() error {
 	if s == nil {
 		return errors.New("http server is nil")
@@ -82,6 +90,7 @@ func (s *DownstreamHTTPServer) Start() error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", s.handleMCP)
+	mux.HandleFunc("/admin/reload", s.handleAdminReload)
 	server := &http.Server{Handler: mux}
 	listener, err := net.Listen("tcp", s.listen)
 	if err != nil {
@@ -117,6 +126,27 @@ func (s *DownstreamHTTPServer) handleMCP(w http.ResponseWriter, r *http.Request)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *DownstreamHTTPServer) handleAdminReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := s.auth.VerifyPrincipalOnly(r); err != nil {
+		s.writeHTTPError(w, http.StatusUnauthorized, "auth_error", err.Error())
+		return
+	}
+	if s.reload == nil {
+		s.writeHTTPError(w, http.StatusServiceUnavailable, "reload_unavailable", "reload handler is not configured")
+		return
+	}
+	result, err := s.reload(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (s *DownstreamHTTPServer) handleMCPPost(w http.ResponseWriter, r *http.Request) {
