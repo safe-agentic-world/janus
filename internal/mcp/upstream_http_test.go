@@ -38,6 +38,7 @@ type upstreamHTTPTestServer struct {
 	authHeader         string
 	authValue          string
 	toolOutput         string
+	toolContent        []map[string]any
 	callCount          atomic.Int32
 	authCalls          atomic.Int32
 	protoCalls         atomic.Int32
@@ -169,8 +170,12 @@ func (s *upstreamHTTPTestServer) handle(w http.ResponseWriter, r *http.Request) 
 			<-r.Context().Done()
 			return
 		}
+		content := []map[string]any{{"type": "text", "text": s.toolOutput}}
+		if s.toolContent != nil {
+			content = s.toolContent
+		}
 		s.writeResponse(w, id, map[string]any{
-			"content": []map[string]any{{"type": "text", "text": s.toolOutput}},
+			"content": content,
 			"isError": false,
 		})
 	default:
@@ -264,8 +269,12 @@ func (s *upstreamHTTPTestServer) handleLegacySSEPost(w http.ResponseWriter, r *h
 		result = map[string]any{"tools": s.toolsList()}
 	case "tools/call":
 		s.callCount.Add(1)
+		content := []map[string]any{{"type": "text", "text": s.toolOutput}}
+		if s.toolContent != nil {
+			content = s.toolContent
+		}
 		result = map[string]any{
-			"content": []map[string]any{{"type": "text", "text": s.toolOutput}},
+			"content": content,
 			"isError": false,
 		}
 	default:

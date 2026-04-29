@@ -53,11 +53,17 @@ func TestForwardedResponseScanStripMode(t *testing.T) {
 	if event.ExecutorMetadata["response_scan_rule_pack_version"] != responsescan.RulePackVersion {
 		t.Fatalf("expected rule pack version in audit metadata, got %+v", event.ExecutorMetadata)
 	}
-	if len(telemetrySink.metrics) != 1 {
-		t.Fatalf("expected one telemetry counter, got %+v", telemetrySink.metrics)
+	responseScanMetrics := make([]telemetry.Metric, 0)
+	for _, metric := range telemetrySink.metrics {
+		if metric.Name == "nomos.response_scan_findings" {
+			responseScanMetrics = append(responseScanMetrics, metric)
+		}
 	}
-	if telemetrySink.metrics[0].Attributes["rule_id"] != "prompt_injection.instruction_override" {
-		t.Fatalf("expected rule id telemetry, got %+v", telemetrySink.metrics[0])
+	if len(responseScanMetrics) != 1 {
+		t.Fatalf("expected one response-scan telemetry counter, got %+v", telemetrySink.metrics)
+	}
+	if responseScanMetrics[0].Attributes["rule_id"] != "prompt_injection.instruction_override" {
+		t.Fatalf("expected rule id telemetry, got %+v", responseScanMetrics[0])
 	}
 	metricPayload, _ := json.Marshal(telemetrySink.metrics)
 	if strings.Contains(string(metricPayload), rawPhrase) {

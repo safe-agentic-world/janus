@@ -915,23 +915,23 @@ func parseUpstreamTools(config UpstreamServerConfig, result any) ([]upstreamTool
 	return tools, nil
 }
 
-func (s *upstreamSupervisor) callTool(ctx context.Context, serverName, toolName string, rawArgs json.RawMessage) (string, error) {
+func (s *upstreamSupervisor) callTool(ctx context.Context, serverName, toolName string, rawArgs json.RawMessage) (upstreamToolCallResult, error) {
 	return s.callToolWithRequests(ctx, serverName, toolName, rawArgs, nil)
 }
 
-func (s *upstreamSupervisor) callToolWithRequests(ctx context.Context, serverName, toolName string, rawArgs json.RawMessage, handler upstreamRequestHandler) (string, error) {
+func (s *upstreamSupervisor) callToolWithRequests(ctx context.Context, serverName, toolName string, rawArgs json.RawMessage, handler upstreamRequestHandler) (upstreamToolCallResult, error) {
 	s.mu.RLock()
 	session, ok := s.sessions[serverName]
 	s.mu.RUnlock()
 	if !ok {
-		return "", fmt.Errorf("upstream mcp server %q not configured", serverName)
+		return upstreamToolCallResult{}, fmt.Errorf("upstream mcp server %q not configured", serverName)
 	}
 	arguments := map[string]any{}
 	if len(bytes.TrimSpace(rawArgs)) > 0 {
 		dec := json.NewDecoder(bytes.NewReader(rawArgs))
 		dec.UseNumber()
 		if err := dec.Decode(&arguments); err != nil {
-			return "", fmt.Errorf("invalid forwarded tool arguments: %w", err)
+			return upstreamToolCallResult{}, fmt.Errorf("invalid forwarded tool arguments: %w", err)
 		}
 	}
 	result, err := session.callWithRequests(ctx, "tools/call", map[string]any{
@@ -939,9 +939,9 @@ func (s *upstreamSupervisor) callToolWithRequests(ctx context.Context, serverNam
 		"arguments": arguments,
 	}, handler)
 	if err != nil {
-		return "", err
+		return upstreamToolCallResult{}, err
 	}
-	return stringifyUpstreamCallResult(result)
+	return parseUpstreamCallResult(result)
 }
 
 func (s *upstreamSupervisor) envMetadata(serverName string) map[string]any {
