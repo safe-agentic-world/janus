@@ -9,6 +9,7 @@ import (
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/approval"
+	"github.com/safe-agentic-world/nomos/internal/approvalpreview"
 	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/credentials"
 	"github.com/safe-agentic-world/nomos/internal/executor"
@@ -338,18 +339,23 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 					scopeType = approval.ScopeClass
 					scopeKey = classKey
 				}
+				var argumentPreview string
+				if preview, ok := approvalpreview.FromNormalized(s.redactor, normalized); ok {
+					argumentPreview = string(preview)
+				}
 				pending, err := s.approvals.CreateOrGetPending(context.Background(), approval.PendingRequest{
-					Fingerprint: fingerprint,
-					ScopeType:   scopeType,
-					ScopeKey:    scopeKey,
-					TraceID:     normalized.TraceID,
-					ActionID:    normalized.ActionID,
-					ActionType:  normalized.ActionType,
-					Resource:    normalized.Resource,
-					ParamsHash:  normalized.ParamsHash,
-					Principal:   normalized.Principal,
-					Agent:       normalized.Agent,
-					Environment: normalized.Environment,
+					Fingerprint:         fingerprint,
+					ScopeType:           scopeType,
+					ScopeKey:            scopeKey,
+					TraceID:             normalized.TraceID,
+					ActionID:            normalized.ActionID,
+					ActionType:          normalized.ActionType,
+					Resource:            normalized.Resource,
+					ParamsHash:          normalized.ParamsHash,
+					ArgumentPreviewJSON: argumentPreview,
+					Principal:           normalized.Principal,
+					Agent:               normalized.Agent,
+					Environment:         normalized.Environment,
 				})
 				if err != nil {
 					auditCtx.resultClass, auditCtx.retryable = classifyError(err)

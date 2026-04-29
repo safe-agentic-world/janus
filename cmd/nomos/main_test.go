@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/safe-agentic-world/nomos/internal/approval"
 	"github.com/safe-agentic-world/nomos/internal/assurance"
+	"github.com/safe-agentic-world/nomos/internal/canonicaljson"
 	"github.com/safe-agentic-world/nomos/internal/doctor"
 	"github.com/safe-agentic-world/nomos/internal/gateway"
 	"github.com/safe-agentic-world/nomos/internal/mcp"
@@ -280,6 +283,80 @@ func TestPolicyCommandsSupportYAMLBundles(t *testing.T) {
 	}
 	if explainSummary.Decision != "ALLOW" || explainSummary.MatchedRuleCount == 0 || explainSummary.AssuranceLevel == "" {
 		t.Fatalf("unexpected policy explain summary: %+v", explainSummary)
+	}
+}
+
+func TestPolicyExplainIncludesRedactedMCPArgumentPreview(t *testing.T) {
+	dir := t.TempDir()
+	actionPath := filepath.Join(dir, "mcp-action.json")
+	argsHash := mustCanonicalHashForTest(t, `{"authorization":"Bearer very-secret-token","order_id":"ORD-1001"}`)
+	actionBody := `{"schema_version":"v1","action_id":"act-mcp-explain","action_type":"mcp.call","resource":"mcp://retail/refund.request","params":{"upstream_server":"retail","upstream_tool":"refund.request","tool_arguments":{"authorization":"Bearer very-secret-token","order_id":"ORD-1001"},"tool_arguments_hash":"` + argsHash + `","tool_schema_validated":true},"principal":"system","agent":"nomos","environment":"dev","trace_id":"trace-mcp-explain","context":{"extensions":{}}}`
+	if err := os.WriteFile(actionPath, []byte(actionBody), 0o600); err != nil {
+		t.Fatalf("write action: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"approval-refund","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"REQUIRE_APPROVAL","principals":["system"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+
+	var out bytes.Buffer
+	summary, err := executePolicyExplain([]string{"--action", actionPath, "--bundle", bundlePath}, &out, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("execute policy explain: %v", err)
+	}
+	text := out.String()
+	if summary.Decision != policy.DecisionRequireApproval {
+		t.Fatalf("expected require approval summary, got %+v", summary)
+	}
+	if !strings.Contains(text, `"argument_preview"`) || !strings.Contains(text, "ORD-1001") || !strings.Contains(text, argsHash) {
+		t.Fatalf("expected argument preview in explain output, got %s", text)
+	}
+	if strings.Contains(text, "very-secret-token") {
+		t.Fatalf("policy explain leaked secret argument: %s", text)
+	}
+}
+
+func TestApprovalsListShowsStoredArgumentPreview(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "approvals.db")
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	store, err := approval.Open(storePath, 5*time.Minute, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("open approvals: %v", err)
+	}
+	_, err = store.CreateOrGetPending(context.Background(), approval.PendingRequest{
+		Fingerprint:         "fp-cli",
+		ScopeType:           approval.ScopeFingerprint,
+		ScopeKey:            "fp-cli",
+		TraceID:             "trace-cli",
+		ActionID:            "act-cli",
+		ActionType:          "mcp.call",
+		Resource:            "mcp://retail/refund.request",
+		ParamsHash:          "params-cli",
+		ArgumentPreviewJSON: `{"kind":"mcp_call_arguments","tool_arguments":{"authorization":"[REDACTED]","order_id":"ORD-CLI"}}`,
+		Principal:           "system",
+		Agent:               "nomos",
+		Environment:         "dev",
+	})
+	if closeErr := store.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+
+	var out bytes.Buffer
+	err = executeApprovalsList([]string{"--store", storePath, "--format", "json"}, &out, func(string) string { return "" }, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, `"argument_preview"`) || !strings.Contains(text, "ORD-CLI") {
+		t.Fatalf("expected argument preview in approvals CLI output, got %s", text)
+	}
+	if strings.Contains(text, "very-secret-token") {
+		t.Fatalf("approval CLI leaked secret: %s", text)
 	}
 }
 
@@ -726,4 +803,13 @@ func writeDoctorTestConfig(t *testing.T, path, bundlePath string, mcpEnabled boo
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+}
+
+func mustCanonicalHashForTest(t *testing.T, raw string) string {
+	t.Helper()
+	canonical, err := canonicaljson.Canonicalize([]byte(raw))
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	return canonicaljson.HashSHA256(canonical)
 }

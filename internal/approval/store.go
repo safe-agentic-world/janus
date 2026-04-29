@@ -28,36 +28,38 @@ var (
 )
 
 type PendingRequest struct {
-	Fingerprint string
-	ScopeType   string
-	ScopeKey    string
-	TraceID     string
-	ActionID    string
-	ActionType  string
-	Resource    string
-	ParamsHash  string
-	Principal   string
-	Agent       string
-	Environment string
+	Fingerprint         string
+	ScopeType           string
+	ScopeKey            string
+	TraceID             string
+	ActionID            string
+	ActionType          string
+	Resource            string
+	ParamsHash          string
+	ArgumentPreviewJSON string
+	Principal           string
+	Agent               string
+	Environment         string
 }
 
 type Record struct {
-	ApprovalID  string
-	Fingerprint string
-	ScopeType   string
-	ScopeKey    string
-	Status      string
-	TraceID     string
-	ActionID    string
-	ActionType  string
-	Resource    string
-	ParamsHash  string
-	Principal   string
-	Agent       string
-	Environment string
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
-	UpdatedAt   time.Time
+	ApprovalID          string
+	Fingerprint         string
+	ScopeType           string
+	ScopeKey            string
+	Status              string
+	TraceID             string
+	ActionID            string
+	ActionType          string
+	Resource            string
+	ParamsHash          string
+	ArgumentPreviewJSON string
+	Principal           string
+	Agent               string
+	Environment         string
+	CreatedAt           time.Time
+	ExpiresAt           time.Time
+	UpdatedAt           time.Time
 }
 
 type Store struct {
@@ -108,6 +110,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   action_type TEXT NOT NULL,
   resource TEXT NOT NULL,
   params_hash TEXT NOT NULL,
+  argument_preview_json TEXT NOT NULL DEFAULT '',
   principal TEXT NOT NULL,
   agent TEXT NOT NULL,
   environment TEXT NOT NULL,
@@ -118,7 +121,36 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE INDEX IF NOT EXISTS idx_approvals_fingerprint ON approvals(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_approvals_scope ON approvals(scope_type, scope_key);
 `
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.ensureArgumentPreviewColumn()
+}
+
+func (s *Store) ensureArgumentPreviewColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(approvals)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "argument_preview_json" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE approvals ADD COLUMN argument_preview_json TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -130,6 +162,12 @@ func (s *Store) CreateOrGetPending(ctx context.Context, req PendingRequest) (Rec
 	if existing, ok, err := s.findReusablePending(ctx, req, now); err != nil {
 		return Record{}, err
 	} else if ok {
+		if existing.ArgumentPreviewJSON == "" && req.ArgumentPreviewJSON != "" {
+			if err := s.updateArgumentPreview(ctx, existing.ApprovalID, req.ArgumentPreviewJSON); err != nil {
+				return Record{}, err
+			}
+			existing.ArgumentPreviewJSON = req.ArgumentPreviewJSON
+		}
 		return existing, nil
 	}
 	id, err := newApprovalID()
@@ -137,30 +175,31 @@ func (s *Store) CreateOrGetPending(ctx context.Context, req PendingRequest) (Rec
 		return Record{}, err
 	}
 	rec := Record{
-		ApprovalID:  id,
-		Fingerprint: req.Fingerprint,
-		ScopeType:   req.ScopeType,
-		ScopeKey:    req.ScopeKey,
-		Status:      StatusPending,
-		TraceID:     req.TraceID,
-		ActionID:    req.ActionID,
-		ActionType:  req.ActionType,
-		Resource:    req.Resource,
-		ParamsHash:  req.ParamsHash,
-		Principal:   req.Principal,
-		Agent:       req.Agent,
-		Environment: req.Environment,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(s.ttl),
-		UpdatedAt:   now,
+		ApprovalID:          id,
+		Fingerprint:         req.Fingerprint,
+		ScopeType:           req.ScopeType,
+		ScopeKey:            req.ScopeKey,
+		Status:              StatusPending,
+		TraceID:             req.TraceID,
+		ActionID:            req.ActionID,
+		ActionType:          req.ActionType,
+		Resource:            req.Resource,
+		ParamsHash:          req.ParamsHash,
+		ArgumentPreviewJSON: req.ArgumentPreviewJSON,
+		Principal:           req.Principal,
+		Agent:               req.Agent,
+		Environment:         req.Environment,
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(s.ttl),
+		UpdatedAt:           now,
 	}
 	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO approvals (approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, principal, agent, environment, created_at, expires_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO approvals (approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, argument_preview_json, principal, agent, environment, created_at, expires_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ApprovalID, rec.Fingerprint, rec.ScopeType, rec.ScopeKey, rec.Status,
 		rec.TraceID, rec.ActionID, rec.ActionType, rec.Resource, rec.ParamsHash,
-		rec.Principal, rec.Agent, rec.Environment,
+		rec.ArgumentPreviewJSON, rec.Principal, rec.Agent, rec.Environment,
 		rec.CreatedAt.Format(time.RFC3339Nano), rec.ExpiresAt.Format(time.RFC3339Nano), rec.UpdatedAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -214,6 +253,11 @@ func (s *Store) Lookup(ctx context.Context, approvalID string) (Record, error) {
 	return loadByID(ctx, s.db, approvalID)
 }
 
+func (s *Store) updateArgumentPreview(ctx context.Context, approvalID, preview string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE approvals SET argument_preview_json = ?, updated_at = ? WHERE approval_id = ?`, preview, s.now().UTC().Format(time.RFC3339Nano), approvalID)
+	return err
+}
+
 func (s *Store) CheckApproved(ctx context.Context, approvalID, fingerprint, classKey string) (bool, Record, error) {
 	rec, err := loadByID(ctx, s.db, approvalID)
 	if err != nil {
@@ -236,7 +280,7 @@ func (s *Store) CheckApproved(ctx context.Context, approvalID, fingerprint, clas
 }
 
 func (s *Store) findReusablePending(ctx context.Context, req PendingRequest, now time.Time) (Record, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, principal, agent, environment, created_at, expires_at, updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, argument_preview_json, principal, agent, environment, created_at, expires_at, updated_at
 	FROM approvals WHERE fingerprint = ? AND scope_type = ? AND scope_key = ? AND principal = ? AND agent = ? AND environment = ? ORDER BY created_at DESC`,
 		req.Fingerprint, req.ScopeType, req.ScopeKey, req.Principal, req.Agent, req.Environment)
 	if err != nil {
@@ -259,7 +303,7 @@ func (s *Store) findReusablePending(ctx context.Context, req PendingRequest, now
 }
 
 func loadByID(ctx context.Context, db queryer, approvalID string) (Record, error) {
-	row := db.QueryRowContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, principal, agent, environment, created_at, expires_at, updated_at
+	row := db.QueryRowContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, argument_preview_json, principal, agent, environment, created_at, expires_at, updated_at
 	FROM approvals WHERE approval_id = ?`, approvalID)
 	rec, err := scanRecord(row)
 	if err != nil {
@@ -299,6 +343,7 @@ func scanRecord(s scanner) (Record, error) {
 		&rec.ActionType,
 		&rec.Resource,
 		&rec.ParamsHash,
+		&rec.ArgumentPreviewJSON,
 		&rec.Principal,
 		&rec.Agent,
 		&rec.Environment,
@@ -331,7 +376,7 @@ func (s *Store) ListPending(ctx context.Context, limit int) ([]Record, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, principal, agent, environment, created_at, expires_at, updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT approval_id, fingerprint, scope_type, scope_key, status, trace_id, action_id, action_type, resource, params_hash, argument_preview_json, principal, agent, environment, created_at, expires_at, updated_at
 	FROM approvals WHERE status = ? ORDER BY created_at DESC LIMIT ?`, StatusPending, limit)
 	if err != nil {
 		return nil, err

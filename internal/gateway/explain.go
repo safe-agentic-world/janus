@@ -21,6 +21,7 @@ type explainResponse struct {
 	EngineVersion         string         `json:"engine_version"`
 	AssuranceLevel        string         `json:"assurance_level"`
 	ObligationsPreview    map[string]any `json:"obligations_preview"`
+	ArgumentPreview       any            `json:"argument_preview,omitempty"`
 	MatchedRuleProvenance []any          `json:"matched_rule_provenance,omitempty"`
 	WhyDenied             map[string]any `json:"why_denied,omitempty"`
 	MinimalAllowingChange string         `json:"minimal_allowing_change,omitempty"`

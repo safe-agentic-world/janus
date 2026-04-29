@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
+	"github.com/safe-agentic-world/nomos/internal/approvalpreview"
 	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
@@ -35,18 +37,19 @@ type uiReadinessResponse struct {
 }
 
 type uiApprovalRecord struct {
-	ApprovalID  string `json:"approval_id"`
-	Status      string `json:"status"`
-	ExpiresAt   string `json:"expires_at"`
-	Expired     bool   `json:"expired"`
-	Principal   string `json:"principal"`
-	Agent       string `json:"agent"`
-	Environment string `json:"environment"`
-	ActionType  string `json:"action_type"`
-	Resource    string `json:"resource"`
-	ScopeType   string `json:"scope_type"`
-	ActionID    string `json:"action_id"`
-	TraceID     string `json:"trace_id"`
+	ApprovalID      string          `json:"approval_id"`
+	Status          string          `json:"status"`
+	ExpiresAt       string          `json:"expires_at"`
+	Expired         bool            `json:"expired"`
+	Principal       string          `json:"principal"`
+	Agent           string          `json:"agent"`
+	Environment     string          `json:"environment"`
+	ActionType      string          `json:"action_type"`
+	Resource        string          `json:"resource"`
+	ScopeType       string          `json:"scope_type"`
+	ActionID        string          `json:"action_id"`
+	TraceID         string          `json:"trace_id"`
+	ArgumentPreview json.RawMessage `json:"argument_preview,omitempty"`
 }
 
 type uiActionDetailResponse struct {
@@ -203,7 +206,7 @@ func (g *Gateway) handleUIApprovals(w http.ResponseWriter, r *http.Request) {
 	now := g.now().UTC()
 	out := make([]uiApprovalRecord, 0, len(records))
 	for _, rec := range records {
-		out = append(out, uiApprovalRecord{
+		item := uiApprovalRecord{
 			ApprovalID:  rec.ApprovalID,
 			Status:      rec.Status,
 			ExpiresAt:   rec.ExpiresAt.Format(time.RFC3339Nano),
@@ -216,7 +219,11 @@ func (g *Gateway) handleUIApprovals(w http.ResponseWriter, r *http.Request) {
 			ScopeType:   rec.ScopeType,
 			ActionID:    rec.ActionID,
 			TraceID:     rec.TraceID,
-		})
+		}
+		if raw := strings.TrimSpace(rec.ArgumentPreviewJSON); raw != "" && json.Valid([]byte(raw)) {
+			item.ArgumentPreview = json.RawMessage(raw)
+		}
+		out = append(out, item)
 	}
 	g.writeUIJSON(w, map[string]any{"approvals": out})
 }
@@ -467,6 +474,10 @@ func buildUIActionDetailResponse(event audit.Event) uiActionDetailResponse {
 }
 
 func buildExplainResponse(explanation policy.ExplainDetails, normalized normalize.NormalizedAction, cfg Config, assuranceLevel string) explainResponse {
+	previewRedactor, err := redact.NewRedactor(cfg.Redaction.Patterns)
+	if err != nil {
+		previewRedactor = redact.DefaultRedactor()
+	}
 	resp := explainResponse{
 		ActionID:           normalized.ActionID,
 		TraceID:            normalized.TraceID,
@@ -479,6 +490,11 @@ func buildExplainResponse(explanation policy.ExplainDetails, normalized normaliz
 		EngineVersion:      version.Current().Version,
 		AssuranceLevel:     assuranceLevel,
 		ObligationsPreview: cloneMap(explanation.ObligationsPreview),
+	}
+	if preview, ok := approvalpreview.FromNormalized(previewRedactor, normalized); ok {
+		if decoded, ok := approvalpreview.Decode(string(preview)); ok {
+			resp.ArgumentPreview = decoded
+		}
 	}
 	if len(explanation.Decision.PolicyBundleInputs) > 0 {
 		resp.PolicyBundleInputs = make([]any, 0, len(explanation.Decision.PolicyBundleInputs))

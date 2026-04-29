@@ -39,6 +39,9 @@
     },
     "obligations_preview": {
       "type": "object"
+    },
+    "argument_preview": {
+      "type": "object"
     }
   }
 }

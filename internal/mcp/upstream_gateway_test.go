@@ -239,6 +239,16 @@ func TestHandleForwardedToolSupportsApprovalResume(t *testing.T) {
 	if firstResp.Decision != "REQUIRE_APPROVAL" || firstResp.ApprovalID == "" {
 		t.Fatalf("expected pending approval, got %+v", firstResp)
 	}
+	pending, err := server.approvals.Lookup(context.Background(), firstResp.ApprovalID)
+	if err != nil {
+		t.Fatalf("lookup pending approval: %v", err)
+	}
+	if !strings.Contains(pending.ArgumentPreviewJSON, `"order_id":"ORD-1001"`) || !strings.Contains(pending.ArgumentPreviewJSON, `"reason":"damaged"`) {
+		t.Fatalf("expected approval argument preview, got %s", pending.ArgumentPreviewJSON)
+	}
+	if !strings.Contains(pending.ArgumentPreviewJSON, pending.ParamsHash) {
+		t.Fatalf("expected preview to bind params hash %s, got %s", pending.ParamsHash, pending.ArgumentPreviewJSON)
+	}
 	if _, err := server.approvals.Decide(context.Background(), firstResp.ApprovalID, "APPROVE"); err != nil {
 		t.Fatalf("approve pending action: %v", err)
 	}

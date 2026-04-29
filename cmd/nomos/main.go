@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
+	"github.com/safe-agentic-world/nomos/internal/approval"
+	"github.com/safe-agentic-world/nomos/internal/approvalpreview"
 	"github.com/safe-agentic-world/nomos/internal/assurance"
 	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/doctor"
@@ -47,6 +49,8 @@ func main() {
 		runMCP(os.Args[2:])
 	case "policy":
 		runPolicy(os.Args[2:])
+	case "approvals":
+		runApprovals(os.Args[2:])
 	case "doctor":
 		os.Exit(runDoctorCommand(os.Args[2:], os.Stdout, os.Stderr, os.Getenv))
 	default:
@@ -343,6 +347,117 @@ func runPolicy(args []string) {
 	}
 }
 
+func runApprovals(args []string) {
+	if len(args) == 0 {
+		cliFatal("approvals command required: list")
+	}
+	switch args[0] {
+	case "list":
+		if err := executeApprovalsList(args[1:], os.Stdout, os.Getenv, time.Now); err != nil {
+			cliFatalf("approvals list: %v", err)
+		}
+	default:
+		cliFatal("approvals command required: list")
+	}
+}
+
+type approvalListRecord struct {
+	ApprovalID      string `json:"approval_id"`
+	Status          string `json:"status"`
+	ExpiresAt       string `json:"expires_at"`
+	Expired         bool   `json:"expired"`
+	Principal       string `json:"principal"`
+	Agent           string `json:"agent"`
+	Environment     string `json:"environment"`
+	ActionType      string `json:"action_type"`
+	Resource        string `json:"resource"`
+	ScopeType       string `json:"scope_type"`
+	ActionID        string `json:"action_id"`
+	TraceID         string `json:"trace_id"`
+	ParamsHash      string `json:"params_hash"`
+	ArgumentPreview any    `json:"argument_preview,omitempty"`
+}
+
+func executeApprovalsList(args []string, stdout io.Writer, getenv func(string) string, now func() time.Time) error {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if now == nil {
+		now = time.Now
+	}
+	fs := flag.NewFlagSet("approvals list", flag.ExitOnError)
+	storePath := fs.String("store", "", "path to approval sqlite store")
+	limit := fs.Int("limit", 50, "maximum pending approvals to list")
+	format := fs.String("format", "json", "output format: json|text")
+	fs.Parse(args)
+	resolvedStore := strings.TrimSpace(*storePath)
+	if resolvedStore == "" {
+		resolvedStore = strings.TrimSpace(getenv("NOMOS_APPROVALS_STORE_PATH"))
+	}
+	if resolvedStore == "" {
+		return errors.New("--store is required unless NOMOS_APPROVALS_STORE_PATH is set")
+	}
+	if *limit <= 0 {
+		return errors.New("--limit must be > 0")
+	}
+	store, err := approval.Open(resolvedStore, 15*time.Minute, now)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	records, err := store.ListPending(context.Background(), *limit)
+	if err != nil {
+		return err
+	}
+	nowUTC := now().UTC()
+	out := make([]approvalListRecord, 0, len(records))
+	for _, rec := range records {
+		item := approvalListRecord{
+			ApprovalID:  rec.ApprovalID,
+			Status:      rec.Status,
+			ExpiresAt:   rec.ExpiresAt.Format(time.RFC3339Nano),
+			Expired:     nowUTC.After(rec.ExpiresAt),
+			Principal:   rec.Principal,
+			Agent:       rec.Agent,
+			Environment: rec.Environment,
+			ActionType:  rec.ActionType,
+			Resource:    rec.Resource,
+			ScopeType:   rec.ScopeType,
+			ActionID:    rec.ActionID,
+			TraceID:     rec.TraceID,
+			ParamsHash:  rec.ParamsHash,
+		}
+		if preview, ok := approvalpreview.Decode(rec.ArgumentPreviewJSON); ok {
+			item.ArgumentPreview = preview
+		}
+		out = append(out, item)
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "json":
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	case "text":
+		for _, item := range out {
+			if _, err := fmt.Fprintf(stdout, "%s %s %s %s expires=%s\n", item.ApprovalID, item.Status, item.ActionType, item.Resource, item.ExpiresAt); err != nil {
+				return err
+			}
+			if item.ArgumentPreview != nil {
+				data, err := json.MarshalIndent(item.ArgumentPreview, "", "  ")
+				if err != nil {
+					return err
+				}
+				if _, err := fmt.Fprintf(stdout, "argument_preview:\n%s\n", data); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	default:
+		return errors.New("--format must be json or text")
+	}
+}
+
 const (
 	policyResultValidationError = "VALIDATION_ERROR"
 	policyResultNormError       = "NORMALIZATION_ERROR"
@@ -511,6 +626,7 @@ type explainSettings struct {
 	AssuranceLevel        string
 	SuggestRemediation    bool
 	ExecCompatibilityMode string
+	Redactor              *redact.Redactor
 }
 
 func buildPolicyExplainPayload(explanation policy.ExplainDetails, normalized normalize.NormalizedAction, settings explainSettings) map[string]any {
@@ -525,6 +641,15 @@ func buildPolicyExplainPayload(explanation policy.ExplainDetails, normalized nor
 	}
 	if normalized.ActionType == "process.exec" {
 		payload["exec_authorization"] = buildExecAuthorizationPayload(explanation, settings)
+	}
+	previewRedactor := settings.Redactor
+	if previewRedactor == nil {
+		previewRedactor = redact.DefaultRedactor()
+	}
+	if preview, ok := approvalpreview.FromNormalized(previewRedactor, normalized); ok {
+		if decoded, ok := approvalpreview.Decode(string(preview)); ok {
+			payload["argument_preview"] = decoded
+		}
 	}
 	if len(explanation.Decision.PolicyBundleInputs) > 0 {
 		payload["policy_bundle_inputs"] = explanation.Decision.PolicyBundleInputs
@@ -571,10 +696,15 @@ func deriveExplainSettings(configPath, bundlePath string, getenv func(string) st
 		if err != nil {
 			return explainSettings{}, err
 		}
+		redactor, err := redact.NewRedactor(cfg.Redaction.Patterns)
+		if err != nil {
+			return explainSettings{}, err
+		}
 		return explainSettings{
 			AssuranceLevel:        assurance.DeriveWithEvidence(cfg.Runtime.DeploymentMode, cfg.Runtime.StrongGuarantee, cfg.AssuranceEvidence()),
 			SuggestRemediation:    cfg.Policy.ExplainSuggestions == nil || *cfg.Policy.ExplainSuggestions,
 			ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+			Redactor:              redactor,
 		}, nil
 	}
 	deploymentMode := strings.TrimSpace(getenv("NOMOS_RUNTIME_DEPLOYMENT_MODE"))
@@ -584,6 +714,10 @@ func deriveExplainSettings(configPath, bundlePath string, getenv func(string) st
 	suggestRemediation := true
 	if value := strings.TrimSpace(getenv("NOMOS_POLICY_EXPLAIN_SUGGESTIONS")); value != "" {
 		suggestRemediation = parseBoolEnv(value)
+	}
+	redactor, err := redact.NewRedactor(splitEnvList(getenv("NOMOS_REDACTION_PATTERNS")))
+	if err != nil {
+		return explainSettings{}, err
 	}
 	return explainSettings{
 		AssuranceLevel: assurance.DeriveWithEvidence(deploymentMode, parseBoolEnv(getenv("NOMOS_RUNTIME_STRONG_GUARANTEE")), assurance.Evidence{
@@ -597,6 +731,7 @@ func deriveExplainSettings(configPath, bundlePath string, getenv func(string) st
 		}),
 		SuggestRemediation:    suggestRemediation,
 		ExecCompatibilityMode: strings.TrimSpace(getenv("NOMOS_POLICY_EXEC_COMPATIBILITY_MODE")),
+		Redactor:              redactor,
 	}, nil
 }
 
@@ -707,6 +842,17 @@ func hostFromNormalizedResource(resource string) string {
 func parseBoolEnv(value string) bool {
 	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 	return err == nil && parsed
+}
+
+func splitEnvList(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func parsePolicyFlags(name string, args []string) (string, string) {
@@ -1040,6 +1186,7 @@ func rootHelpText() string {
 		"  serve      start gateway server\n" +
 		"  mcp        start MCP stdio server\n" +
 		"  policy     policy test/explain\n" +
+		"  approvals  list pending approvals\n" +
 		"  doctor     deterministic preflight checks\n\n" +
 		"example:\n" +
 		"  nomos mcp -c ./examples/configs/config.example.json -p ./examples/policies/your-policy-bundle.json\n"
