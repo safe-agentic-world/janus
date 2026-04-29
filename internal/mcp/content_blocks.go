@@ -124,7 +124,7 @@ func (s *Server) governForwardedContent(result upstreamToolCallResult, obligatio
 }
 
 func (s *Server) governBinaryMCPContentBlock(block map[string]any, kind string, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool) (map[string]any, bool, bool, bool) {
-	out := make(map[string]any, len(block)+1)
+	out := make(map[string]any, len(block))
 	truncated := false
 	sawData := false
 	for key, value := range block {
@@ -163,7 +163,7 @@ func (s *Server) governBinaryMCPContentBlock(block map[string]any, kind string, 
 }
 
 func (s *Server) governResourceMCPContentBlock(block map[string]any, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool) (map[string]any, bool, bool, bool) {
-	out := make(map[string]any, len(block)+1)
+	out := make(map[string]any, len(block))
 	truncated := false
 	resourceValue, hasResource := block["resource"]
 	if hasResource {
