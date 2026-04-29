@@ -9,6 +9,7 @@ For higher-assurance deployment guidance, also see:
 - `docs/strong-guarantee-deployment.md`
 - `docs/reference-architecture.md`
 - `docs/egress-and-identity.md`
+- `docs/hot-reload.md`
 
 ## Stateless Mode
 

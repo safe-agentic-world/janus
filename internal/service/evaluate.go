@@ -9,14 +9,15 @@ import (
 )
 
 func (s *Service) EvaluateAction(actionInput action.Action) (normalize.NormalizedAction, policy.Decision, error) {
-	if s == nil || s.policy == nil {
+	engine := s.currentPolicyEngine()
+	if engine == nil {
 		return normalize.NormalizedAction{}, policy.Decision{}, errors.New("service not initialized")
 	}
 	normalized, err := normalize.Action(actionInput)
 	if err != nil {
 		return normalize.NormalizedAction{}, policy.Decision{}, err
 	}
-	decision := s.policy.Evaluate(normalized)
+	decision := engine.Evaluate(normalized)
 	if s.externalPolicy != nil {
 		externalDecision, err := s.externalPolicy.Evaluate(normalized)
 		if err != nil {
