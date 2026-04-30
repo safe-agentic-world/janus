@@ -17,8 +17,9 @@ Nomos therefore treats MCP `tools/list` as a static advertised surface for the l
 ## Supported Transports
 
 - stdio
+- Streamable HTTP for remote MCP clients and upstream MCP servers
 
-HTTP transport for MCP is not currently implemented.
+Legacy SSE upstream MCP servers are supported as a compatibility path.
 
 ## Supported Request / Response Envelopes
 
@@ -42,6 +43,12 @@ Nomos supports:
 - `notifications/initialized`
 - `tools/list`
 - `tools/call`
+- `resources/list`
+- `resources/read`
+- `prompts/list`
+- `prompts/get`
+- `completion/complete`
+- governed upstream `sampling/createMessage` when the downstream client advertises sampling support
 
 Exposed tools:
 
@@ -82,6 +89,31 @@ For `tools/call`:
 
 ## Unsupported Or Narrowly Supported Features
 
-- MCP over HTTP transport
 - optional protocol features not explicitly listed above
 - arbitrary non-protocol stdout output
+
+## Reference Contract Suite
+
+The `MCP Reference Contract` CI job is the authoritative interop gate for upstream MCP gateway claims.
+
+Pinned references are recorded in `testdata/mcp-contract/reference-servers.json` with package versions and `sha512` integrity hashes:
+
+- `@modelcontextprotocol/server-everything@2026.1.26`
+- `@modelcontextprotocol/server-filesystem@2026.1.14`
+- `@modelcontextprotocol/server-memory@2026.1.26`
+
+The CI suite runs offline deterministic contract fixtures for those references instead of downloading package payloads during test execution. Coverage includes:
+
+- `initialize` and `tools/list`
+- representative `tools/call` success for each reference
+- invalid `tools/call` arguments returning structured tool errors
+- `resources/list` and `resources/read`
+- `prompts/list` and `prompts/get`
+- upstream-requested sampling for the Everything reference surface
+- stdio and Streamable HTTP upstream transport parity
+- unsupported method errors
+- early upstream exit fail-closed behavior
+- stable canonical action fingerprints across equivalent argument ordering
+- least-privilege stdio upstream environment defaults
+
+Failures in `MCP Reference Contract` are release blockers and must not be treated as optional unit-test flakes.

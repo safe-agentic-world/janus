@@ -36,9 +36,12 @@ Use this before tagging and public launch posts:
 go test ./...
 go test -race ./...
 go vet ./...
+$env:NOMOS_MCP_CONTRACT_TESTS = "1"; go test ./internal/mcp -run "TestReferenceMCPContract|TestReferenceContractManifest" -count=1 -v; Remove-Item Env:\NOMOS_MCP_CONTRACT_TESTS
 .\bin\nomos.exe doctor -c .\examples\quickstart\config.quickstart.json --format json
 .\bin\nomos.exe policy explain --action .\examples\quickstart\actions\deny-env.json --bundle .\policies\safe-dev-hardened.yaml
 ```
+
+The `MCP Reference Contract` CI job is mandatory for releases. Treat failures in that job as release blockers because it proves Nomos can govern pinned reference MCP upstreams through stdio and Streamable HTTP.
 
 ## Docs and Artifact Consistency
 
