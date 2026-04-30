@@ -25,6 +25,7 @@ import (
 type Service struct {
 	policy                *policy.Engine
 	policyEngine          atomic.Pointer[policy.Engine]
+	policySelector        atomic.Value
 	externalPolicy        ExternalPolicyEvaluator
 	fsReader              *executor.FSReader
 	fsWriter              *executor.FSWriter
@@ -58,6 +59,8 @@ type CredentialBroker interface {
 type ExternalPolicyEvaluator interface {
 	Evaluate(normalize.NormalizedAction) (policy.Decision, error)
 }
+
+type PolicySelector func(normalize.NormalizedAction) (*policy.Engine, string, error)
 
 func New(policyEngine *policy.Engine, fsReader *executor.FSReader, fsWriter *executor.FSWriter, patcher *executor.PatchApplier, execRunner *executor.ExecRunner, httpRunner *executor.HTTPRunner, recorder audit.Recorder, redactor *redact.Redactor, approvals ApprovalStore, credentialBroker CredentialBroker, sandboxProfile string, now func() time.Time) *Service {
 	if now == nil {
@@ -93,6 +96,30 @@ func (s *Service) currentPolicyEngine() *policy.Engine {
 	return s.policy
 }
 
+func (s *Service) policyEngineForAction(normalized normalize.NormalizedAction) (*policy.Engine, string, error) {
+	if s == nil {
+		return nil, "", errors.New("service not initialized")
+	}
+	if stored := s.policySelector.Load(); stored != nil {
+		selector, ok := stored.(PolicySelector)
+		if ok && selector != nil {
+			engine, tenantID, err := selector(normalized)
+			if err != nil {
+				return nil, "", err
+			}
+			if engine == nil {
+				return nil, "", errors.New("policy engine is required")
+			}
+			return engine, strings.TrimSpace(tenantID), nil
+		}
+	}
+	engine := s.currentPolicyEngine()
+	if engine == nil {
+		return nil, "", errors.New("service not initialized")
+	}
+	return engine, strings.TrimSpace(normalized.TenantID), nil
+}
+
 func (s *Service) SetPolicyEngine(engine *policy.Engine) error {
 	if s == nil {
 		return errors.New("service not initialized")
@@ -103,6 +130,16 @@ func (s *Service) SetPolicyEngine(engine *policy.Engine) error {
 	s.policy = engine
 	s.policyEngine.Store(engine)
 	return nil
+}
+
+func (s *Service) SetPolicySelector(selector PolicySelector) {
+	if s == nil {
+		return
+	}
+	if selector == nil {
+		return
+	}
+	s.policySelector.Store(selector)
 }
 
 func (s *Service) SetAssuranceLevel(level string) {
@@ -157,8 +194,7 @@ func (s *Service) SetExecCompatibilityMode(mode string) {
 }
 
 func (s *Service) Process(actionInput action.Action) (action.Response, error) {
-	engine := s.currentPolicyEngine()
-	if engine == nil || s.recorder == nil || s.redactor == nil {
+	if s.recorder == nil || s.redactor == nil {
 		return action.Response{}, errors.New("service not initialized")
 	}
 	started := s.now().UTC()
@@ -176,6 +212,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		fallbackPrincipal:  actionInput.Principal,
 		fallbackAgent:      actionInput.Agent,
 		fallbackEnv:        actionInput.Environment,
+		fallbackTenantID:   actionInput.TenantID,
 		actionSummary:      actionSummary(actionInput.ActionType, actionInput.Resource),
 		paramsSummary:      summarizeParams(s.redactor, actionInput.Params),
 		executorMetadata:   transportMetadataFromContext(actionInput.Context),
@@ -183,19 +220,6 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	defer func() {
 		s.emitCompletedAudit(auditCtx, started)
 	}()
-	s.emitTelemetryEvent("request.lifecycle", actionInput.TraceID, "", map[string]any{
-		"action_id":   actionInput.ActionID,
-		"action_type": actionInput.ActionType,
-		"resource":    actionInput.Resource,
-		"environment": actionInput.Environment,
-		"principal":   actionInput.Principal,
-		"agent":       actionInput.Agent,
-		"phase":       "start",
-		"correlation": actionInput.TraceID,
-		"assurance":   s.assuranceLevel,
-	})
-
-	s.emitTraceEvent("trace.start", actionInput.TraceID, actionInput.ActionID)
 	normalized, err := normalize.Action(actionInput)
 	if err != nil {
 		auditCtx.resultClass = resultNormError
@@ -205,12 +229,46 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 			"action_id": actionInput.ActionID,
 			"phase":     "end",
 		})
-		s.emitTraceEvent("trace.end", actionInput.TraceID, actionInput.ActionID)
 		return action.Response{}, err
 	}
+	engine, tenantID, err := s.policyEngineForAction(normalized)
+	if err != nil {
+		normalized.TenantID = strings.TrimSpace(tenantID)
+		auditCtx.normalized = &normalized
+		auditCtx.decision = policy.Decision{
+			Decision:       policy.DecisionDeny,
+			ReasonCode:     "tenant_resolution_failed",
+			MatchedRuleIDs: []string{},
+			Obligations:    map[string]any{},
+		}
+		auditCtx.resultClass = resultDeniedPolicy
+		auditCtx.retryable = false
+		return action.Response{
+			Decision: policy.DecisionDeny,
+			Reason:   "tenant_resolution_failed",
+			TraceID:  normalized.TraceID,
+			ActionID: normalized.ActionID,
+		}, nil
+	}
+	normalized.TenantID = strings.TrimSpace(tenantID)
 	auditCtx.normalized = &normalized
 	auditCtx.riskLevel, auditCtx.riskFlags = riskVisibility(normalized)
 	auditCtx.actionSummary = actionSummary(normalized.ActionType, normalized.Resource)
+
+	s.emitTelemetryEvent("request.lifecycle", actionInput.TraceID, "", map[string]any{
+		"action_id":   actionInput.ActionID,
+		"action_type": actionInput.ActionType,
+		"resource":    actionInput.Resource,
+		"environment": actionInput.Environment,
+		"principal":   actionInput.Principal,
+		"agent":       actionInput.Agent,
+		"tenant_id":   normalized.TenantID,
+		"phase":       "start",
+		"correlation": actionInput.TraceID,
+		"assurance":   s.assuranceLevel,
+	})
+
+	s.emitTraceEvent("trace.start", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 
 	if s.rateLimiter != nil {
 		limitResult := s.rateLimiter.Check(normalized)
@@ -245,7 +303,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 			auditCtx.resultClass = resultRateLimit
 			auditCtx.retryable = true
 			s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
-			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 			return response, nil
 		}
 	}
@@ -274,6 +332,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	s.emitTelemetryEvent("policy.evaluation", normalized.TraceID, decision.Decision, map[string]any{
 		"action_id":          normalized.ActionID,
 		"action_type":        normalized.ActionType,
+		"tenant_id":          normalized.TenantID,
 		"matched_rule_ids":   decision.MatchedRuleIDs,
 		"policy_bundle_hash": decision.PolicyBundleHash,
 	})
@@ -284,7 +343,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 	if err != nil {
 		auditCtx.resultClass = resultInternalError
 		auditCtx.retryable = true
-		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 		return action.Response{}, err
 	}
 	decisionEvent := audit.Event{
@@ -312,6 +371,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		Principal:           normalized.Principal,
 		Agent:               normalized.Agent,
 		Environment:         normalized.Environment,
+		TenantID:            normalized.TenantID,
 		Decision:            decision.Decision,
 		Reason:              decision.ReasonCode,
 		Fingerprint:         fingerprint,
@@ -330,14 +390,14 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		classKey := approvalClassKey(decision.Obligations, normalized)
 		approvalID, err := approvalIDFromExtensions(actionInput.Context)
 		if err != nil {
-			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 			return action.Response{}, err
 		}
 		if approvalID != "" && s.approvals != nil {
 			ok, rec, err := s.approvals.CheckApproved(context.Background(), approvalID, fingerprint, classKey)
 			if err != nil {
 				auditCtx.resultClass, auditCtx.retryable = classifyError(err)
-				s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+				s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 				return action.Response{}, err
 			}
 			if ok {
@@ -354,6 +414,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 					Principal:      normalized.Principal,
 					Agent:          normalized.Agent,
 					Environment:    normalized.Environment,
+					TenantID:       normalized.TenantID,
 					AssuranceLevel: s.assuranceLevel,
 				})
 			}
@@ -386,7 +447,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 				})
 				if err != nil {
 					auditCtx.resultClass, auditCtx.retryable = classifyError(err)
-					s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+					s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 					return action.Response{}, err
 				}
 				response.ApprovalID = pending.ApprovalID
@@ -403,13 +464,14 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 					Principal:      normalized.Principal,
 					Agent:          normalized.Agent,
 					Environment:    normalized.Environment,
+					TenantID:       normalized.TenantID,
 					AssuranceLevel: s.assuranceLevel,
 				})
 			}
 			auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 			auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
 			s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
-			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 			return response, nil
 		}
 	}
@@ -418,7 +480,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
 		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
-		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 		return response, nil
 	}
 
@@ -433,7 +495,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
 		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
-		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 		return response, nil
 	}
 
@@ -446,7 +508,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		if err != nil {
 			auditCtx.resultClass, auditCtx.retryable = classifyError(err)
 			s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
-			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+			s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 			return response, err
 		}
 		redacted := s.redactor.RedactText(readResult.Content)
@@ -459,7 +521,7 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		auditCtx.resultSummary = summarizeResponse(s.redactor, response)
 		auditCtx.resultClass, auditCtx.retryable = classifyDecision(decision, response)
 		s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, response.Decision)
-		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+		s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 		return response, nil
 	}
 
@@ -481,16 +543,17 @@ func (s *Service) Process(actionInput action.Action) (action.Response, error) {
 		}
 	}
 	s.emitDecisionTelemetry(normalized.TraceID, auditCtx.resultClass, resp.Decision)
-	s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID)
+	s.emitTraceEvent("trace.end", normalized.TraceID, normalized.ActionID, normalized.TenantID)
 	return resp, err
 }
 
-func (s *Service) emitTraceEvent(eventType, traceID, actionID string) {
+func (s *Service) emitTraceEvent(eventType, traceID, actionID, tenantID string) {
 	event := audit.Event{
 		Timestamp:      s.now().UTC(),
 		EventType:      eventType,
 		TraceID:        traceID,
 		ActionID:       actionID,
+		TenantID:       tenantID,
 		AssuranceLevel: s.assuranceLevel,
 	}
 	_ = s.recorder.WriteEvent(event)

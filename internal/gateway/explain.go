@@ -15,6 +15,7 @@ type explainResponse struct {
 	TraceID               string         `json:"trace_id"`
 	ActionType            string         `json:"action_type"`
 	Resource              string         `json:"resource"`
+	TenantID              string         `json:"tenant_id,omitempty"`
 	Decision              string         `json:"decision"`
 	ReasonCode            string         `json:"reason_code"`
 	MatchedRuleIDs        []string       `json:"matched_rule_ids"`
@@ -55,6 +56,10 @@ func (g *Gateway) handleExplain(w http.ResponseWriter, r *http.Request) {
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
+	if err := g.attachTenant(&act, id); err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
+		return
+	}
 	if err := g.validateUpstreamRoute(act); err != nil {
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
@@ -76,6 +81,11 @@ func (g *Gateway) explainAction(act action.Action) (explainResponse, error) {
 	if state == nil || state.Engine == nil {
 		return explainResponse{}, errGatewayPolicyUnavailable
 	}
-	explanation := state.Engine.Explain(normalized)
+	engine, tenantID, err := g.selectPolicyEngine(normalized)
+	if err != nil {
+		return explainResponse{}, err
+	}
+	normalized.TenantID = tenantID
+	explanation := engine.Explain(normalized)
 	return buildExplainResponse(explanation, normalized, g.cfg, g.assuranceLevel), nil
 }

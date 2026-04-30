@@ -32,6 +32,7 @@ type Event struct {
 	Principal             string         `json:"principal,omitempty"`
 	Agent                 string         `json:"agent,omitempty"`
 	Environment           string         `json:"environment,omitempty"`
+	TenantID              string         `json:"tenant_id,omitempty"`
 	ActionType            string         `json:"action_type,omitempty"`
 	Resource              string         `json:"resource,omitempty"`
 	ResourceNormalized    string         `json:"resource_normalized,omitempty"`

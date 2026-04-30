@@ -29,6 +29,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/responsescan"
 	"github.com/safe-agentic-world/nomos/internal/service"
 	"github.com/safe-agentic-world/nomos/internal/telemetry"
+	"github.com/safe-agentic-world/nomos/internal/tenant"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
@@ -54,15 +55,24 @@ type Server struct {
 	execCompatibilityMode string
 	responseScanner       *responsescan.Scanner
 	telemetry             *telemetry.Emitter
+	tenantConfig          tenant.Config
 	logger                *runtimeLogger
 	pid                   int
 	ownsResources         bool
 }
 
 type serverReloadState struct {
+	Engine              *policy.Engine
 	PolicyBundleHash    string
 	PolicyBundleSources []string
 	UpstreamRoutes      []UpstreamRoute
+	TenantPolicies      map[string]*serverTenantPolicyState
+}
+
+type serverTenantPolicyState struct {
+	Engine        *policy.Engine
+	BundleHash    string
+	BundleSources []string
 }
 
 type serverStateHolder struct {
@@ -164,11 +174,13 @@ func newServerStateHolder(state *serverReloadState) *serverStateHolder {
 	return holder
 }
 
-func newServerReloadState(bundle policy.Bundle, routes []UpstreamRoute) *serverReloadState {
+func newServerReloadState(engine *policy.Engine, bundle policy.Bundle, routes []UpstreamRoute, tenants map[string]*serverTenantPolicyState) *serverReloadState {
 	return &serverReloadState{
+		Engine:              engine,
 		PolicyBundleHash:    bundle.Hash,
 		PolicyBundleSources: policy.BundleSourceLabels(bundle),
 		UpstreamRoutes:      append([]UpstreamRoute(nil), routes...),
+		TenantPolicies:      cloneServerTenantPolicyStates(tenants),
 	}
 }
 
@@ -184,11 +196,31 @@ func (h *serverStateHolder) store(state *serverReloadState) {
 		return
 	}
 	copied := &serverReloadState{
+		Engine:              state.Engine,
 		PolicyBundleHash:    state.PolicyBundleHash,
 		PolicyBundleSources: append([]string{}, state.PolicyBundleSources...),
 		UpstreamRoutes:      append([]UpstreamRoute(nil), state.UpstreamRoutes...),
+		TenantPolicies:      cloneServerTenantPolicyStates(state.TenantPolicies),
 	}
 	h.ptr.Store(copied)
+}
+
+func cloneServerTenantPolicyStates(input map[string]*serverTenantPolicyState) map[string]*serverTenantPolicyState {
+	if len(input) == 0 {
+		return map[string]*serverTenantPolicyState{}
+	}
+	out := make(map[string]*serverTenantPolicyState, len(input))
+	for id, state := range input {
+		if state == nil {
+			continue
+		}
+		out[id] = &serverTenantPolicyState{
+			Engine:        state.Engine,
+			BundleHash:    state.BundleHash,
+			BundleSources: append([]string{}, state.BundleSources...),
+		}
+	}
+	return out
 }
 
 func NewServer(bundlePath string, identity identity.VerifiedIdentity, workspaceRoot string, maxBytes, maxLines int, approvalsEnabled bool, sandboxEnabled bool, sandboxProfile string) (*Server, error) {
@@ -207,16 +239,24 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	if identity.Principal == "" || identity.Agent == "" || identity.Environment == "" {
 		return nil, errors.New("identity is required")
 	}
+	parsedRuntime, err := ParseRuntimeOptions(runtimeOptions)
+	if err != nil {
+		return nil, err
+	}
 	bundle, err := policy.LoadBundlesWithOptions(bundlePaths, policy.MultiLoadOptions{
-		BundleRoles: runtimeOptions.BundleRoles,
+		BundleRoles: parsedRuntime.BundleRoles,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := policy.ValidateExecCompatibility(bundle, runtimeOptions.ExecCompatibilityMode); err != nil {
+	if err := policy.ValidateExecCompatibility(bundle, parsedRuntime.ExecCompatibilityMode); err != nil {
 		return nil, err
 	}
-	logger, err := newRuntimeLogger(runtimeOptions)
+	tenantPolicies, err := loadServerTenantPolicyStates(bundlePaths, parsedRuntime)
+	if err != nil {
+		return nil, err
+	}
+	logger, err := newRuntimeLogger(parsedRuntime)
 	if err != nil {
 		return nil, err
 	}
@@ -234,25 +274,25 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		recorder = noopRecorder{}
 	}
 	var approvalStore *approval.Store
-	if approvalsEnabled && runtimeOptions.ApprovalStorePath != "" {
-		ttl := time.Duration(runtimeOptions.ApprovalTTLSeconds) * time.Second
+	if approvalsEnabled && parsedRuntime.ApprovalStorePath != "" {
+		ttl := time.Duration(parsedRuntime.ApprovalTTLSeconds) * time.Second
 		if ttl <= 0 {
 			ttl = 10 * time.Minute
 		}
-		approvalStore, err = approval.Open(runtimeOptions.ApprovalStorePath, ttl, time.Now)
+		approvalStore, err = approval.Open(parsedRuntime.ApprovalStorePath, ttl, time.Now)
 		if err != nil {
 			return nil, err
 		}
 	}
 	svc := service.New(engine, reader, writerExec, patcher, execRunner, httpRunner, recorder, logger.redactor, approvalStore, nil, sandboxProfile, nil)
-	svc.SetSandboxEvidence(runtimeOptions.SandboxEvidence, []string{workspaceRoot})
-	svc.SetExecCompatibilityMode(runtimeOptions.ExecCompatibilityMode)
-	upstream, err := newUpstreamSupervisor(runtimeOptions.UpstreamServers, logger, runtimeOptions.Telemetry, identity, runtimeOptions.CredentialBroker, recorder)
+	svc.SetSandboxEvidence(parsedRuntime.SandboxEvidence, []string{workspaceRoot})
+	svc.SetExecCompatibilityMode(parsedRuntime.ExecCompatibilityMode)
+	upstream, err := newUpstreamSupervisor(parsedRuntime.UpstreamServers, logger, parsedRuntime.Telemetry, identity, parsedRuntime.CredentialBroker, recorder)
 	if err != nil {
 		return nil, err
 	}
-	state := newServerReloadState(bundle, runtimeOptions.UpstreamRoutes)
-	return &Server{
+	state := newServerReloadState(engine, bundle, parsedRuntime.UpstreamRoutes, tenantPolicies)
+	server := &Server{
 		service:               svc,
 		approvals:             approvalStore,
 		identity:              identity,
@@ -268,16 +308,19 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		state:                 newServerStateHolder(state),
 		reloadMu:              &sync.Mutex{},
 		recorder:              recorder,
-		credentialBroker:      runtimeOptions.CredentialBroker,
+		credentialBroker:      parsedRuntime.CredentialBroker,
 		bundlePaths:           append([]string{}, bundlePaths...),
-		bundleRoles:           append([]string{}, runtimeOptions.BundleRoles...),
-		execCompatibilityMode: runtimeOptions.ExecCompatibilityMode,
+		bundleRoles:           append([]string{}, parsedRuntime.BundleRoles...),
+		execCompatibilityMode: parsedRuntime.ExecCompatibilityMode,
 		responseScanner:       responseScanner,
-		telemetry:             runtimeOptions.Telemetry,
+		telemetry:             parsedRuntime.Telemetry,
+		tenantConfig:          parsedRuntime.TenantConfig,
 		logger:                logger,
 		pid:                   os.Getpid(),
 		ownsResources:         true,
-	}, nil
+	}
+	svc.SetPolicySelector(server.selectPolicyEngine)
+	return server, nil
 }
 
 func (s *Server) CloneForIdentity(id identity.VerifiedIdentity) *Server {
@@ -366,6 +409,9 @@ func (s *Server) Reload(ctx context.Context, opts ReloadOptions) (ReloadResult, 
 	if runtimeOptions.CredentialBroker == nil {
 		runtimeOptions.CredentialBroker = s.credentialBroker
 	}
+	if !runtimeOptions.TenantConfig.Configured() && s.tenantConfig.Configured() {
+		runtimeOptions.TenantConfig = s.tenantConfig
+	}
 	parsedRuntime, err := ParseRuntimeOptions(runtimeOptions)
 	if err != nil {
 		result := s.reloadFailureResult(trigger, err)
@@ -385,6 +431,12 @@ func (s *Server) Reload(ctx context.Context, opts ReloadOptions) (ReloadResult, 
 		s.recordReloadAudit(result)
 		return result, fmt.Errorf("reload validation failed: %w", err)
 	}
+	tenantPolicies, err := loadServerTenantPolicyStates(bundlePaths, parsedRuntime)
+	if err != nil {
+		result := s.reloadFailureResult(trigger, err)
+		s.recordReloadAudit(result)
+		return result, fmt.Errorf("reload validation failed: %w", err)
+	}
 	nextEngine := policy.NewEngine(bundle)
 	upstreamResult, err := s.upstream.reload(ctx, parsedRuntime.UpstreamServers, s.identity, parsedRuntime.CredentialBroker, s.recorder)
 	if err != nil {
@@ -399,7 +451,7 @@ func (s *Server) Reload(ctx context.Context, opts ReloadOptions) (ReloadResult, 
 		return result, err
 	}
 	s.service.SetExecCompatibilityMode(parsedRuntime.ExecCompatibilityMode)
-	nextState := newServerReloadState(bundle, parsedRuntime.UpstreamRoutes)
+	nextState := newServerReloadState(nextEngine, bundle, parsedRuntime.UpstreamRoutes, tenantPolicies)
 	if s.state == nil {
 		s.state = newServerStateHolder(nextState)
 	} else {
@@ -412,6 +464,7 @@ func (s *Server) Reload(ctx context.Context, opts ReloadOptions) (ReloadResult, 
 	s.bundleRoles = append([]string{}, parsedRuntime.BundleRoles...)
 	s.execCompatibilityMode = parsedRuntime.ExecCompatibilityMode
 	s.credentialBroker = parsedRuntime.CredentialBroker
+	s.tenantConfig = parsedRuntime.TenantConfig
 
 	result := ReloadResult{
 		Outcome:             "success",
@@ -660,11 +713,11 @@ func (s *Server) handleRPCRequest(req rpcRequest, session *downstreamSession) *r
 			},
 		}
 	case "resources/list":
-		return s.handleResourcesListRPC(req)
+		return s.handleResourcesListRPC(req, session)
 	case "resources/read":
 		return s.handleResourcesReadRPC(req, session)
 	case "prompts/list":
-		return s.handlePromptsListRPC(req)
+		return s.handlePromptsListRPC(req, session)
 	case "prompts/get":
 		return s.handlePromptsGetRPC(req, session)
 	case "completion/complete":
@@ -809,12 +862,19 @@ func (s *Server) handleRequest(req Request) Response {
 	return s.handleRequestWithSession(req, nil)
 }
 
+func (s *Server) identityForSession(session *downstreamSession) identity.VerifiedIdentity {
+	if session == nil {
+		return s.identity
+	}
+	return session.actionIdentity()
+}
+
 func (s *Server) handleRequestWithSession(req Request, session *downstreamSession) Response {
 	req.Method = canonicalToolName(req.Method)
 	if req.Method != "nomos.fs_read" {
 		switch req.Method {
 		case "nomos.capabilities":
-			return s.handleCapabilities(req)
+			return s.handleCapabilities(req, session)
 		case "nomos.fs_write":
 			return s.handleFSWrite(req, session)
 		case "nomos.apply_patch":
@@ -824,7 +884,7 @@ func (s *Server) handleRequestWithSession(req Request, session *downstreamSessio
 		case "nomos.http_request":
 			return s.handleHTTPRequest(req, session)
 		case "repo.validate_change_set":
-			return s.handleValidateChangeSet(req)
+			return s.handleValidateChangeSet(req, session)
 		default:
 			if s.isForwardedTool(req.Method) {
 				return s.handleForwardedToolWithSession(req, session)
@@ -842,6 +902,7 @@ func (s *Server) handleRequestWithSession(req Request, session *downstreamSessio
 	if err != nil {
 		return Response{ID: req.ID, Error: classifyToolError(err)}
 	}
+	id := s.identityForSession(session)
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + req.ID,
@@ -851,7 +912,7 @@ func (s *Server) handleRequestWithSession(req Request, session *downstreamSessio
 		TraceID:       "mcp_" + req.ID,
 		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -884,6 +945,10 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	}
 	tool, ok := s.upstream.toolByName(req.Method)
 	if !ok {
+		return Response{ID: req.ID, Error: "method_not_found"}
+	}
+	id := s.identityForSession(session)
+	if !s.upstreamVisibleForIdentity(id, tool.ServerName) {
 		return Response{ID: req.ID, Error: "method_not_found"}
 	}
 	args := bytes.TrimSpace(req.Params)
@@ -922,7 +987,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 		TraceID: "mcp_" + req.ID,
 	}
 	actionReq.Context = action.Context{Extensions: buildActionExtensionsForSessionWithMetadata(approvalID, session, s.upstream.envMetadata(tool.ServerName))}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -939,7 +1004,7 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 	}
 	resp.ExecutionMode = "mcp_forwarded"
 	resp.ReportPath = ""
-	governed := s.governForwardedContent(output, resp.Obligations, actionReq, tool)
+	governed := s.governForwardedContent(output, resp.Obligations, actionReq, tool, id)
 	if governed.Denied {
 		return Response{ID: req.ID, Error: responseScanDeniedError}
 	}
@@ -949,12 +1014,13 @@ func (s *Server) handleForwardedToolWithSession(req Request, session *downstream
 		resp.MCPContentBlocks = governed.Blocks
 	}
 	resp.Obligations = nil
-	s.recordMCPContentBlocks(actionReq, tool, resp, governed)
+	s.recordMCPContentBlocks(actionReq, tool, resp, governed, id)
 	return Response{ID: req.ID, Result: resp}
 }
 
 func (s *Server) handleFSWrite(req Request, session *downstreamSession) Response {
-	if !s.toolEnabled("nomos.fs_write") {
+	id := s.identityForSession(session)
+	if !s.toolEnabledForIdentity("nomos.fs_write", id) {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
 	var params fsWriteParams
@@ -976,7 +1042,7 @@ func (s *Server) handleFSWrite(req Request, session *downstreamSession) Response
 		TraceID:       "mcp_" + req.ID,
 		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -988,7 +1054,8 @@ func (s *Server) handleFSWrite(req Request, session *downstreamSession) Response
 }
 
 func (s *Server) handleApplyPatch(req Request, session *downstreamSession) Response {
-	if !s.toolEnabled("nomos.apply_patch") {
+	id := s.identityForSession(session)
+	if !s.toolEnabledForIdentity("nomos.apply_patch", id) {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
 	var params patchParams
@@ -1006,7 +1073,7 @@ func (s *Server) handleApplyPatch(req Request, session *downstreamSession) Respo
 		TraceID:       "mcp_" + req.ID,
 		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -1018,7 +1085,8 @@ func (s *Server) handleApplyPatch(req Request, session *downstreamSession) Respo
 }
 
 func (s *Server) handleExec(req Request, session *downstreamSession) Response {
-	if !s.toolEnabled("nomos.exec") {
+	id := s.identityForSession(session)
+	if !s.toolEnabledForIdentity("nomos.exec", id) {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
 	var params execParams
@@ -1040,7 +1108,7 @@ func (s *Server) handleExec(req Request, session *downstreamSession) Response {
 		TraceID: "mcp_" + req.ID,
 		Context: action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -1052,7 +1120,8 @@ func (s *Server) handleExec(req Request, session *downstreamSession) Response {
 }
 
 func (s *Server) handleHTTPRequest(req Request, session *downstreamSession) Response {
-	if !s.toolEnabled("nomos.http_request") {
+	id := s.identityForSession(session)
+	if !s.toolEnabledForIdentity("nomos.http_request", id) {
 		return Response{ID: req.ID, Error: "denied_policy"}
 	}
 	var params httpParams
@@ -1073,7 +1142,7 @@ func (s *Server) handleHTTPRequest(req Request, session *downstreamSession) Resp
 		TraceID:       "mcp_" + req.ID,
 		Context:       action.Context{Extensions: buildActionExtensionsForSession(params.ApprovalID, session)},
 	}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -1084,8 +1153,13 @@ func (s *Server) handleHTTPRequest(req Request, session *downstreamSession) Resp
 	return Response{ID: req.ID, Result: resp}
 }
 
-func (s *Server) handleCapabilities(req Request) Response {
-	toolStates := s.service.ToolCapabilities(s.identity)
+func (s *Server) handleCapabilities(req Request, sessions ...*downstreamSession) Response {
+	var session *downstreamSession
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
+	id := s.identityForSession(session)
+	toolStates := s.service.ToolCapabilities(id)
 	result := service.CapabilityEnvelopeFromToolStates(toolStates)
 	networkMode := "deny"
 	if capability, ok := toolStates["nomos.http_request"]; ok && capability.State != service.ToolStateUnavailable {
@@ -1101,11 +1175,12 @@ func (s *Server) handleCapabilities(req Request) Response {
 	result.OutputMaxLines = s.outputMaxLines
 	result.ApprovalsEnabled = s.approvalsEnabled
 	result.AssuranceLevel = s.assuranceLevel
+	result.TenantID, _ = s.tenantIDForIdentity(id)
 	result.MediationNotice = capabilityMediationNotice(s.assuranceLevel)
-	resourceCapability := s.service.ActionCapability("mcp.resource_read", s.identity)
-	promptCapability := s.service.ActionCapability("mcp.prompt_get", s.identity)
-	completionCapability := s.service.ActionCapability("mcp.completion", s.identity)
-	samplingCapability := s.service.ActionCapability("mcp.sample", s.identity)
+	resourceCapability := s.service.ActionCapability("mcp.resource_read", id)
+	promptCapability := s.service.ActionCapability("mcp.prompt_get", id)
+	completionCapability := s.service.ActionCapability("mcp.completion", id)
+	samplingCapability := s.service.ActionCapability("mcp.sample", id)
 	result.MCPSurfaces = map[string]service.ToolCapability{
 		"resource_read": resourceCapability,
 		"prompt_get":    promptCapability,
@@ -1116,6 +1191,9 @@ func (s *Server) handleCapabilities(req Request) Response {
 		toolsSnapshot := s.upstream.snapshotTools()
 		forwarded := make([]map[string]any, 0, len(toolsSnapshot))
 		for _, tool := range toolsSnapshot {
+			if !s.upstreamVisibleForIdentity(id, tool.ServerName) {
+				continue
+			}
 			forwarded = append(forwarded, map[string]any{
 				"name":            tool.DownstreamName,
 				"upstream_server": tool.ServerName,
@@ -1126,19 +1204,24 @@ func (s *Server) handleCapabilities(req Request) Response {
 		}
 		result.ForwardedTools = forwarded
 	}
-	policyBundleHash, _ := s.policyMetadata()
-	result = service.FinalizeCapabilityEnvelope(result, s.identity, policyBundleHash)
+	policyBundleHash, _ := s.policyMetadataForIdentity(id)
+	result = service.FinalizeCapabilityEnvelope(result, id, policyBundleHash)
 	return Response{ID: req.ID, Result: result}
 }
 
-func (s *Server) handleValidateChangeSet(req Request) Response {
+func (s *Server) handleValidateChangeSet(req Request, sessions ...*downstreamSession) Response {
+	var session *downstreamSession
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
+	id := s.identityForSession(session)
 	var params changeSetParams
 	dec := json.NewDecoder(bytes.NewReader(req.Params))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&params); err != nil || len(params.Paths) == 0 {
 		return Response{ID: req.ID, Error: "invalid_params"}
 	}
-	allowed, blocked, err := s.service.ValidateChangeSet(s.identity, params.Paths)
+	allowed, blocked, err := s.service.ValidateChangeSet(id, params.Paths)
 	if err != nil {
 		return Response{ID: req.ID, Error: "validation_error"}
 	}
@@ -1150,7 +1233,11 @@ func (s *Server) handleValidateChangeSet(req Request) Response {
 }
 
 func (s *Server) toolEnabled(tool string) bool {
-	capabilities := s.service.ToolCapabilities(s.identity)
+	return s.toolEnabledForIdentity(tool, s.identity)
+}
+
+func (s *Server) toolEnabledForIdentity(tool string, id identity.VerifiedIdentity) bool {
+	capabilities := s.service.ToolCapabilities(id)
 	capability, ok := capabilities[tool]
 	if !ok {
 		return false
@@ -1194,11 +1281,16 @@ func (s *Server) recordToolDiscoveryAudit(req rpcRequest, session *downstreamSes
 	if s == nil || s.service == nil {
 		return
 	}
+	id := s.identityForSession(session)
 	metadata := map[string]any{
-		"principal":       s.identity.Principal,
+		"principal":       id.Principal,
 		"evaluated_tools": summary.evaluated,
 		"hidden_tools":    summary.hidden,
 		"tool_surface":    "tools/list",
+	}
+	tenantID, _ := s.tenantIDForIdentity(id)
+	if tenantID != "" {
+		metadata["tenant_id"] = tenantID
 	}
 	if session != nil {
 		for key, value := range session.auditMetadata() {
@@ -1211,9 +1303,10 @@ func (s *Server) recordToolDiscoveryAudit(req rpcRequest, session *downstreamSes
 		EventType:            "mcp.tools_list",
 		TraceID:              "mcp_" + rpcIDKey(parseRPCID(req.ID)),
 		ActionID:             "mcp_" + rpcIDKey(parseRPCID(req.ID)),
-		Principal:            s.identity.Principal,
-		Agent:                s.identity.Agent,
-		Environment:          s.identity.Environment,
+		Principal:            id.Principal,
+		Agent:                id.Agent,
+		Environment:          id.Environment,
+		TenantID:             tenantID,
 		ActionType:           "mcp.tools_list",
 		Resource:             "mcp://tools/list",
 		ResultClassification: "discovery",
@@ -1409,7 +1502,7 @@ func limitForwardedOutput(text string, obligations map[string]any) (string, bool
 	return out, truncated
 }
 
-func (s *Server) scanForwardedResponse(text string, obligations map[string]any, actionReq action.Request, tool upstreamTool) forwardedResponseScanResult {
+func (s *Server) scanForwardedResponse(text string, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) forwardedResponseScanResult {
 	mode, ok := responseScanMode(obligations)
 	result := forwardedResponseScanResult{
 		Text:            text,
@@ -1420,7 +1513,7 @@ func (s *Server) scanForwardedResponse(text string, obligations map[string]any, 
 		result.Denied = true
 		result.Misconfigured = true
 		result.ResultClass = responseScanDeniedError
-		s.recordResponseScan(actionReq, tool, result)
+		s.recordResponseScan(actionReq, tool, result, id)
 		return result
 	}
 	sanitized, err := s.responseScanner.Sanitize(text, mode)
@@ -1435,19 +1528,19 @@ func (s *Server) scanForwardedResponse(text string, obligations map[string]any, 
 	if err != nil || sanitized.Denied {
 		result.Denied = true
 		result.ResultClass = responseScanDeniedError
-		s.recordResponseScan(actionReq, tool, result)
+		s.recordResponseScan(actionReq, tool, result, id)
 		s.emitResponseScanTelemetry(actionReq.TraceID, mode, result.RulePackVersion, result.Findings)
 		return result
 	}
 	if len(result.Findings) > 0 {
 		result.ResultClass = "RESPONSE_SCAN_SANITIZED"
-		s.recordResponseScan(actionReq, tool, result)
+		s.recordResponseScan(actionReq, tool, result, id)
 		s.emitResponseScanTelemetry(actionReq.TraceID, mode, result.RulePackVersion, result.Findings)
 		return result
 	}
 	if result.InputTruncated {
 		result.ResultClass = "RESPONSE_SCAN_PARTIAL"
-		s.recordResponseScan(actionReq, tool, result)
+		s.recordResponseScan(actionReq, tool, result, id)
 	}
 	return result
 }
@@ -1463,7 +1556,7 @@ func responseScanMode(obligations map[string]any) (responsescan.Mode, bool) {
 	return responsescan.NormalizeMode(value)
 }
 
-func (s *Server) recordResponseScan(actionReq action.Request, tool upstreamTool, result forwardedResponseScanResult) {
+func (s *Server) recordResponseScan(actionReq action.Request, tool upstreamTool, result forwardedResponseScanResult, id identity.VerifiedIdentity) {
 	if s == nil || s.service == nil {
 		return
 	}
@@ -1485,15 +1578,17 @@ func (s *Server) recordResponseScan(actionReq action.Request, tool upstreamTool,
 	if classification == "" {
 		classification = "RESPONSE_SCAN_OK"
 	}
+	tenantID, _ := s.tenantIDForIdentity(id)
 	_ = s.service.RecordAuditEvent(audit.Event{
 		SchemaVersion:        "v1",
 		Timestamp:            time.Now().UTC(),
 		EventType:            "mcp.response_scan",
 		TraceID:              actionReq.TraceID,
 		ActionID:             actionReq.ActionID,
-		Principal:            s.identity.Principal,
-		Agent:                s.identity.Agent,
-		Environment:          s.identity.Environment,
+		Principal:            id.Principal,
+		Agent:                id.Agent,
+		Environment:          id.Environment,
+		TenantID:             tenantID,
 		ActionType:           actionReq.ActionType,
 		Resource:             actionReq.Resource,
 		ResultClassification: classification,

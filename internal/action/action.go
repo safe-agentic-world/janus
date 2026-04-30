@@ -182,6 +182,7 @@ type Action struct {
 	Principal     string          `json:"principal"`
 	Agent         string          `json:"agent"`
 	Environment   string          `json:"environment"`
+	TenantID      string          `json:"-"`
 	Context       Context         `json:"context"`
 	TraceID       string          `json:"trace_id"`
 }

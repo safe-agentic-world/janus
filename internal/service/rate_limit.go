@@ -39,6 +39,7 @@ func (s *Service) emitRateLimitAuditDecision(normalized normalize.NormalizedActi
 		Principal:           normalized.Principal,
 		Agent:               normalized.Agent,
 		Environment:         normalized.Environment,
+		TenantID:            normalized.TenantID,
 		Decision:            decision.Decision,
 		Reason:              decision.ReasonCode,
 		ExecutorMetadata:    metadata,

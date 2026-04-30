@@ -1348,6 +1348,24 @@ func (s *upstreamSupervisor) callWithRequests(ctx context.Context, serverName, m
 	return session.callWithRequests(ctx, method, params, handler)
 }
 
+func (s *upstreamSupervisor) serverConfig(serverName string) (UpstreamServerConfig, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	config, ok := s.serversByName[serverName]
+	return config, ok
+}
+
+func (s *upstreamSupervisor) serverNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.sessions))
+	for name := range s.sessions {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *upstreamSupervisor) snapshotTools() []upstreamTool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

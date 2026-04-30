@@ -25,21 +25,32 @@ func FirstSQLiteSinkPath(sink string) string {
 }
 
 func LoadActionDetail(sqlitePath, actionID string) (Event, error) {
+	candidates, err := loadActionDetailCandidates(sqlitePath, actionID, 20)
+	if err != nil {
+		return Event{}, err
+	}
+	return selectActionDetail(candidates)
+}
+
+func loadActionDetailCandidates(sqlitePath, actionID string, limit int) ([]Event, error) {
 	if strings.TrimSpace(sqlitePath) == "" {
-		return Event{}, errors.New("sqlite audit sink is not configured")
+		return nil, errors.New("sqlite audit sink is not configured")
 	}
 	if strings.TrimSpace(actionID) == "" {
-		return Event{}, errors.New("action_id is required")
+		return nil, errors.New("action_id is required")
+	}
+	if limit <= 0 {
+		limit = 20
 	}
 	db, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
-		return Event{}, err
+		return nil, err
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT payload_json FROM audit_events WHERE action_id = ? ORDER BY id DESC LIMIT 20`, actionID)
+	rows, err := db.Query(`SELECT payload_json FROM audit_events WHERE action_id = ? ORDER BY id DESC LIMIT ?`, actionID, limit)
 	if err != nil {
-		return Event{}, err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -47,17 +58,21 @@ func LoadActionDetail(sqlitePath, actionID string) (Event, error) {
 	for rows.Next() {
 		var payload string
 		if err := rows.Scan(&payload); err != nil {
-			return Event{}, err
+			return nil, err
 		}
 		var event Event
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			return Event{}, fmt.Errorf("decode audit payload: %w", err)
+			return nil, fmt.Errorf("decode audit payload: %w", err)
 		}
 		candidates = append(candidates, event)
 	}
 	if err := rows.Err(); err != nil {
-		return Event{}, err
+		return nil, err
 	}
+	return candidates, nil
+}
+
+func selectActionDetail(candidates []Event) (Event, error) {
 	if len(candidates) == 0 {
 		return Event{}, errors.New("action not found")
 	}
@@ -113,6 +128,45 @@ func LoadTraceEvents(sqlitePath, traceID string) ([]Event, error) {
 	return events, nil
 }
 
+func LoadActionDetailForTenant(sqlitePath, actionID, tenantID string) (Event, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return LoadActionDetail(sqlitePath, actionID)
+	}
+	candidates, err := loadActionDetailCandidates(sqlitePath, actionID, 100)
+	if err != nil {
+		return Event{}, err
+	}
+	filtered := make([]Event, 0, len(candidates))
+	for _, event := range candidates {
+		if strings.EqualFold(strings.TrimSpace(event.TenantID), tenantID) {
+			filtered = append(filtered, event)
+		}
+	}
+	return selectActionDetail(filtered)
+}
+
+func LoadTraceEventsForTenant(sqlitePath, traceID, tenantID string) ([]Event, error) {
+	events, err := LoadTraceEvents(sqlitePath, traceID)
+	if err != nil {
+		return nil, err
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return events, nil
+	}
+	filtered := make([]Event, 0, len(events))
+	for _, event := range events {
+		if strings.EqualFold(strings.TrimSpace(event.TenantID), tenantID) {
+			filtered = append(filtered, event)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, errors.New("trace not found")
+	}
+	return filtered, nil
+}
+
 type TraceListFilter struct {
 	TraceID     string
 	ActionType  string
@@ -120,6 +174,7 @@ type TraceListFilter struct {
 	Principal   string
 	Agent       string
 	Environment string
+	TenantID    string
 	Limit       int
 }
 
@@ -131,6 +186,7 @@ type TraceSummary struct {
 	Principal      string
 	Agent          string
 	Environment    string
+	TenantID       string
 	LastEventType  string
 	LastTimestamp  string
 	EventCount     int
@@ -183,6 +239,7 @@ func ListTraceSummaries(sqlitePath string, filter TraceListFilter) ([]TraceSumma
 				Principal:      event.Principal,
 				Agent:          event.Agent,
 				Environment:    event.Environment,
+				TenantID:       event.TenantID,
 				LastEventType:  event.EventType,
 				LastTimestamp:  event.Timestamp.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 				AssuranceLevel: event.AssuranceLevel,
@@ -231,6 +288,9 @@ func matchesTraceFilter(event Event, filter TraceListFilter) bool {
 		return false
 	}
 	if filter.Environment != "" && !strings.EqualFold(strings.TrimSpace(filter.Environment), strings.TrimSpace(event.Environment)) {
+		return false
+	}
+	if filter.TenantID != "" && !strings.EqualFold(strings.TrimSpace(filter.TenantID), strings.TrimSpace(event.TenantID)) {
 		return false
 	}
 	return strings.TrimSpace(event.TraceID) != ""

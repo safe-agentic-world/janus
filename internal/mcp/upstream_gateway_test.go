@@ -18,6 +18,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/service"
+	"github.com/safe-agentic-world/nomos/internal/tenant"
 )
 
 func TestUpstreamGatewayToolsListIncludesForwardedTools(t *testing.T) {
@@ -53,6 +54,82 @@ func TestUpstreamGatewayToolsListIncludesForwardedTools(t *testing.T) {
 	if payload.MCPSurfaces["sample"].State != service.ToolStateUnavailable {
 		t.Fatalf("expected sampling to default unavailable without explicit rule, got %+v", payload.MCPSurfaces["sample"])
 	}
+}
+
+func TestUpstreamGatewayVisibilityIsTenantScoped(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.json")
+	bundle := `{"version":"v1","rules":[{"id":"allow-retail","action_type":"mcp.call","resource":"mcp://retail/refund.request","decision":"ALLOW","principals":["alice@example.com","bob@example.com"],"agents":["nomos"],"environments":["dev"]},{"id":"allow-orders","action_type":"mcp.call","resource":"mcp://orders/refund.request","decision":"ALLOW","principals":["alice@example.com","bob@example.com"],"agents":["nomos"],"environments":["dev"]}]}`
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	server, err := NewServerWithRuntimeOptions(bundlePath, identity.VerifiedIdentity{
+		Principal:   "alice@example.com",
+		Agent:       "nomos",
+		Environment: "dev",
+	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
+		LogLevel:  "error",
+		LogFormat: "text",
+		ErrWriter: io.Discard,
+		TenantConfig: tenant.Config{
+			Enabled: true,
+			Tenants: []tenant.Definition{
+				{ID: "team-a", Principals: []string{"alice@example.com"}},
+				{ID: "team-b", Principals: []string{"bob@example.com"}},
+			},
+		},
+		UpstreamServers: []UpstreamServerConfig{
+			{
+				Name:      "retail",
+				Transport: "stdio",
+				Command:   os.Args[0],
+				Args:      []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "retail"},
+				Env:       map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+				Workdir:   dir,
+				Tenants:   []string{"team-a"},
+			},
+			{
+				Name:      "orders",
+				Transport: "stdio",
+				Command:   os.Args[0],
+				Args:      []string{"-test.run=TestUpstreamMCPHelperProcess", "--", "retail"},
+				Env:       map[string]string{"GO_WANT_UPSTREAM_MCP_HELPER": "1"},
+				Workdir:   dir,
+				Tenants:   []string{"team-b"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	teamATools := server.toolsListForIdentity(identity.VerifiedIdentity{Principal: "alice@example.com", Agent: "nomos", Environment: "dev"}, false)
+	if !hasTool(teamATools, "upstream_retail_refund_request") || hasTool(teamATools, "upstream_orders_refund_request") {
+		t.Fatalf("expected team-a to see only retail forwarded tools, got %+v", teamATools)
+	}
+	teamBTools := server.toolsListForIdentity(identity.VerifiedIdentity{Principal: "bob@example.com", Agent: "nomos", Environment: "dev"}, false)
+	if !hasTool(teamBTools, "upstream_orders_refund_request") || hasTool(teamBTools, "upstream_retail_refund_request") {
+		t.Fatalf("expected team-b to see only orders forwarded tools, got %+v", teamBTools)
+	}
+
+	hidden := server.handleRequest(Request{
+		ID:     "hidden-orders",
+		Method: "upstream_orders_refund_request",
+		Params: mustJSONBytes(map[string]any{"order_id": "ORD-1001", "reason": "damaged"}),
+	})
+	if hidden.Error != "method_not_found" {
+		t.Fatalf("expected hidden upstream call to fail as method_not_found, got %+v", hidden)
+	}
+}
+
+func hasTool(tools []map[string]any, name string) bool {
+	for _, tool := range tools {
+		if tool["name"] == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandleForwardedToolAllow(t *testing.T) {

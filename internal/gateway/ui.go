@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	neturl "net/url"
@@ -13,11 +14,13 @@ import (
 	"time"
 
 	"github.com/safe-agentic-world/nomos/internal/action"
+	"github.com/safe-agentic-world/nomos/internal/approval"
 	"github.com/safe-agentic-world/nomos/internal/approvalpreview"
 	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/tenant"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
@@ -80,6 +83,7 @@ type uiActionDetailResponse struct {
 	Principal             string         `json:"principal,omitempty"`
 	Agent                 string         `json:"agent,omitempty"`
 	Environment           string         `json:"environment,omitempty"`
+	TenantID              string         `json:"tenant_id,omitempty"`
 	Audit                 uiAuditLink    `json:"audit"`
 	Approval              *uiApprovalRef `json:"approval,omitempty"`
 }
@@ -140,6 +144,7 @@ type uiTraceEvent struct {
 	NetworkMode          string         `json:"network_mode,omitempty"`
 	AssuranceLevel       string         `json:"assurance_level,omitempty"`
 	ActionSummary        string         `json:"action_summary,omitempty"`
+	TenantID             string         `json:"tenant_id,omitempty"`
 	ExecutorMetadata     map[string]any `json:"executor_metadata,omitempty"`
 }
 
@@ -222,7 +227,13 @@ func (g *Gateway) handleUIApprovals(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
+		return
+	}
+	operatorTenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	if !g.cfg.Approvals.Enabled || g.approvals == nil {
@@ -243,6 +254,12 @@ func (g *Gateway) handleUIApprovals(w http.ResponseWriter, r *http.Request) {
 	now := g.now().UTC()
 	out := make([]uiApprovalRecord, 0, len(records))
 	for _, rec := range records {
+		if operatorTenantID != "" {
+			recordTenantID, err := g.tenantIDForPrincipal(rec.Principal)
+			if err != nil || recordTenantID != operatorTenantID {
+				continue
+			}
+		}
 		item := uiApprovalRecord{
 			ApprovalID:  rec.ApprovalID,
 			Status:      rec.Status,
@@ -270,7 +287,13 @@ func (g *Gateway) handleUIApprovalDecision(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
+		return
+	}
+	operatorTenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	body, err := action.ReadRequestBytes(r.Body)
@@ -283,6 +306,26 @@ func (g *Gateway) handleUIApprovalDecision(w http.ResponseWriter, r *http.Reques
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
 	}
+	if operatorTenantID != "" {
+		rec, err := g.approvals.Lookup(r.Context(), req.ApprovalID)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, approval.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			g.respondError(w, status, "approval_error", err.Error())
+			return
+		}
+		recordTenantID, err := g.tenantIDForPrincipal(rec.Principal)
+		if err != nil {
+			g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
+			return
+		}
+		if recordTenantID != operatorTenantID {
+			g.respondError(w, http.StatusForbidden, "tenant_scope_error", "approval is outside operator tenant")
+			return
+		}
+	}
 	g.applyApprovalDecision(w, r, req, "approval.decided.ui")
 }
 
@@ -291,7 +334,13 @@ func (g *Gateway) handleUIActionDetail(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	actionID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/ui/actions/"))
@@ -300,7 +349,7 @@ func (g *Gateway) handleUIActionDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sqlitePath := audit.FirstSQLiteSinkPath(g.cfg.Audit.Sink)
-	event, err := audit.LoadActionDetail(sqlitePath, actionID)
+	event, err := audit.LoadActionDetailForTenant(sqlitePath, actionID, tenantID)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(strings.ToLower(err.Error()), "not found") {
@@ -338,7 +387,13 @@ func (g *Gateway) handleUITraceList(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	sqlitePath := audit.FirstSQLiteSinkPath(g.cfg.Audit.Sink)
@@ -349,7 +404,15 @@ func (g *Gateway) handleUITraceList(w http.ResponseWriter, r *http.Request) {
 		Principal:   strings.TrimSpace(r.URL.Query().Get("principal")),
 		Agent:       strings.TrimSpace(r.URL.Query().Get("agent")),
 		Environment: strings.TrimSpace(r.URL.Query().Get("environment")),
+		TenantID:    strings.TrimSpace(r.URL.Query().Get("tenant_id")),
 		Limit:       50,
+	}
+	if tenantID != "" {
+		if filter.TenantID != "" && !strings.EqualFold(filter.TenantID, tenantID) {
+			g.respondError(w, http.StatusForbidden, "tenant_scope_error", "tenant_id does not match operator tenant")
+			return
+		}
+		filter.TenantID = tenantID
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
@@ -373,7 +436,13 @@ func (g *Gateway) handleUITraceDetail(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
+		return
+	}
+	tenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	traceID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/ui/traces/"))
@@ -382,7 +451,7 @@ func (g *Gateway) handleUITraceDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sqlitePath := audit.FirstSQLiteSinkPath(g.cfg.Audit.Sink)
-	events, err := audit.LoadTraceEvents(sqlitePath, traceID)
+	events, err := audit.LoadTraceEventsForTenant(sqlitePath, traceID, tenantID)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(strings.ToLower(err.Error()), "trace not found") || strings.Contains(strings.ToLower(err.Error()), "sqlite audit sink") {
@@ -410,6 +479,7 @@ func (g *Gateway) handleUITraceDetail(w http.ResponseWriter, r *http.Request) {
 			NetworkMode:          event.NetworkMode,
 			AssuranceLevel:       event.AssuranceLevel,
 			ActionSummary:        event.ActionSummary,
+			TenantID:             event.TenantID,
 			ExecutorMetadata:     cloneMap(event.ExecutorMetadata),
 		})
 	}
@@ -421,10 +491,16 @@ func (g *Gateway) handleUIUpstreams(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
 		return
 	}
-	resp, err := buildUIUpstreamListResponse(g.cfg, audit.FirstSQLiteSinkPath(g.cfg.Audit.Sink), g.now().UTC())
+	tenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
+		return
+	}
+	resp, err := buildUIUpstreamListResponse(g.cfg, audit.FirstSQLiteSinkPath(g.cfg.Audit.Sink), g.now().UTC(), tenantID)
 	if err != nil {
 		g.respondError(w, http.StatusInternalServerError, "upstream_ui_error", err.Error())
 		return
@@ -437,7 +513,13 @@ func (g *Gateway) handleUIExplain(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+	principal, ok := g.requireOperatorUIAuth(w, r)
+	if !ok {
+		return
+	}
+	operatorTenantID, err := g.tenantIDForPrincipal(principal)
+	if err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	body, err := action.ReadRequestBytes(r.Body)
@@ -449,6 +531,18 @@ func (g *Gateway) handleUIExplain(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
 		return
+	}
+	if operatorTenantID != "" {
+		actionTenantID, err := g.tenantIDForPrincipal(act.Principal)
+		if err != nil {
+			g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
+			return
+		}
+		if actionTenantID != operatorTenantID {
+			g.respondError(w, http.StatusForbidden, "tenant_scope_error", "explain action principal is outside operator tenant")
+			return
+		}
+		act.TenantID = operatorTenantID
 	}
 	payload, err := g.explainAction(act)
 	if err != nil {
@@ -492,8 +586,8 @@ func buildUIReadinessResponse(report UIReadinessReport, cfg Config, bundleHash s
 	}
 }
 
-func buildUIUpstreamListResponse(cfg Config, sqlitePath string, now time.Time) (uiUpstreamListResponse, error) {
-	evidence, dataSource, err := loadUIUpstreamEvidence(sqlitePath, 1200)
+func buildUIUpstreamListResponse(cfg Config, sqlitePath string, now time.Time, tenantID string) (uiUpstreamListResponse, error) {
+	evidence, dataSource, err := loadUIUpstreamEvidence(sqlitePath, 1200, tenantID)
 	if err != nil {
 		return uiUpstreamListResponse{}, err
 	}
@@ -503,6 +597,9 @@ func buildUIUpstreamListResponse(cfg Config, sqlitePath string, now time.Time) (
 		name := strings.TrimSpace(server.Name)
 		if name == "" {
 			name = "upstream-" + strconv.Itoa(idx+1)
+		}
+		if !tenant.VisibleUpstream(cfg.Tenancy, tenantID, name, server.Tenants) {
+			continue
 		}
 		key := strings.ToLower(name)
 		seen[key] = struct{}{}
@@ -537,7 +634,7 @@ type uiUpstreamEvidence struct {
 	recentFailure []uiUpstreamFailure
 }
 
-func loadUIUpstreamEvidence(sqlitePath string, limit int) (map[string]*uiUpstreamEvidence, string, error) {
+func loadUIUpstreamEvidence(sqlitePath string, limit int, tenantID string) (map[string]*uiUpstreamEvidence, string, error) {
 	out := map[string]*uiUpstreamEvidence{}
 	if strings.TrimSpace(sqlitePath) == "" {
 		return out, "config_only", nil
@@ -563,6 +660,9 @@ func loadUIUpstreamEvidence(sqlitePath string, limit int) (map[string]*uiUpstrea
 		var event audit.Event
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
 			return nil, "", err
+		}
+		if strings.TrimSpace(tenantID) != "" && !strings.EqualFold(strings.TrimSpace(event.TenantID), strings.TrimSpace(tenantID)) {
+			continue
 		}
 		server := uiUpstreamServerFromAuditEvent(event)
 		if server == "" {
@@ -824,6 +924,7 @@ func buildUIActionDetailResponse(event audit.Event) uiActionDetailResponse {
 		Principal:             event.Principal,
 		Agent:                 event.Agent,
 		Environment:           event.Environment,
+		TenantID:              event.TenantID,
 		Audit: uiAuditLink{
 			EventType:     event.EventType,
 			EventHash:     event.EventHash,
@@ -842,6 +943,7 @@ func buildExplainResponse(explanation policy.ExplainDetails, normalized normaliz
 		TraceID:            normalized.TraceID,
 		ActionType:         normalized.ActionType,
 		Resource:           normalized.Resource,
+		TenantID:           normalized.TenantID,
 		Decision:           explanation.Decision.Decision,
 		ReasonCode:         explanation.Decision.ReasonCode,
 		MatchedRuleIDs:     append([]string{}, explanation.Decision.MatchedRuleIDs...),

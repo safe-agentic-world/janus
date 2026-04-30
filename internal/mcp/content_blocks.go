@@ -9,6 +9,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/audit"
 	"github.com/safe-agentic-world/nomos/internal/canonicaljson"
+	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/telemetry"
 )
 
@@ -44,7 +45,7 @@ type mcpContentBlockAudit struct {
 	Truncated   bool   `json:"truncated,omitempty"`
 }
 
-func (s *Server) governForwardedContent(result upstreamToolCallResult, obligations map[string]any, actionReq action.Request, tool upstreamTool) governedMCPContent {
+func (s *Server) governForwardedContent(result upstreamToolCallResult, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) governedMCPContent {
 	allowedKinds, policyOK := allowedMCPContentBlockKinds(obligations)
 	governed := governedMCPContent{
 		BlockPolicyMisconfigured: !policyOK,
@@ -77,7 +78,7 @@ func (s *Server) governForwardedContent(result upstreamToolCallResult, obligatio
 			}
 			textParts = append(textParts, redactForwardedOutput(s.logger.redactor, text))
 		case "image", "audio":
-			block, truncated, denied, ok := s.governBinaryMCPContentBlock(raw.Payload, kind, maxBinaryBytes, obligations, actionReq, tool)
+			block, truncated, denied, ok := s.governBinaryMCPContentBlock(raw.Payload, kind, maxBinaryBytes, obligations, actionReq, tool, id)
 			if denied {
 				governed.Denied = true
 				return governed
@@ -89,7 +90,7 @@ func (s *Server) governForwardedContent(result upstreamToolCallResult, obligatio
 			governed.Blocks = append(governed.Blocks, block)
 			governed.Truncated = governed.Truncated || truncated
 		case "resource":
-			block, truncated, denied, ok := s.governResourceMCPContentBlock(raw.Payload, maxBinaryBytes, obligations, actionReq, tool)
+			block, truncated, denied, ok := s.governResourceMCPContentBlock(raw.Payload, maxBinaryBytes, obligations, actionReq, tool, id)
 			if denied {
 				governed.Denied = true
 				return governed
@@ -101,7 +102,7 @@ func (s *Server) governForwardedContent(result upstreamToolCallResult, obligatio
 			governed.Blocks = append(governed.Blocks, block)
 			governed.Truncated = governed.Truncated || truncated
 		case "tool_result":
-			block, truncated, denied := s.governGenericMCPContentBlock(raw.Payload, obligations, actionReq, tool)
+			block, truncated, denied := s.governGenericMCPContentBlock(raw.Payload, obligations, actionReq, tool, id)
 			if denied {
 				governed.Denied = true
 				return governed
@@ -112,7 +113,7 @@ func (s *Server) governForwardedContent(result upstreamToolCallResult, obligatio
 			governed.Blocks = append(governed.Blocks, blockedMCPContentPlaceholder(kind, "unknown_block_kind"))
 		}
 	}
-	scanned := s.scanForwardedResponse(strings.Join(textParts, "\n"), obligations, actionReq, tool)
+	scanned := s.scanForwardedResponse(strings.Join(textParts, "\n"), obligations, actionReq, tool, id)
 	if scanned.Denied {
 		governed.Denied = true
 		return governed
@@ -123,7 +124,7 @@ func (s *Server) governForwardedContent(result upstreamToolCallResult, obligatio
 	return governed
 }
 
-func (s *Server) governBinaryMCPContentBlock(block map[string]any, kind string, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool) (map[string]any, bool, bool, bool) {
+func (s *Server) governBinaryMCPContentBlock(block map[string]any, kind string, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) (map[string]any, bool, bool, bool) {
 	out := make(map[string]any, len(block))
 	truncated := false
 	sawData := false
@@ -146,7 +147,7 @@ func (s *Server) governBinaryMCPContentBlock(block map[string]any, kind string, 
 			sawData = true
 			continue
 		}
-		governed, denied := s.governMCPMetadataValue(value, obligations, actionReq, tool)
+		governed, denied := s.governMCPMetadataValue(value, obligations, actionReq, tool, id)
 		if denied {
 			return nil, false, true, false
 		}
@@ -162,12 +163,12 @@ func (s *Server) governBinaryMCPContentBlock(block map[string]any, kind string, 
 	return out, truncated, false, true
 }
 
-func (s *Server) governResourceMCPContentBlock(block map[string]any, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool) (map[string]any, bool, bool, bool) {
+func (s *Server) governResourceMCPContentBlock(block map[string]any, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) (map[string]any, bool, bool, bool) {
 	out := make(map[string]any, len(block))
 	truncated := false
 	resourceValue, hasResource := block["resource"]
 	if hasResource {
-		governed, valueTruncated, denied, ok := s.governResourceValue(resourceValue, maxBytes, obligations, actionReq, tool)
+		governed, valueTruncated, denied, ok := s.governResourceValue(resourceValue, maxBytes, obligations, actionReq, tool, id)
 		if denied {
 			return nil, false, true, false
 		}
@@ -187,7 +188,7 @@ func (s *Server) governResourceMCPContentBlock(block map[string]any, maxBytes in
 		if len(resource) == 0 {
 			return nil, false, false, false
 		}
-		governed, valueTruncated, denied, ok := s.governResourceValue(resource, maxBytes, obligations, actionReq, tool)
+		governed, valueTruncated, denied, ok := s.governResourceValue(resource, maxBytes, obligations, actionReq, tool, id)
 		if denied {
 			return nil, false, true, false
 		}
@@ -201,7 +202,7 @@ func (s *Server) governResourceMCPContentBlock(block map[string]any, maxBytes in
 		if key == "resource" || key == "type" {
 			continue
 		}
-		governed, valueTruncated, denied := s.governMCPStringValue(value, obligations, actionReq, tool)
+		governed, valueTruncated, denied := s.governMCPStringValue(value, obligations, actionReq, tool, id)
 		if denied {
 			return nil, false, true, false
 		}
@@ -215,11 +216,11 @@ func (s *Server) governResourceMCPContentBlock(block map[string]any, maxBytes in
 	return out, truncated, false, true
 }
 
-func (s *Server) governGenericMCPContentBlock(block map[string]any, obligations map[string]any, actionReq action.Request, tool upstreamTool) (map[string]any, bool, bool) {
+func (s *Server) governGenericMCPContentBlock(block map[string]any, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) (map[string]any, bool, bool) {
 	out := make(map[string]any, len(block))
 	truncated := false
 	for key, value := range block {
-		governed, valueTruncated, denied := s.governMCPStringValue(value, obligations, actionReq, tool)
+		governed, valueTruncated, denied := s.governMCPStringValue(value, obligations, actionReq, tool, id)
 		if denied {
 			return nil, false, true
 		}
@@ -235,7 +236,7 @@ func (s *Server) governGenericMCPContentBlock(block map[string]any, obligations 
 	return out, truncated, false
 }
 
-func (s *Server) governResourceValue(value any, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool) (any, bool, bool, bool) {
+func (s *Server) governResourceValue(value any, maxBytes int, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) (any, bool, bool, bool) {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
@@ -258,7 +259,7 @@ func (s *Server) governResourceValue(value any, maxBytes int, obligations map[st
 				out[key] = blob
 				continue
 			}
-			governed, valueTruncated, denied := s.governMCPStringValue(child, obligations, actionReq, tool)
+			governed, valueTruncated, denied := s.governMCPStringValue(child, obligations, actionReq, tool, id)
 			if denied {
 				return nil, false, true, false
 			}
@@ -270,7 +271,7 @@ func (s *Server) governResourceValue(value any, maxBytes int, obligations map[st
 		out := make([]any, 0, len(typed))
 		truncated := false
 		for _, child := range typed {
-			governed, valueTruncated, denied, ok := s.governResourceValue(child, maxBytes, obligations, actionReq, tool)
+			governed, valueTruncated, denied, ok := s.governResourceValue(child, maxBytes, obligations, actionReq, tool, id)
 			if denied {
 				return nil, false, true, false
 			}
@@ -282,16 +283,16 @@ func (s *Server) governResourceValue(value any, maxBytes int, obligations map[st
 		}
 		return out, truncated, false, true
 	default:
-		governed, truncated, denied := s.governMCPStringValue(value, obligations, actionReq, tool)
+		governed, truncated, denied := s.governMCPStringValue(value, obligations, actionReq, tool, id)
 		return governed, truncated, denied, true
 	}
 }
 
-func (s *Server) governMCPStringValue(value any, obligations map[string]any, actionReq action.Request, tool upstreamTool) (any, bool, bool) {
+func (s *Server) governMCPStringValue(value any, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) (any, bool, bool) {
 	switch typed := value.(type) {
 	case string:
 		redacted := redactForwardedOutput(s.logger.redactor, typed)
-		scanned := s.scanForwardedResponse(redacted, obligations, actionReq, tool)
+		scanned := s.scanForwardedResponse(redacted, obligations, actionReq, tool, id)
 		if scanned.Denied {
 			return nil, false, true
 		}
@@ -301,7 +302,7 @@ func (s *Server) governMCPStringValue(value any, obligations map[string]any, act
 		out := make(map[string]any, len(typed))
 		truncated := false
 		for key, child := range typed {
-			governed, valueTruncated, denied := s.governMCPStringValue(child, obligations, actionReq, tool)
+			governed, valueTruncated, denied := s.governMCPStringValue(child, obligations, actionReq, tool, id)
 			if denied {
 				return nil, false, true
 			}
@@ -313,7 +314,7 @@ func (s *Server) governMCPStringValue(value any, obligations map[string]any, act
 		out := make([]any, 0, len(typed))
 		truncated := false
 		for _, child := range typed {
-			governed, valueTruncated, denied := s.governMCPStringValue(child, obligations, actionReq, tool)
+			governed, valueTruncated, denied := s.governMCPStringValue(child, obligations, actionReq, tool, id)
 			if denied {
 				return nil, false, true
 			}
@@ -326,11 +327,11 @@ func (s *Server) governMCPStringValue(value any, obligations map[string]any, act
 	}
 }
 
-func (s *Server) governMCPMetadataValue(value any, obligations map[string]any, actionReq action.Request, tool upstreamTool) (any, bool) {
+func (s *Server) governMCPMetadataValue(value any, obligations map[string]any, actionReq action.Request, tool upstreamTool, id identity.VerifiedIdentity) (any, bool) {
 	switch typed := value.(type) {
 	case string:
 		redacted := redactForwardedOutput(s.logger.redactor, typed)
-		scanned := s.scanForwardedResponse(redacted, obligations, actionReq, tool)
+		scanned := s.scanForwardedResponse(redacted, obligations, actionReq, tool, id)
 		if scanned.Denied {
 			return nil, true
 		}
@@ -338,7 +339,7 @@ func (s *Server) governMCPMetadataValue(value any, obligations map[string]any, a
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
-			governed, denied := s.governMCPMetadataValue(child, obligations, actionReq, tool)
+			governed, denied := s.governMCPMetadataValue(child, obligations, actionReq, tool, id)
 			if denied {
 				return nil, true
 			}
@@ -348,7 +349,7 @@ func (s *Server) governMCPMetadataValue(value any, obligations map[string]any, a
 	case []any:
 		out := make([]any, 0, len(typed))
 		for _, child := range typed {
-			governed, denied := s.governMCPMetadataValue(child, obligations, actionReq, tool)
+			governed, denied := s.governMCPMetadataValue(child, obligations, actionReq, tool, id)
 			if denied {
 				return nil, true
 			}
@@ -531,11 +532,11 @@ func decodeMCPBase64(value string) ([]byte, error) {
 	return nil, lastErr
 }
 
-func (s *Server) recordMCPContentBlocks(actionReq action.Request, tool upstreamTool, resp action.Response, governed governedMCPContent) {
-	s.recordMCPContentBlockDelivery(actionReq, tool, actionResponseContentBlocks(tool.DownstreamName, resp), governed)
+func (s *Server) recordMCPContentBlocks(actionReq action.Request, tool upstreamTool, resp action.Response, governed governedMCPContent, id identity.VerifiedIdentity) {
+	s.recordMCPContentBlockDelivery(actionReq, tool, actionResponseContentBlocks(tool.DownstreamName, resp), governed, id)
 }
 
-func (s *Server) recordMCPContentBlockDelivery(actionReq action.Request, tool upstreamTool, blocks []map[string]any, governed governedMCPContent) {
+func (s *Server) recordMCPContentBlockDelivery(actionReq action.Request, tool upstreamTool, blocks []map[string]any, governed governedMCPContent, id identity.VerifiedIdentity) {
 	if s == nil || s.service == nil {
 		return
 	}
@@ -550,15 +551,17 @@ func (s *Server) recordMCPContentBlockDelivery(actionReq action.Request, tool up
 		"mcp_content_truncated":                  governed.Truncated,
 		"mcp_content_downstream_tool_name":       tool.DownstreamName,
 	}
+	tenantID, _ := s.tenantIDForIdentity(id)
 	_ = s.service.RecordAuditEvent(audit.Event{
 		SchemaVersion:        "v1",
 		Timestamp:            time.Now().UTC(),
 		EventType:            "mcp.content_blocks",
 		TraceID:              actionReq.TraceID,
 		ActionID:             actionReq.ActionID,
-		Principal:            s.identity.Principal,
-		Agent:                s.identity.Agent,
-		Environment:          s.identity.Environment,
+		Principal:            id.Principal,
+		Agent:                id.Agent,
+		Environment:          id.Environment,
+		TenantID:             tenantID,
 		ActionType:           actionReq.ActionType,
 		Resource:             actionReq.Resource,
 		ResultClassification: "MCP_CONTENT_BLOCKS_DELIVERED",
@@ -567,7 +570,7 @@ func (s *Server) recordMCPContentBlockDelivery(actionReq action.Request, tool up
 	s.emitMCPContentBlockTelemetry(actionReq.TraceID, auditBlocks)
 }
 
-func (s *Server) governSamplingResponseContent(resp *rpcResponse, actionResp action.Response, serverName string) (bool, *rpcResponse) {
+func (s *Server) governSamplingResponseContent(resp *rpcResponse, actionResp action.Response, serverName string, id identity.VerifiedIdentity) (bool, *rpcResponse) {
 	if resp == nil {
 		return false, nil
 	}
@@ -590,7 +593,7 @@ func (s *Server) governSamplingResponseContent(resp *rpcResponse, actionResp act
 		ToolName:       "sampling/createMessage",
 		DownstreamName: "sampling/createMessage",
 	}
-	governed := s.governForwardedContent(upstreamToolCallResult{Blocks: parseRawMCPContentBlocks(content)}, actionResp.Obligations, actionReq, tool)
+	governed := s.governForwardedContent(upstreamToolCallResult{Blocks: parseRawMCPContentBlocks(content)}, actionResp.Obligations, actionReq, tool, id)
 	if governed.Denied {
 		return true, &rpcResponse{
 			JSONRPC: "2.0",
@@ -604,7 +607,7 @@ func (s *Server) governSamplingResponseContent(resp *rpcResponse, actionResp act
 	}
 	result["content"] = cloneContentBlock(delivered[0])
 	resp.Result = result
-	s.recordMCPContentBlockDelivery(actionReq, tool, delivered[:1], governed)
+	s.recordMCPContentBlockDelivery(actionReq, tool, delivered[:1], governed, id)
 	return false, resp
 }
 

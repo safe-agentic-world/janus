@@ -38,6 +38,9 @@ func actionFingerprint(normalized normalize.NormalizedAction) (string, error) {
 		"agent":       normalized.Agent,
 		"environment": normalized.Environment,
 	}
+	if strings.TrimSpace(normalized.TenantID) != "" {
+		payload["tenant_id"] = normalized.TenantID
+	}
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return "", err

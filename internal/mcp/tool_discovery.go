@@ -119,6 +119,10 @@ func (s *Server) toolsListForIdentityWithSummary(id identity.VerifiedIdentity, f
 	if s.upstream != nil {
 		for _, tool := range s.upstream.snapshotTools() {
 			summary.evaluated++
+			if !s.upstreamVisibleForIdentity(id, tool.ServerName) {
+				summary.hidden++
+				continue
+			}
 			discovery, err := s.discoverToolVisibility(id, "mcp.call", "mcp://"+tool.ServerName+"/"+tool.ToolName, map[string]any{
 				"upstream_server": tool.ServerName,
 				"upstream_tool":   tool.ToolName,

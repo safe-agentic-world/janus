@@ -195,6 +195,52 @@ func TestChainHashesLinkedInSQLiteStream(t *testing.T) {
 	}
 }
 
+func TestTenantPartitionedAuditQueries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	writer, err := NewWriter("sqlite:"+path, redact.DefaultRedactor())
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	events := []Event{
+		{SchemaVersion: "v1", Timestamp: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC), EventType: "trace.start", TraceID: "trace-shared", ActionID: "shared-action", TenantID: "team-a", Principal: "alice"},
+		{SchemaVersion: "v1", Timestamp: time.Date(2026, 4, 30, 12, 0, 1, 0, time.UTC), EventType: "action.completed", TraceID: "trace-shared", ActionID: "shared-action", TenantID: "team-a", Principal: "alice", ActionType: "fs.read", Decision: "ALLOW"},
+		{SchemaVersion: "v1", Timestamp: time.Date(2026, 4, 30, 12, 0, 2, 0, time.UTC), EventType: "trace.start", TraceID: "trace-shared", ActionID: "shared-action", TenantID: "team-b", Principal: "bob"},
+		{SchemaVersion: "v1", Timestamp: time.Date(2026, 4, 30, 12, 0, 3, 0, time.UTC), EventType: "action.completed", TraceID: "trace-shared", ActionID: "shared-action", TenantID: "team-b", Principal: "bob", ActionType: "fs.read", Decision: "DENY"},
+	}
+	for _, event := range events {
+		if err := writer.WriteEvent(event); err != nil {
+			t.Fatalf("write event: %v", err)
+		}
+	}
+	detail, err := LoadActionDetailForTenant(path, "shared-action", "team-a")
+	if err != nil {
+		t.Fatalf("load action detail for tenant: %v", err)
+	}
+	if detail.TenantID != "team-a" || detail.Decision != "ALLOW" {
+		t.Fatalf("expected team-a action detail, got %+v", detail)
+	}
+	traceEvents, err := LoadTraceEventsForTenant(path, "trace-shared", "team-b")
+	if err != nil {
+		t.Fatalf("load trace events for tenant: %v", err)
+	}
+	if len(traceEvents) != 2 {
+		t.Fatalf("expected two team-b trace events, got %+v", traceEvents)
+	}
+	for _, event := range traceEvents {
+		if event.TenantID != "team-b" {
+			t.Fatalf("expected only team-b events, got %+v", traceEvents)
+		}
+	}
+	summaries, err := ListTraceSummaries(path, TraceListFilter{TenantID: "team-a", Limit: 10})
+	if err != nil {
+		t.Fatalf("list trace summaries: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].TenantID != "team-a" || summaries[0].Decision != "ALLOW" {
+		t.Fatalf("expected team-a summary, got %+v", summaries)
+	}
+}
+
 func TestChainHashGoldenVector(t *testing.T) {
 	event := Event{
 		SchemaVersion: "v1",

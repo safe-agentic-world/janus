@@ -198,6 +198,7 @@ func runMCP(args []string) {
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
 		CredentialBroker:      credentialBroker,
 		Telemetry:             buildMCPRuntimeTelemetry(cfg),
+		TenantConfig:          cfg.Tenancy,
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -287,6 +288,7 @@ func runMCPServe(args []string) {
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
 		CredentialBroker:      credentialBroker,
 		Telemetry:             buildMCPRuntimeTelemetry(cfg),
+		TenantConfig:          cfg.Tenancy,
 	})
 	if err != nil {
 		cliFatalf("invalid mcp runtime options: %v", err)
@@ -1131,6 +1133,7 @@ func reloadMCPServerFromConfig(ctx context.Context, server *mcp.Server, configPa
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
 		CredentialBroker:      credentialBroker,
 		Telemetry:             buildMCPRuntimeTelemetry(cfg),
+		TenantConfig:          cfg.Tenancy,
 	})
 	if err != nil {
 		return mcp.ReloadResult{}, err
@@ -1225,6 +1228,7 @@ func toMCPUpstreamServers(defaults gateway.MCPTimeoutConfig, breakerDefaults gat
 			BreakerWindow:           timeoutDurationFromMS(coalesceTimeout(breakerDefaults.FailureWindowMS, server.Breaker.FailureWindowMS)),
 			BreakerOpenTime:         timeoutDurationFromMS(coalesceTimeout(breakerDefaults.OpenTimeoutMS, server.Breaker.OpenTimeoutMS)),
 			AllowMissingToolSchemas: server.AllowMissingToolSchemas,
+			Tenants:                 append([]string(nil), server.Tenants...),
 		}
 		if server.Auth != nil {
 			mapped.AuthType = server.Auth.Type

@@ -23,6 +23,7 @@ type NormalizedAction struct {
 	Principal        string
 	Agent            string
 	Environment      string
+	TenantID         string
 	Context          action.Context
 	TraceID          string
 	TraceActionCount int
@@ -59,6 +60,7 @@ func Action(input action.Action) (NormalizedAction, error) {
 		Principal:     input.Principal,
 		Agent:         input.Agent,
 		Environment:   input.Environment,
+		TenantID:      strings.TrimSpace(input.TenantID),
 		Context:       input.Context,
 		TraceID:       input.TraceID,
 	}, nil
