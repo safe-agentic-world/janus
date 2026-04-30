@@ -3,85 +3,197 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Nomos Operator UI</title>
+    <title>Nomos Operator Console</title>
     <link rel="stylesheet" href="/ui/styles.css">
   </head>
   <body>
-    <main class="page">
-      <header class="hero">
-        <div>
+    <a class="skip-link" href="#workspace">Skip to workspace</a>
+    <div class="console-shell">
+      <aside class="console-nav" aria-label="Primary operator navigation">
+        <div class="brand-block">
           <p class="eyebrow">Nomos Operator UI</p>
-          <h1>Approvals, action detail, and readiness</h1>
-          <p class="subtle">This UI is read-mostly. Approval decisions route through the existing Nomos approval flow.</p>
+          <h1>Operator Console</h1>
+          <p class="subtle">Approvals, investigation, upstream health, and policy explain over existing Nomos control paths.</p>
         </div>
-      </header>
-
-      <section class="card auth-card">
-        <label for="token">Operator bearer token</label>
-        <div class="auth-row">
-          <input id="token" type="password" placeholder="Paste a Nomos bearer token">
-          <button id="connect">Connect</button>
-        </div>
-        <p id="auth-status" class="subtle">The UI shell is static. Data loads only after authenticated API calls succeed.</p>
-      </section>
-
-      <section class="grid">
-        <article class="card">
-          <div class="card-header">
-            <h2>Dashboard</h2>
-            <button id="refresh">Refresh</button>
+        <nav class="nav-stack">
+          <a href="#/overview" data-route="overview" class="nav-link active">Overview</a>
+          <a href="#/approvals" data-route="approvals" class="nav-link">Approvals</a>
+          <a href="#/investigations" data-route="investigations" class="nav-link">Investigations</a>
+          <a href="#/upstreams" data-route="upstreams" class="nav-link">Upstreams</a>
+          <a href="#/explain" data-route="explain" class="nav-link">Policy Explain</a>
+        </nav>
+        <section class="auth-panel" aria-labelledby="auth-heading">
+          <h2 id="auth-heading">Operator Access</h2>
+          <label for="token">Bearer token</label>
+          <input id="token" type="password" autocomplete="off" placeholder="Paste a Nomos bearer token">
+          <div class="button-row">
+            <button id="connect" type="button">Connect</button>
+            <button id="refresh" type="button" class="secondary">Refresh</button>
           </div>
-          <pre id="readiness" class="json empty">No readiness data loaded.</pre>
-        </article>
+          <p id="auth-status" class="status-line" role="status" aria-live="polite">Static shell loaded. Authenticated APIs load after connect.</p>
+        </section>
+      </aside>
 
-        <article class="card">
-          <div class="card-header">
-            <h2>Approval Inbox</h2>
+      <main id="workspace" class="workspace" tabindex="-1">
+        <header class="workspace-header">
+          <div>
+            <p id="breadcrumb" class="breadcrumb">Console / Overview</p>
+            <h2 id="page-title">Overview</h2>
           </div>
-          <div id="approvals" class="list empty">No approvals loaded.</div>
-        </article>
-      </section>
+          <div class="header-actions" aria-label="Keyboard shortcuts">
+            <span class="key-hint">Alt+1..5 routes</span>
+            <span class="key-hint">/ filters</span>
+          </div>
+        </header>
 
-      <section class="card">
-        <div class="card-header">
-          <h2>Action Detail</h2>
-          <div class="decision-actions">
-            <button id="approve" disabled>Approve</button>
-            <button id="deny" disabled>Deny</button>
+        <section id="route-overview" class="route-panel active" data-route-panel="overview" aria-labelledby="overview-heading">
+          <h3 id="overview-heading" class="sr-only">Overview</h3>
+          <div class="summary-grid" id="overview-summary"></div>
+          <div class="split-layout">
+            <article class="panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Readiness</p>
+                  <h3>Deployment Posture</h3>
+                </div>
+              </div>
+              <div id="readiness" class="json empty">No readiness data loaded.</div>
+            </article>
+            <article class="panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Action Queue</p>
+                  <h3>Operator Hotspots</h3>
+                </div>
+              </div>
+              <div id="overview-hotspots" class="list empty">Connect to load pending approvals, traces, and upstream status.</div>
+            </article>
           </div>
-        </div>
-        <pre id="action-detail" class="json empty">Select a pending approval to inspect its linked action.</pre>
-      </section>
+        </section>
 
-      <section class="grid">
-        <article class="card">
-          <div class="card-header">
-            <h2>Trace List</h2>
-            <button id="refresh-traces">Refresh Traces</button>
+        <section id="route-approvals" class="route-panel" data-route-panel="approvals" aria-labelledby="approvals-heading">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Approval Inbox</p>
+              <h3 id="approvals-heading">Decision Queue</h3>
+            </div>
+            <div class="button-row">
+              <button id="save-approval-view" type="button" class="secondary">Save View</button>
+            </div>
           </div>
-          <div class="trace-filters">
-            <input id="trace-id-filter" type="text" placeholder="trace id">
-            <input id="trace-action-filter" type="text" placeholder="action type">
-            <input id="trace-decision-filter" type="text" placeholder="decision">
-            <button id="apply-trace-filter">Apply Filter</button>
+          <div class="toolbar" aria-label="Approval filters">
+            <label>Search <input id="approval-search" type="search" placeholder="principal, action, resource"></label>
+            <label>Status
+              <select id="approval-status-filter">
+                <option value="all">All pending</option>
+                <option value="active">Active only</option>
+                <option value="expired">Expired only</option>
+              </select>
+            </label>
+            <details class="column-menu">
+              <summary>Columns</summary>
+              <label><input type="checkbox" data-approval-column="principal" checked> Principal</label>
+              <label><input type="checkbox" data-approval-column="action_type" checked> Action</label>
+              <label><input type="checkbox" data-approval-column="resource" checked> Resource</label>
+              <label><input type="checkbox" data-approval-column="expires_at" checked> Expires</label>
+              <label><input type="checkbox" data-approval-column="scope_type" checked> Scope</label>
+            </details>
           </div>
-          <div id="traces" class="list empty">No traces loaded.</div>
-        </article>
+          <div class="split-layout queue-layout">
+            <article class="panel table-panel" aria-label="Approval data grid">
+              <div id="approvals" class="table-region empty">No approvals loaded.</div>
+            </article>
+            <aside class="panel detail-pane" aria-labelledby="approval-detail-heading">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Selected Approval</p>
+                  <h3 id="approval-detail-heading">Action Detail</h3>
+                </div>
+                <div class="decision-actions">
+                  <button id="approve" type="button" disabled>Approve</button>
+                  <button id="deny" type="button" class="danger" disabled>Deny</button>
+                </div>
+              </div>
+              <div id="action-detail" class="json empty">Select a pending approval to inspect its linked action.</div>
+            </aside>
+          </div>
+        </section>
 
-        <article class="card">
-          <div class="card-header">
-            <h2>Trace Detail</h2>
+        <section id="route-investigations" class="route-panel" data-route-panel="investigations" aria-labelledby="investigations-heading">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Investigations</p>
+              <h3 id="investigations-heading">Trace Workbench</h3>
+            </div>
+            <div class="button-row">
+              <button id="refresh-traces" type="button" class="secondary">Refresh Traces</button>
+              <button id="save-trace-view" type="button" class="secondary">Save Filter</button>
+            </div>
           </div>
-          <pre id="trace-detail" class="json empty">Select a trace to inspect its ordered timeline.</pre>
-        </article>
-      </section>
+          <div class="toolbar trace-filters" aria-label="Trace filters">
+            <label>Saved view
+              <select id="trace-saved-view">
+                <option value="">Manual filters</option>
+              </select>
+            </label>
+            <label>Trace <input id="trace-id-filter" type="search" placeholder="trace id"></label>
+            <label>Action <input id="trace-action-filter" type="search" placeholder="action type"></label>
+            <label>Decision <input id="trace-decision-filter" type="search" placeholder="decision"></label>
+            <label>Principal <input id="trace-principal-filter" type="search" placeholder="principal"></label>
+            <label>Agent <input id="trace-agent-filter" type="search" placeholder="agent"></label>
+            <label>Environment <input id="trace-env-filter" type="search" placeholder="environment"></label>
+            <button id="apply-trace-filter" type="button">Apply</button>
+          </div>
+          <div class="split-layout queue-layout">
+            <article class="panel table-panel" aria-label="Trace data grid">
+              <div id="traces" class="table-region empty">No traces loaded.</div>
+            </article>
+            <aside class="panel detail-pane" aria-labelledby="trace-detail-heading">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Timeline</p>
+                  <h3 id="trace-detail-heading">Trace Detail</h3>
+                </div>
+              </div>
+              <div id="trace-detail" class="json empty">Select a trace to inspect its ordered timeline.</div>
+            </aside>
+          </div>
+        </section>
 
-      <section class="card">
-        <div class="card-header">
-          <h2>Policy Explain</h2>
-          <button id="run-explain">Explain</button>
-        </div>
-        <textarea id="explain-input" class="editor" spellcheck="false">{
+        <section id="route-upstreams" class="route-panel" data-route-panel="upstreams" aria-labelledby="upstreams-heading">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Upstream MCP</p>
+              <h3 id="upstreams-heading">Health And Breaker Posture</h3>
+            </div>
+            <button id="refresh-upstreams" type="button" class="secondary">Refresh Upstreams</button>
+          </div>
+          <div class="split-layout queue-layout">
+            <article class="panel table-panel" aria-label="Upstream health grid">
+              <div id="upstreams" class="table-region empty">No upstream data loaded.</div>
+            </article>
+            <aside class="panel detail-pane" aria-labelledby="upstream-detail-heading">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Selected Upstream</p>
+                  <h3 id="upstream-detail-heading">Failure Evidence</h3>
+                </div>
+              </div>
+              <div id="upstream-detail" class="json empty">Select an upstream to inspect health evidence and recent failures.</div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="route-explain" class="route-panel" data-route-panel="explain" aria-labelledby="explain-heading">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Policy Explain</p>
+                <h3 id="explain-heading">Read-Only Policy Inspection</h3>
+              </div>
+              <button id="run-explain" type="button">Explain</button>
+            </div>
+            <textarea id="explain-input" class="editor" spellcheck="false" aria-label="Explain action JSON">{
   "schema_version": "v1",
   "action_id": "ui_explain_demo",
   "action_type": "fs.read",
@@ -93,9 +205,11 @@
   "context": { "extensions": {} },
   "trace_id": "ui_explain_trace"
 }</textarea>
-        <pre id="explain-output" class="json empty">Explain-only results will appear here.</pre>
-      </section>
-    </main>
+            <div id="explain-output" class="json empty">Explain-only results will appear here.</div>
+          </article>
+        </section>
+      </main>
+    </div>
     <script src="/ui/app.js"></script>
   </body>
 </html>

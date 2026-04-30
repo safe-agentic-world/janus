@@ -42,6 +42,18 @@ func TestUITraceRejectsAnonymousAccess(t *testing.T) {
 	}
 }
 
+func TestUIUpstreamsRejectsAnonymousAccess(t *testing.T) {
+	gw := newUITestGateway(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/ui/upstreams", nil)
+	w := httptest.NewRecorder()
+
+	gw.handleUIUpstreams(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
 func TestUIApprovalsListAndDecisionFlow(t *testing.T) {
 	gw := newUITestGateway(t)
 	_, err := gw.approvals.CreateOrGetPending(context.Background(), approval.PendingRequest{
@@ -97,6 +109,86 @@ func TestUIApprovalsListAndDecisionFlow(t *testing.T) {
 	}
 	if !strings.Contains(decideW.Body.String(), "approval_recorded") {
 		t.Fatalf("expected approval_recorded response, got %s", decideW.Body.String())
+	}
+}
+
+func TestUIUpstreamsSummarizesConfiguredServersWithoutSecrets(t *testing.T) {
+	gw := newUITestGateway(t)
+	breakerEnabled := true
+	gw.cfg.MCP.Breaker = MCPBreakerConfig{Enabled: &breakerEnabled}
+	gw.cfg.MCP.UpstreamServers = []MCPUpstreamServerConfig{{
+		Name:      "retail",
+		Transport: "streamable_http",
+		Endpoint:  "https://operator:very-secret-password@retail.mcp.example.com/mcp?token=very-secret-token",
+		Auth:      &MCPUpstreamAuthConfig{Type: "bearer", Token: "very-secret-bearer"},
+	}}
+
+	sqlitePath := audit.FirstSQLiteSinkPath(gw.cfg.Audit.Sink)
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		t.Fatalf("open audit db: %v", err)
+	}
+	defer db.Close()
+	event := audit.Event{
+		SchemaVersion:        "v1",
+		Timestamp:            time.Unix(10, 0).UTC(),
+		EventType:            "action.completed",
+		TraceID:              "trace-retail",
+		ActionID:             "act-retail",
+		ActionType:           "mcp.call",
+		Resource:             "mcp://retail/refund.request",
+		Decision:             "ALLOW",
+		ResultClassification: "UPSTREAM_ERROR",
+		DurationMS:           143,
+		Reason:               "Authorization: Bearer very-secret-token",
+		ExecutorMetadata:     map[string]any{"upstream_server": "retail"},
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal audit event: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit_events (timestamp, trace_id, action_id, event_type, decision, result_classification, retryable, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.Timestamp.Format(time.RFC3339Nano),
+		event.TraceID,
+		event.ActionID,
+		event.EventType,
+		event.Decision,
+		event.ResultClassification,
+		1,
+		string(payload),
+	); err != nil {
+		t.Fatalf("insert audit event: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/ui/upstreams", nil)
+	req.Header.Set("Authorization", "Bearer ui-key")
+	w := httptest.NewRecorder()
+	gw.handleUIUpstreams(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, secret := range []string{"very-secret-password", "very-secret-token", "very-secret-bearer", "operator:"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("upstream summary leaked secret %q in %s", secret, body)
+		}
+	}
+	var resp uiUpstreamListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upstream response: %v", err)
+	}
+	if len(resp.Upstreams) != 1 {
+		t.Fatalf("expected one upstream, got %+v", resp.Upstreams)
+	}
+	got := resp.Upstreams[0]
+	if got.Name != "retail" || got.Health != "degraded" || got.ErrorCount != 1 || got.RequestCount != 1 {
+		t.Fatalf("unexpected upstream summary: %+v", got)
+	}
+	if got.Endpoint != "https://retail.mcp.example.com/mcp" {
+		t.Fatalf("expected safe endpoint summary, got %q", got.Endpoint)
+	}
+	if got.BreakerState != "configured" || !got.BreakerEnabled {
+		t.Fatalf("expected breaker posture, got %+v", got)
 	}
 }
 
@@ -200,6 +292,34 @@ func TestUIStaticShellServesIndex(t *testing.T) {
 	}
 }
 
+func TestUIStaticShellHasEnterpriseConsoleNavigation(t *testing.T) {
+	gw := newUITestGateway(t)
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	w := httptest.NewRecorder()
+
+	gw.handleUIStatic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`data-route="overview"`,
+		`data-route="approvals"`,
+		`data-route="investigations"`,
+		`data-route="upstreams"`,
+		`data-route="explain"`,
+		`id="breadcrumb"`,
+		`id="upstreams"`,
+		`id="approval-search"`,
+		`id="trace-saved-view"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected enterprise console shell to include %q, got %s", want, body)
+		}
+	}
+}
+
 func TestUIStaticAppRendersArgumentPreview(t *testing.T) {
 	gw := newUITestGateway(t)
 	req := httptest.NewRequest(http.MethodGet, "/ui/app.js", nil)
@@ -214,6 +334,62 @@ func TestUIStaticAppRendersArgumentPreview(t *testing.T) {
 	for _, want := range []string{"argument_preview", "Forwarded arguments", "details"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected app.js to render %q in argument preview flow, got %s", want, body)
+		}
+	}
+}
+
+func TestUIStaticAppHasEnterpriseConsoleInteractions(t *testing.T) {
+	gw := newUITestGateway(t)
+	req := httptest.NewRequest(http.MethodGet, "/ui/app.js", nil)
+	w := httptest.NewRecorder()
+
+	gw.handleUIStatic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"storageKeys",
+		"routeTo",
+		"boundedRows",
+		"loadUpstreams",
+		"/api/ui/upstreams",
+		"applyColumnVisibility",
+		"saveTraceFilter",
+		"handleKeyboardShortcuts",
+		"MAX_VISIBLE_ROWS",
+		"localStorage",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected app.js to include %q, got %s", want, body)
+		}
+	}
+}
+
+func TestUIStaticCSSHasResponsiveAccessibleConsoleRules(t *testing.T) {
+	gw := newUITestGateway(t)
+	req := httptest.NewRequest(http.MethodGet, "/ui/styles.css", nil)
+	w := httptest.NewRecorder()
+
+	gw.handleUIStatic(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		":focus-visible",
+		"@media (max-width: 1080px)",
+		"@media (prefers-reduced-motion: reduce)",
+		".split-layout",
+		".data-grid",
+		".badge.good",
+		".badge.warn",
+		".badge.bad",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected styles.css to include %q, got %s", want, body)
 		}
 	}
 }

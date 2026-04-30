@@ -462,6 +462,7 @@ func (g *Gateway) Start() error {
 	mux.HandleFunc("/api/ui/actions/", g.handleUIActionDetail)
 	mux.HandleFunc("/api/ui/traces", g.handleUITraceList)
 	mux.HandleFunc("/api/ui/traces/", g.handleUITraceDetail)
+	mux.HandleFunc("/api/ui/upstreams", g.handleUIUpstreams)
 	mux.HandleFunc("/api/ui/explain", g.handleUIExplain)
 	mux.HandleFunc("/admin/reload", g.handleAdminReload)
 	mux.HandleFunc("/explain", g.handleExplain)
