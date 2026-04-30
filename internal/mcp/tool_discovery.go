@@ -101,6 +101,10 @@ func (s *Server) toolsListForIdentity(id identity.VerifiedIdentity, filterUnavai
 func (s *Server) toolsListForIdentityWithSummary(id identity.VerifiedIdentity, filterUnavailable bool) ([]map[string]any, toolDiscoverySummary) {
 	_ = filterUnavailable
 	summary := toolDiscoverySummary{}
+	surface := ToolSurfaceCanonical
+	if s != nil && s.toolSurface != "" {
+		surface = s.toolSurface
+	}
 	tools := []map[string]any{
 		{"name": advertisedToolName("nomos.capabilities"), "description": "Return the policy-derived capability contract for this session", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}},
 	}
@@ -114,7 +118,9 @@ func (s *Server) toolsListForIdentityWithSummary(id identity.VerifiedIdentity, f
 			summary.hidden++
 			continue
 		}
-		tools = append(tools, toolListEntryForSpec(spec.Name, toolSchemaForSpec(spec.Name), discovery))
+		for _, advertised := range advertisedToolNamesForSurface(spec.Name, surface) {
+			tools = append(tools, toolListEntryForSpec(spec.Name, advertised, toolSchemaForSpec(spec.Name), discovery))
+		}
 	}
 	if s.upstream != nil {
 		for _, tool := range s.upstream.snapshotTools() {
@@ -167,10 +173,10 @@ func (s *Server) discoverToolVisibility(id identity.VerifiedIdentity, actionType
 	}
 }
 
-func toolListEntryForSpec(name string, schema map[string]any, discovery toolDiscoveryMode) map[string]any {
+func toolListEntryForSpec(name, advertisedName string, schema map[string]any, discovery toolDiscoveryMode) map[string]any {
 	entry := map[string]any{
-		"name":        advertisedToolName(name),
-		"description": toolDiscoveryDescription(name),
+		"name":        advertisedName,
+		"description": toolDiscoveryDescription(name, advertisedName),
 		"inputSchema": schema,
 	}
 	if discovery == toolDiscoveryApprovalRequired {
@@ -191,7 +197,21 @@ func toolListEntryForUpstream(tool upstreamTool, discovery toolDiscoveryMode) ma
 	return entry
 }
 
-func toolDiscoveryDescription(name string) string {
+func toolDiscoveryDescription(name, advertisedName string) string {
+	if isFriendlyToolName(advertisedName) {
+		switch advertisedName {
+		case "read_file":
+			return "Default governed file-read tool for local workspace reads. Backed by Nomos fs.read policy, approval, and audit."
+		case "write_file":
+			return "Default governed file-write tool for local workspace edits. Backed by Nomos fs.write policy, approval, and audit."
+		case "apply_patch":
+			return "Default governed patch tool for repository changes. Backed by Nomos repo.apply_patch policy, approval, and audit."
+		case "run_command":
+			return "Default governed shell command tool for local process execution. Backed by Nomos process.exec policy, approval, and audit."
+		case "http_request":
+			return "Default governed HTTP tool for network requests. Backed by Nomos net.http_request policy, approval, and audit."
+		}
+	}
 	switch name {
 	case "nomos.capabilities":
 		return "Return the policy-derived capability contract for this session"

@@ -53,6 +53,7 @@ type Server struct {
 	bundlePaths           []string
 	bundleRoles           []string
 	execCompatibilityMode string
+	toolSurface           string
 	responseScanner       *responsescan.Scanner
 	telemetry             *telemetry.Emitter
 	tenantConfig          tenant.Config
@@ -319,6 +320,7 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 		bundlePaths:           append([]string{}, bundlePaths...),
 		bundleRoles:           append([]string{}, parsedRuntime.BundleRoles...),
 		execCompatibilityMode: parsedRuntime.ExecCompatibilityMode,
+		toolSurface:           parsedRuntime.ToolSurface,
 		responseScanner:       responseScanner,
 		telemetry:             parsedRuntime.Telemetry,
 		tenantConfig:          parsedRuntime.TenantConfig,

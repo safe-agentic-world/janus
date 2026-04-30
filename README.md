@@ -205,6 +205,32 @@ Use Nomos to read .env from the repo root.
 Nomos should deny the action.
 
 
+## Do I Have To Tell The Agent To Use Nomos?
+
+For local demos, you can still prompt "use Nomos". For real workflows, make Nomos the default execution boundary so the agent naturally sees governed tools first.
+
+Use the launcher:
+
+```bash
+nomos run codex --dry-run --print-config
+nomos run claude --profile safe-dev
+```
+
+The launcher detects the workspace, selects a policy profile, generates an MCP client config, and exposes friendly governed tools:
+
+- `read_file` -> `fs.read`
+- `write_file` -> `fs.write`
+- `apply_patch` -> `repo.apply_patch`
+- `run_command` -> `process.exec`
+- `http_request` -> `net.http_request`
+
+Do not register raw filesystem, shell, GitHub, Kubernetes, or other upstream MCP servers directly beside Nomos when Nomos should govern those actions. If native tools or raw MCP servers remain enabled, Nomos warns because those are possible bypass paths.
+
+Local laptop mode is best-effort. Stronger guarantees require controlled runtimes such as containers, CI, or remote workspaces.
+
+See [docs/agent-launcher.md](./docs/agent-launcher.md).
+
+
 ## MCP-Native Agent Demo
 
 Beyond coding agents, the same pipeline governs business agents reaching real systems over MCP. The retail support example compares the same agent before and after Nomos.

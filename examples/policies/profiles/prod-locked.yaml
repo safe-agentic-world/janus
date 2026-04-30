@@ -1,0 +1,233 @@
+version: v1
+rules:
+  # Production mode must never read root dotenv files.
+  - id: prod-locked-deny-root-env-read
+    action_type: fs.read
+    resource: file://workspace/.env
+    decision: DENY
+
+  # Production mode must never read nested dotenv files.
+  - id: prod-locked-deny-nested-env-read
+    action_type: fs.read
+    resource: file://workspace/**/.env
+    decision: DENY
+
+  # Production mode must never read dotenv variants.
+  - id: prod-locked-deny-env-variant-read
+    action_type: fs.read
+    resource: file://workspace/**/.env.*
+    decision: DENY
+
+  # Production mode must never read private keys.
+  - id: prod-locked-deny-private-key-read
+    action_type: fs.read
+    resource: file://workspace/**/*.key
+    decision: DENY
+
+  # Production mode must never read netrc machine credentials.
+  - id: prod-locked-deny-netrc-read
+    action_type: fs.read
+    resource: file://workspace/**/.netrc
+    decision: DENY
+
+  # Production mode must never read SSH key material.
+  - id: prod-locked-deny-ssh-dir-read
+    action_type: fs.read
+    resource: file://workspace/**/.ssh/**
+    decision: DENY
+
+  # Production mode must never read AWS credential files.
+  - id: prod-locked-deny-aws-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.aws/credentials
+    decision: DENY
+
+  # Production mode must never read GCP credential directories.
+  - id: prod-locked-deny-gcp-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.gcp/**
+    decision: DENY
+
+  # Production mode must never read kubeconfig files.
+  - id: prod-locked-deny-kubeconfig-read
+    action_type: fs.read
+    resource: file://workspace/**/kubeconfig
+    decision: DENY
+
+  # Production mode must never read kubeconfig variants.
+  - id: prod-locked-deny-kubeconfig-variant-read
+    action_type: fs.read
+    resource: file://workspace/**/kubeconfig.*
+    decision: DENY
+
+  # Production mode must never read Kubernetes credential directories.
+  - id: prod-locked-deny-kube-dir-read
+    action_type: fs.read
+    resource: file://workspace/**/.kube/**
+    decision: DENY
+
+  # Production mode may read non-secret workspace content for inspection.
+  - id: prod-locked-allow-workspace-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+    obligations:
+      sandbox_mode: controlled
+
+  # Production mode blocks direct file writes.
+  - id: prod-locked-deny-workspace-write
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: DENY
+
+  # Production mode blocks repository patches.
+  - id: prod-locked-deny-workspace-patch
+    action_type: repo.apply_patch
+    resource: repo://local/workspace
+    decision: DENY
+
+  # Production mode blocks repository publishing.
+  - id: prod-locked-deny-git-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "push"]
+        - ["git", "push", "**"]
+
+  # Production mode blocks dependency mutations.
+  - id: prod-locked-deny-package-installs
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["go", "get"]
+        - ["go", "get", "**"]
+        - ["go", "mod", "tidy"]
+        - ["npm", "install"]
+        - ["npm", "install", "**"]
+        - ["npm", "ci"]
+        - ["python", "-m", "pip", "install", "**"]
+        - ["py", "-3", "-m", "pip", "install", "**"]
+
+  # Production mode blocks direct infrastructure mutations.
+  - id: prod-locked-deny-infra-mutations
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["terraform", "apply"]
+        - ["terraform", "apply", "**"]
+        - ["terraform", "destroy"]
+        - ["terraform", "destroy", "**"]
+        - ["kubectl", "apply"]
+        - ["kubectl", "apply", "**"]
+        - ["kubectl", "delete"]
+        - ["kubectl", "delete", "**"]
+        - ["helm", "upgrade"]
+        - ["helm", "upgrade", "**"]
+        - ["helm", "uninstall"]
+        - ["helm", "uninstall", "**"]
+
+  # Production mode allows read-only git inspection.
+  - id: prod-locked-allow-git-readonly
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "status"]
+        - ["git", "status", "**"]
+        - ["git", "diff"]
+        - ["git", "diff", "**"]
+        - ["git", "log"]
+        - ["git", "log", "**"]
+        - ["git", "show"]
+        - ["git", "show", "**"]
+    obligations:
+      sandbox_mode: controlled
+
+  # Production mode allows read-only Kubernetes inspection.
+  - id: prod-locked-allow-kubernetes-readonly
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["kubectl", "get"]
+        - ["kubectl", "get", "**"]
+        - ["kubectl", "describe"]
+        - ["kubectl", "describe", "**"]
+        - ["kubectl", "logs"]
+        - ["kubectl", "logs", "**"]
+    obligations:
+      sandbox_mode: controlled
+
+  # Production mode allows read-only Terraform inspection.
+  - id: prod-locked-allow-terraform-readonly
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["terraform", "plan"]
+        - ["terraform", "plan", "**"]
+        - ["terraform", "show"]
+        - ["terraform", "show", "**"]
+    obligations:
+      sandbox_mode: controlled
+
+  # Production mode allows safe local inspection commands.
+  - id: prod-locked-allow-local-inspection
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["pwd"]
+        - ["ls"]
+        - ["ls", "**"]
+        - ["dir"]
+        - ["dir", "**"]
+    obligations:
+      sandbox_mode: controlled
+
+  # Production mode allows a narrow break-glass rollout restart only after approval.
+  - id: prod-locked-approve-breakglass-rollout-restart
+    action_type: process.exec
+    resource: file://workspace/
+    decision: REQUIRE_APPROVAL
+    exec_match:
+      argv_patterns:
+        - ["kubectl", "rollout", "restart", "**"]
+    obligations:
+      approval_scope_class: action_type_resource
+      breakglass: true
+      reason: production rollout restarts require explicit human approval
+
+  # Production mode blocks HTTP requests that carry authorization material.
+  - id: prod-locked-deny-http-authorization-header
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Authorization:
+        present: true
+
+  # Production mode only permits read-only checks to the production status endpoint.
+  - id: prod-locked-allow-http-status
+    action_type: net.http_request
+    resource: url://status.example.com/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # Production mode cannot check out arbitrary secrets by default.
+  - id: prod-locked-deny-secret-checkout
+    action_type: secrets.checkout
+    resource: secret://**/**
+    decision: DENY

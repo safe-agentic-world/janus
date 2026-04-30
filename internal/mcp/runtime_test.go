@@ -103,11 +103,14 @@ func TestParseRuntimeOptionsValidation(t *testing.T) {
 	if _, err := ParseRuntimeOptions(RuntimeOptions{LogFormat: "yaml"}); err == nil {
 		t.Fatal("expected invalid log format error")
 	}
+	if _, err := ParseRuntimeOptions(RuntimeOptions{ToolSurface: "ambiguous"}); err == nil {
+		t.Fatal("expected invalid tool surface error")
+	}
 	opts, err := ParseRuntimeOptions(RuntimeOptions{})
 	if err != nil {
 		t.Fatalf("parse defaults: %v", err)
 	}
-	if opts.LogLevel != "info" || opts.LogFormat != "text" {
+	if opts.LogLevel != "info" || opts.LogFormat != "text" || opts.ToolSurface != ToolSurfaceCanonical {
 		t.Fatalf("unexpected defaults: %+v", opts)
 	}
 }

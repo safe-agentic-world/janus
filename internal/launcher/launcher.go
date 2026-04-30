@@ -1,0 +1,628 @@
+package launcher
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/safe-agentic-world/nomos/internal/audit"
+	"github.com/safe-agentic-world/nomos/internal/gateway"
+	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/redact"
+	"github.com/safe-agentic-world/nomos/internal/version"
+)
+
+const (
+	AgentCodex  = "codex"
+	AgentClaude = "claude"
+)
+
+type Options struct {
+	Agent                 string
+	ConfigPath            string
+	PolicyBundlePath      string
+	Profile               string
+	DryRun                bool
+	PrintConfig           bool
+	NoLaunch              bool
+	WriteInstructions     bool
+	ExistingMCPConfigPath string
+	WorkspaceRoot         string
+	NomosCommand          string
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Getenv                func(string) string
+	Args                  []string
+	Now                   func() time.Time
+}
+
+type Result struct {
+	Agent               string
+	WorkspaceRoot       string
+	ConfigPath          string
+	GeneratedConfig     bool
+	PolicyBundlePath    string
+	Profile             string
+	ProfileSummary      string
+	PolicyBundleHash    string
+	AssuranceLevel      string
+	MCPConfigPath       string
+	MCPConfigJSON       []byte
+	InstructionsWritten []string
+	Warnings            []string
+	Launched            bool
+}
+
+type mcpClientConfig struct {
+	MCPServers map[string]mcpClientServer `json:"mcpServers"`
+}
+
+type mcpClientServer struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
+var governedToolMappings = []struct {
+	Friendly  string
+	Canonical string
+}{
+	{"read_file", "fs.read"},
+	{"write_file", "fs.write"},
+	{"apply_patch", "repo.apply_patch"},
+	{"run_command", "process.exec"},
+	{"http_request", "net.http_request"},
+}
+
+func Run(opts Options) (Result, error) {
+	if opts.Stdout == nil {
+		opts.Stdout = io.Discard
+	}
+	if opts.Stderr == nil {
+		opts.Stderr = io.Discard
+	}
+	if opts.Getenv == nil {
+		opts.Getenv = os.Getenv
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	agent := normalizeAgent(opts.Agent)
+	if agent == "" {
+		return Result{}, errors.New("agent must be codex or claude")
+	}
+	if strings.TrimSpace(opts.PolicyBundlePath) != "" && strings.TrimSpace(opts.Profile) != "" {
+		return Result{}, errors.New("--policy-bundle and --profile are mutually exclusive")
+	}
+	workspaceRoot, err := resolveWorkspaceRoot(opts.WorkspaceRoot)
+	if err != nil {
+		return Result{}, err
+	}
+	policySelection, err := resolvePolicySelection(workspaceRoot, opts.PolicyBundlePath, opts.Profile)
+	if err != nil {
+		return Result{}, err
+	}
+	configPath, generatedConfig, configJSON, err := resolveNomosConfig(workspaceRoot, opts.ConfigPath, policySelection.BundlePath, opts)
+	if err != nil {
+		return Result{}, err
+	}
+	if generatedConfig && !opts.DryRun {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+			return Result{}, fmt.Errorf("create generated Nomos config directory: %w", err)
+		}
+		if err := os.WriteFile(configPath, configJSON, 0o600); err != nil {
+			return Result{}, fmt.Errorf("write generated Nomos config: %w", err)
+		}
+	}
+	var cfg gateway.Config
+	if generatedConfig && opts.DryRun {
+		cfg = dryRunGeneratedConfig()
+	} else {
+		cfg, err = gateway.LoadConfig(configPath, opts.Getenv, policySelection.BundlePath)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	bundle, err := policy.LoadBundle(policySelection.BundlePath)
+	if err != nil {
+		return Result{}, fmt.Errorf("load policy profile: %w", err)
+	}
+	mcpConfigJSON, err := buildMCPConfigJSON(nomosCommand(opts.NomosCommand), configPath, policySelection.BundlePath)
+	if err != nil {
+		return Result{}, err
+	}
+	mcpConfigPath := ""
+	if !opts.DryRun {
+		dir, err := ensureAgentTempDir(workspaceRoot)
+		if err != nil {
+			return Result{}, err
+		}
+		path := filepath.Join(dir, agent+".mcp.json")
+		if err := os.WriteFile(path, mcpConfigJSON, 0o600); err != nil {
+			return Result{}, fmt.Errorf("write mcp client config: %w", err)
+		}
+		mcpConfigPath = path
+	}
+	warnings := launcherWarnings(opts, cfg)
+	if extra := rawMCPWarnings(opts.ExistingMCPConfigPath); len(extra) > 0 {
+		warnings = append(warnings, extra...)
+	}
+	result := Result{
+		Agent:            agent,
+		WorkspaceRoot:    workspaceRoot,
+		ConfigPath:       configPath,
+		GeneratedConfig:  generatedConfig,
+		PolicyBundlePath: policySelection.BundlePath,
+		Profile:          policySelection.Profile,
+		ProfileSummary:   policySelection.Summary,
+		PolicyBundleHash: bundle.Hash,
+		AssuranceLevel:   "BEST_EFFORT",
+		MCPConfigPath:    mcpConfigPath,
+		MCPConfigJSON:    mcpConfigJSON,
+		Warnings:         warnings,
+	}
+	if opts.WriteInstructions {
+		written, err := writeInstructionFiles(workspaceRoot)
+		if err != nil {
+			return Result{}, err
+		}
+		result.InstructionsWritten = written
+	}
+	recordLauncherSession(cfg, result, opts.Now)
+	writeSummary(opts.Stdout, result, opts, policySelection.Defaulted)
+	if opts.PrintConfig {
+		_, _ = fmt.Fprintln(opts.Stdout)
+		_, _ = fmt.Fprintln(opts.Stdout, "Generated MCP config:")
+		_, _ = opts.Stdout.Write(mcpConfigJSON)
+		_, _ = fmt.Fprintln(opts.Stdout)
+	}
+	if opts.DryRun || opts.NoLaunch {
+		return result, nil
+	}
+	if err := launchAgent(agent, mcpConfigPath, opts.Args); err != nil {
+		return result, err
+	}
+	result.Launched = true
+	return result, nil
+}
+
+type policySelection struct {
+	BundlePath string
+	Profile    string
+	Summary    string
+	Defaulted  bool
+}
+
+func resolvePolicySelection(workspaceRoot, policyBundlePath, profile string) (policySelection, error) {
+	policyBundlePath = strings.TrimSpace(policyBundlePath)
+	profile = strings.TrimSpace(profile)
+	if policyBundlePath != "" {
+		abs, err := filepath.Abs(policyBundlePath)
+		if err != nil {
+			return policySelection{}, err
+		}
+		return policySelection{BundlePath: abs, Profile: "custom", Summary: "custom policy bundle"}, nil
+	}
+	defaulted := false
+	if profile == "" {
+		profile = "safe-dev"
+		defaulted = true
+	}
+	summary, ok := profileSummaries()[profile]
+	if !ok {
+		return policySelection{}, fmt.Errorf("unknown profile %q: expected safe-dev, ci-strict, or prod-locked", profile)
+	}
+	path := filepath.Join(workspaceRoot, "examples", "policies", "profiles", profile+".yaml")
+	if _, err := os.Stat(path); err != nil {
+		path = filepath.Join(repoRootFromPackage(), "examples", "policies", "profiles", profile+".yaml")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return policySelection{}, err
+	}
+	return policySelection{BundlePath: abs, Profile: profile, Summary: summary, Defaulted: defaulted}, nil
+}
+
+func profileSummaries() map[string]string {
+	return map[string]string{
+		"safe-dev":    "developer profile: workspace reads/writes allowed, secrets denied, risky publish/infra actions require approval, unknown egress denied",
+		"ci-strict":   "CI profile: validation and structured artifact publishing allowed, package installs and mutations denied, unknown egress denied",
+		"prod-locked": "production profile: read-only inspection allowed, writes/patches/mutations denied except narrow break-glass approval",
+	}
+}
+
+func resolveNomosConfig(workspaceRoot, configPath, policyBundlePath string, opts Options) (string, bool, []byte, error) {
+	if strings.TrimSpace(configPath) != "" {
+		abs, err := filepath.Abs(configPath)
+		return abs, false, nil, err
+	}
+	if envPath := strings.TrimSpace(opts.Getenv("NOMOS_CONFIG")); envPath != "" {
+		abs, err := filepath.Abs(envPath)
+		return abs, false, nil, err
+	}
+	for _, candidate := range configCandidates(workspaceRoot) {
+		if _, err := os.Stat(candidate); err == nil {
+			abs, err := filepath.Abs(candidate)
+			return abs, false, nil, err
+		}
+	}
+	configPath = filepath.Join(workspaceRoot, ".nomos", "agent", "nomos.generated.json")
+	data, err := json.MarshalIndent(minimalConfig(workspaceRoot, policyBundlePath), "", "  ")
+	if err != nil {
+		return "", false, nil, err
+	}
+	data = append(data, '\n')
+	return configPath, true, data, nil
+}
+
+func configCandidates(workspaceRoot string) []string {
+	return []string{
+		filepath.Join(workspaceRoot, "nomos", "config.json"),
+		filepath.Join(workspaceRoot, ".nomos", "config.json"),
+	}
+}
+
+func minimalConfig(workspaceRoot, policyBundlePath string) map[string]any {
+	return map[string]any{
+		"gateway": map[string]any{
+			"listen":                           ":8080",
+			"transport":                        "http",
+			"concurrency_limit":                32,
+			"rate_limit_per_minute":            120,
+			"circuit_breaker_failures":         5,
+			"circuit_breaker_cooldown_seconds": 60,
+			"tls":                              map[string]any{"enabled": false, "cert_file": "", "key_file": "", "client_ca_file": "", "require_mtls": false},
+		},
+		"runtime": map[string]any{"deployment_mode": "unmanaged", "strong_guarantee": false, "stateless_mode": false},
+		"policy": map[string]any{
+			"policy_bundle_path":      policyBundlePath,
+			"verify_signatures":       false,
+			"signature_path":          "",
+			"public_key_path":         "",
+			"exec_compatibility_mode": "strict",
+			"explain_suggestions":     true,
+			"opa":                     map[string]any{"enabled": false, "binary_path": "", "policy_path": "", "query": "", "timeout_ms": 2000},
+		},
+		"executor":    map[string]any{"sandbox_enabled": true, "sandbox_profile": "local", "workspace_root": workspaceRoot, "max_output_bytes": 65536, "max_output_lines": 200},
+		"credentials": map[string]any{"enabled": false, "secrets": []any{}},
+		"audit":       map[string]any{"sink": "sqlite:" + filepath.Join(workspaceRoot, ".nomos", "agent", "audit.db")},
+		"telemetry":   map[string]any{"enabled": false, "sink": "stderr"},
+		"rate_limits": map[string]any{"enabled": false},
+		"mcp":         map[string]any{"enabled": true},
+		"upstream":    map[string]any{"routes": []any{}},
+		"approvals":   map[string]any{"enabled": false, "backend": "file", "store_path": filepath.Join(workspaceRoot, ".nomos", "approvals.json"), "ttl_seconds": 900, "webhook_token": "", "slack_token": "", "teams_token": ""},
+		"identity": map[string]any{
+			"principal":       "system",
+			"agent":           "nomos",
+			"environment":     "dev",
+			"api_keys":        map[string]string{"local-agent": "system"},
+			"agent_secrets":   map[string]string{"nomos": "local-agent-secret"},
+			"service_secrets": map[string]string{},
+			"oidc":            map[string]any{"enabled": false, "issuer": "", "audience": "", "public_key_path": ""},
+			"spiffe":          map[string]any{"enabled": false, "trust_domain": ""},
+		},
+		"redaction": map[string]any{"patterns": []any{}},
+	}
+}
+
+func dryRunGeneratedConfig() gateway.Config {
+	return gateway.Config{
+		Audit: gateway.AuditConfig{Sink: ""},
+		Identity: gateway.IdentityConfig{
+			Principal:   "system",
+			Agent:       "nomos",
+			Environment: "dev",
+		},
+	}
+}
+
+func buildMCPConfigJSON(command, configPath, policyBundlePath string) ([]byte, error) {
+	cfg := mcpClientConfig{MCPServers: map[string]mcpClientServer{
+		"nomos": {
+			Command: command,
+			Args: []string{
+				"mcp",
+				"-c", configPath,
+				"-p", policyBundlePath,
+				"--tool-surface", "friendly",
+				"--quiet",
+			},
+		},
+	}}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func launcherWarnings(opts Options, cfg gateway.Config) []string {
+	warnings := []string{
+		"Local machine mode is BEST_EFFORT: Nomos cannot prevent deliberate bypass while native file, shell, HTTP, or patch tools remain enabled.",
+		"Dual-tool ambiguity: if native tools or raw MCP servers expose the same capabilities beside Nomos, actions may bypass governance.",
+		"Do not register raw filesystem, shell, GitHub, Kubernetes, or other upstream MCP servers directly beside Nomos in workspace profile mode.",
+		"Future enforcement mode will be able to exclude non-Nomos MCP servers from generated configs.",
+	}
+	if len(cfg.MCP.UpstreamServers) > 0 {
+		warnings = append(warnings, "Nomos upstream MCP proxy is configured; clients should still register only the Nomos MCP server.")
+	}
+	return warnings
+}
+
+func rawMCPWarnings(path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return []string{fmt.Sprintf("Could not inspect existing MCP config %s for bypass paths: %v", path, err)}
+	}
+	raw, err := RawMCPServerNames(data)
+	if err != nil {
+		return []string{fmt.Sprintf("Could not parse existing MCP config %s for bypass paths: %v", path, err)}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("Possible bypass paths detected: existing MCP config also registers raw server(s): %s", strings.Join(raw, ", "))}
+}
+
+func RawMCPServerNames(data []byte) ([]string, error) {
+	var cfg struct {
+		MCPServers map[string]any `json:"mcpServers"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(cfg.MCPServers))
+	for name := range cfg.MCPServers {
+		if strings.EqualFold(strings.TrimSpace(name), "nomos") {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func writeSummary(out io.Writer, result Result, opts Options, defaulted bool) {
+	if defaulted {
+		_, _ = fmt.Fprintln(out, "No policy provided — using default profile: safe-dev")
+		_, _ = fmt.Fprintf(out, "safe-dev summary: %s\n\n", result.ProfileSummary)
+	}
+	_, _ = fmt.Fprintln(out, "Nomos workspace active")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Agent:         %s\n", result.Agent)
+	_, _ = fmt.Fprintf(out, "Workspace:     %s\n", result.WorkspaceRoot)
+	_, _ = fmt.Fprintf(out, "Config:        %s\n", displayGeneratedPath(result.ConfigPath, result.GeneratedConfig, opts.DryRun))
+	_, _ = fmt.Fprintf(out, "Profile:       %s\n", result.Profile)
+	_, _ = fmt.Fprintf(out, "Policy bundle: %s\n", result.PolicyBundlePath)
+	_, _ = fmt.Fprintf(out, "Policy hash:   %s\n", result.PolicyBundleHash)
+	_, _ = fmt.Fprintf(out, "Assurance:     %s\n", result.AssuranceLevel)
+	if opts.DryRun {
+		_, _ = fmt.Fprintln(out, "MCP config:    <dry-run>")
+	} else {
+		_, _ = fmt.Fprintf(out, "MCP config:    %s\n", result.MCPConfigPath)
+	}
+	_, _ = fmt.Fprintln(out, "Governed tools:")
+	for _, mapping := range governedToolMappings {
+		_, _ = fmt.Fprintf(out, "  %-14s -> %s\n", mapping.Friendly, mapping.Canonical)
+	}
+	if len(result.InstructionsWritten) > 0 {
+		_, _ = fmt.Fprintln(out, "Instructions:")
+		for _, path := range result.InstructionsWritten {
+			_, _ = fmt.Fprintf(out, "  wrote %s\n", path)
+		}
+	}
+	if len(result.Warnings) > 0 {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Warning:")
+		for _, warning := range result.Warnings {
+			_, _ = fmt.Fprintf(out, "  %s\n", warning)
+		}
+	}
+}
+
+func displayGeneratedPath(path string, generated, dryRun bool) string {
+	if generated && dryRun {
+		return "<generated-nomos-config>"
+	}
+	return path
+}
+
+func writeInstructionFiles(workspaceRoot string) ([]string, error) {
+	files := map[string]string{
+		filepath.Join(workspaceRoot, "AGENTS.md"):                 instructionText("AGENTS.md"),
+		filepath.Join(workspaceRoot, "CLAUDE.md"):                 instructionText("CLAUDE.md"),
+		filepath.Join(workspaceRoot, ".codex", "instructions.md"): instructionText(".codex/instructions.md"),
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return nil, fmt.Errorf("instruction file already exists: %s", path)
+		}
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, []byte(files[path]), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return paths, nil
+}
+
+func instructionText(target string) string {
+	return fmt.Sprintf(`# Nomos-Governed Workspace
+
+This workspace is intended to route filesystem, patch, shell, git, and HTTP actions through Nomos.
+
+Use the governed default tools:
+- read_file for local file reads
+- write_file for local file writes
+- apply_patch for repository patches
+- run_command for shell, git, build, test, and deployment commands
+- http_request for outbound HTTP
+
+Do not use native shell, native file, native patch, native internet, or raw upstream MCP servers directly for governed capabilities when Nomos equivalents are available.
+
+If both native tools and Nomos tools are visible, treat the native path as a bypass risk and prefer the Nomos tool.
+
+Source: generated for %s by nomos run.
+`, target)
+}
+
+func recordLauncherSession(cfg gateway.Config, result Result, now func() time.Time) {
+	if strings.TrimSpace(result.MCPConfigPath) == "" {
+		return
+	}
+	sink := launcherAuditSink(cfg.Audit.Sink)
+	if strings.TrimSpace(sink) == "" {
+		return
+	}
+	writer, err := audit.NewWriter(sink, redact.DefaultRedactor())
+	if err != nil {
+		return
+	}
+	defer func() { _ = writer.Close() }()
+	_ = writer.WriteEvent(audit.Event{
+		SchemaVersion:    "v1",
+		Timestamp:        now().UTC(),
+		EventType:        "agent.launcher.session",
+		TraceID:          "agent_launcher",
+		ActionID:         "agent_launcher",
+		Principal:        cfg.Identity.Principal,
+		Agent:            result.Agent,
+		Environment:      cfg.Identity.Environment,
+		PolicyBundleHash: result.PolicyBundleHash,
+		AssuranceLevel:   result.AssuranceLevel,
+		ExecutorMetadata: map[string]any{
+			"workspace_root":      result.WorkspaceRoot,
+			"profile":             result.Profile,
+			"mcp_tool_surface":    "friendly",
+			"mcp_config_path":     result.MCPConfigPath,
+			"nomos_config_path":   result.ConfigPath,
+			"nomos_version":       version.Version,
+			"dual_tool_warning":   true,
+			"default_boundary":    true,
+			"generated_config":    result.GeneratedConfig,
+			"governed_tool_count": len(governedToolMappings),
+		},
+	})
+}
+
+func launcherAuditSink(sink string) string {
+	parts := strings.Split(strings.TrimSpace(sink), ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if part == "stdout" {
+			part = "stderr"
+		}
+		out = append(out, part)
+	}
+	return strings.Join(out, ",")
+}
+
+func launchAgent(agent, mcpConfigPath string, args []string) error {
+	bin, err := exec.LookPath(agent)
+	if err != nil {
+		return fmt.Errorf("%s executable not found; rerun with --no-launch or configure the client with %s: %w", agent, mcpConfigPath, err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	env := os.Environ()
+	env = append(env, "NOMOS_MCP_CONFIG="+mcpConfigPath, "NOMOS_AGENT_MCP_CONFIG="+mcpConfigPath)
+	switch agent {
+	case AgentCodex:
+		env = append(env, "CODEX_MCP_CONFIG="+mcpConfigPath)
+	case AgentClaude:
+		env = append(env, "CLAUDE_MCP_CONFIG="+mcpConfigPath)
+	}
+	cmd.Env = env
+	return cmd.Run()
+}
+
+func ensureAgentTempDir(workspaceRoot string) (string, error) {
+	root := filepath.Join(workspaceRoot, ".nomos", "agent")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(root, "session-*")
+}
+
+func normalizeAgent(agent string) string {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case AgentCodex:
+		return AgentCodex
+	case AgentClaude:
+		return AgentClaude
+	default:
+		return ""
+	}
+}
+
+func resolveWorkspaceRoot(raw string) (string, error) {
+	if strings.TrimSpace(raw) != "" {
+		return filepath.Abs(raw)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if root := findGitRoot(cwd); root != "" {
+		return root, nil
+	}
+	return cwd, nil
+}
+
+func findGitRoot(start string) string {
+	dir := start
+	for {
+		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func repoRootFromPackage() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	if root := findGitRoot(cwd); root != "" {
+		return root
+	}
+	return cwd
+}
+
+func nomosCommand(value string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return "nomos"
+}

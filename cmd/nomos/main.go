@@ -23,6 +23,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/doctor"
 	"github.com/safe-agentic-world/nomos/internal/gateway"
 	"github.com/safe-agentic-world/nomos/internal/identity"
+	"github.com/safe-agentic-world/nomos/internal/launcher"
 	"github.com/safe-agentic-world/nomos/internal/mcp"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
@@ -47,6 +48,8 @@ func main() {
 		runServe(os.Args[2:])
 	case "mcp":
 		runMCP(os.Args[2:])
+	case "run":
+		runAgentLauncher(os.Args[2:])
 	case "policy":
 		runPolicy(os.Args[2:])
 	case "approvals":
@@ -159,6 +162,7 @@ func runMCP(args []string) {
 	var policyBundle string
 	var logLevel string
 	var logFormat string
+	var toolSurface string
 	var quiet bool
 	fs.StringVar(&configPath, "config", "", "path to config json")
 	fs.StringVar(&configPath, "c", "", "path to config json")
@@ -169,6 +173,7 @@ func runMCP(args []string) {
 	fs.BoolVar(&quiet, "quiet", false, "suppress startup banner and non-error logs")
 	fs.BoolVar(&quiet, "q", false, "suppress startup banner and non-error logs")
 	fs.StringVar(&logFormat, "log-format", "text", "mcp log format: text|json")
+	fs.StringVar(&toolSurface, "tool-surface", mcp.ToolSurfaceCanonical, "mcp tool surface: canonical|friendly|both")
 	fs.Usage = func() { writeHelpText(fs.Output(), mcpHelpText()) }
 	fs.Parse(args)
 
@@ -190,6 +195,7 @@ func runMCP(args []string) {
 		LogFormat:             logFormat,
 		ErrWriter:             os.Stderr,
 		ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+		ToolSurface:           toolSurface,
 		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
 		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
 		ApprovalStorePath:     cfg.Approvals.StorePath,
@@ -234,7 +240,7 @@ func runMCP(args []string) {
 	}
 	server.SetAssuranceLevel(assuranceLevel)
 	defer func() { _ = server.Close() }()
-	stopMCPReloadSignals := startMCPReloadSignalHandler(server, resolved.ConfigPath, resolved.PolicyBundle, resolved.LogLevel, logFormat, resolved.Quiet, os.Getenv)
+	stopMCPReloadSignals := startMCPReloadSignalHandler(server, resolved.ConfigPath, resolved.PolicyBundle, resolved.LogLevel, logFormat, toolSurface, resolved.Quiet, os.Getenv)
 	defer stopMCPReloadSignals()
 	cliSuccessf("MCP stdio server ready (assurance=%s)", assuranceLevel)
 	if err := server.ServeStdio(os.Stdin, os.Stdout); err != nil {
@@ -248,6 +254,7 @@ func runMCPServe(args []string) {
 	var configPath string
 	var policyBundle string
 	var listen string
+	var toolSurface string
 	var useHTTP bool
 	fs.StringVar(&configPath, "config", "", "path to config json")
 	fs.StringVar(&configPath, "c", "", "path to config json")
@@ -255,6 +262,7 @@ func runMCPServe(args []string) {
 	fs.StringVar(&policyBundle, "p", "", "path to policy bundle")
 	fs.StringVar(&listen, "listen", "", "bind address for downstream MCP HTTP server")
 	fs.BoolVar(&useHTTP, "http", false, "serve downstream MCP over streamable http")
+	fs.StringVar(&toolSurface, "tool-surface", mcp.ToolSurfaceCanonical, "mcp tool surface: canonical|friendly|both")
 	fs.Usage = func() { writeHelpText(fs.Output(), mcpServeHelpText()) }
 	fs.Parse(args)
 
@@ -281,6 +289,7 @@ func runMCPServe(args []string) {
 		LogFormat:             "text",
 		ErrWriter:             os.Stderr,
 		ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+		ToolSurface:           toolSurface,
 		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
 		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
 		ApprovalStorePath:     cfg.Approvals.StorePath,
@@ -334,12 +343,12 @@ func runMCPServe(args []string) {
 		cliFatalf("init downstream mcp http server: %v", err)
 	}
 	httpServer.SetReloadHandler(func(ctx context.Context) (mcp.ReloadResult, error) {
-		return reloadMCPServerFromConfig(ctx, baseServer, resolved.ConfigPath, resolved.PolicyBundle, "info", "text", false, os.Getenv, "admin")
+		return reloadMCPServerFromConfig(ctx, baseServer, resolved.ConfigPath, resolved.PolicyBundle, "info", "text", toolSurface, false, os.Getenv, "admin")
 	})
 	if err := httpServer.Start(); err != nil {
 		cliFatalf("start downstream mcp http server: %v", err)
 	}
-	stopMCPReloadSignals := startMCPReloadSignalHandler(baseServer, resolved.ConfigPath, resolved.PolicyBundle, "info", "text", false, os.Getenv)
+	stopMCPReloadSignals := startMCPReloadSignalHandler(baseServer, resolved.ConfigPath, resolved.PolicyBundle, "info", "text", toolSurface, false, os.Getenv)
 	defer stopMCPReloadSignals()
 	cliSuccessf("MCP HTTP server ready on %s (assurance=%s)", httpServer.Addr(), assuranceLevel)
 	stop := make(chan os.Signal, 1)
@@ -349,6 +358,57 @@ func runMCPServe(args []string) {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		cliFatalf("mcp http server shutdown: %v", err)
+	}
+}
+
+func runAgentLauncher(args []string) {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		writeHelpText(os.Stderr, runHelpText())
+		if len(args) == 0 {
+			os.Exit(2)
+		}
+		return
+	}
+	agent := args[0]
+	fs := flag.NewFlagSet("run "+agent, flag.ExitOnError)
+	fs.SetOutput(os.Stderr)
+	var configPath string
+	var policyBundle string
+	var profile string
+	var dryRun bool
+	var printConfig bool
+	var noLaunch bool
+	var writeInstructions bool
+	var existingMCPConfig string
+	fs.StringVar(&configPath, "config", "", "path to Nomos config json")
+	fs.StringVar(&configPath, "c", "", "path to Nomos config json")
+	fs.StringVar(&policyBundle, "policy-bundle", "", "path to policy bundle")
+	fs.StringVar(&policyBundle, "p", "", "path to policy bundle")
+	fs.StringVar(&profile, "profile", "", "default profile: safe-dev|ci-strict|prod-locked")
+	fs.BoolVar(&dryRun, "dry-run", false, "print planned launcher setup without writing files or starting the agent")
+	fs.BoolVar(&printConfig, "print-config", false, "print generated MCP client config")
+	fs.BoolVar(&noLaunch, "no-launch", false, "write generated config and summary but do not start the agent")
+	fs.BoolVar(&writeInstructions, "write-instructions", false, "write AGENTS.md, CLAUDE.md, and .codex/instructions.md")
+	fs.StringVar(&existingMCPConfig, "existing-mcp-config", "", "optional existing MCP config to inspect for bypass paths")
+	fs.Usage = func() { writeHelpText(fs.Output(), runHelpText()) }
+	fs.Parse(args[1:])
+
+	if _, err := launcher.Run(launcher.Options{
+		Agent:                 agent,
+		ConfigPath:            configPath,
+		PolicyBundlePath:      policyBundle,
+		Profile:               profile,
+		DryRun:                dryRun,
+		PrintConfig:           printConfig,
+		NoLaunch:              noLaunch,
+		WriteInstructions:     writeInstructions,
+		ExistingMCPConfigPath: existingMCPConfig,
+		Stdout:                os.Stdout,
+		Stderr:                os.Stderr,
+		Getenv:                os.Getenv,
+		Args:                  fs.Args(),
+	}); err != nil {
+		cliFatalf("agent launcher: %v", err)
 	}
 }
 
@@ -1090,7 +1150,7 @@ func startGatewayReloadSignalHandler(gw *gateway.Gateway) func() {
 	}
 }
 
-func startMCPReloadSignalHandler(server *mcp.Server, configPath, policyBundle, logLevel, logFormat string, quiet bool, getenv func(string) string) func() {
+func startMCPReloadSignalHandler(server *mcp.Server, configPath, policyBundle, logLevel, logFormat, toolSurface string, quiet bool, getenv func(string) string) func() {
 	signals := reloadSignals()
 	if len(signals) == 0 || server == nil {
 		return func() {}
@@ -1102,7 +1162,7 @@ func startMCPReloadSignalHandler(server *mcp.Server, configPath, policyBundle, l
 		for {
 			select {
 			case <-reloadCh:
-				result, err := reloadMCPServerFromConfig(context.Background(), server, configPath, policyBundle, logLevel, logFormat, quiet, getenv, "signal")
+				result, err := reloadMCPServerFromConfig(context.Background(), server, configPath, policyBundle, logLevel, logFormat, toolSurface, quiet, getenv, "signal")
 				if err != nil {
 					cliWarn(fmt.Sprintf("mcp reload failed: %v", err))
 					continue
@@ -1119,7 +1179,7 @@ func startMCPReloadSignalHandler(server *mcp.Server, configPath, policyBundle, l
 	}
 }
 
-func reloadMCPServerFromConfig(ctx context.Context, server *mcp.Server, configPath, policyBundleOverride, logLevel, logFormat string, quiet bool, getenv func(string) string, trigger string) (mcp.ReloadResult, error) {
+func reloadMCPServerFromConfig(ctx context.Context, server *mcp.Server, configPath, policyBundleOverride, logLevel, logFormat, toolSurface string, quiet bool, getenv func(string) string, trigger string) (mcp.ReloadResult, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
@@ -1137,6 +1197,7 @@ func reloadMCPServerFromConfig(ctx context.Context, server *mcp.Server, configPa
 		LogFormat:             logFormat,
 		ErrWriter:             os.Stderr,
 		ExecCompatibilityMode: cfg.Policy.ExecCompatibilityMode,
+		ToolSurface:           toolSurface,
 		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
 		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
 		ApprovalStorePath:     cfg.Approvals.StorePath,
@@ -1312,11 +1373,27 @@ func rootHelpText() string {
 		"  version    print build metadata\n" +
 		"  serve      start gateway server\n" +
 		"  mcp        start MCP stdio server\n" +
+		"  run        launch codex or claude with a Nomos workspace profile\n" +
 		"  policy     policy test/explain\n" +
 		"  approvals  list pending approvals\n" +
 		"  doctor     deterministic preflight checks\n\n" +
 		"example:\n" +
 		"  nomos mcp -c ./examples/configs/config.example.json -p ./examples/policies/your-policy-bundle.json\n"
+}
+
+func runHelpText() string {
+	return "usage: nomos run <codex|claude> [flags] [-- agent args]\n" +
+		"  -c, --config <path>          Nomos config json path (or NOMOS_CONFIG)\n" +
+		"  -p, --policy-bundle <path>   policy bundle path\n" +
+		"      --profile <name>         safe-dev|ci-strict|prod-locked (default safe-dev)\n" +
+		"      --dry-run                print setup without writing files or launching\n" +
+		"      --print-config           print generated MCP client config\n" +
+		"      --no-launch              write generated config and stop before launching\n" +
+		"      --write-instructions     emit AGENTS.md, CLAUDE.md, and .codex/instructions.md\n" +
+		"      --existing-mcp-config    inspect an existing MCP client config for bypass paths\n\n" +
+		"examples:\n" +
+		"  nomos run codex --dry-run --print-config\n" +
+		"  nomos run claude --profile ci-strict --no-launch\n"
 }
 
 func serveHelpText() string {
@@ -1333,7 +1410,8 @@ func mcpHelpText() string {
 		"  -p, --policy-bundle <path>   policy bundle path (or NOMOS_POLICY_BUNDLE)\n" +
 		"  -l, --log-level <level>      error|warn|info|debug (or NOMOS_LOG_LEVEL)\n" +
 		"  -q, --quiet                  suppress banner and non-error logs\n" +
-		"      --log-format <format>    text|json\n\n" +
+		"      --log-format <format>    text|json\n" +
+		"      --tool-surface <mode>    canonical|friendly|both\n\n" +
 		"example:\n" +
 		"  nomos mcp -c ./examples/configs/config.example.json -p ./examples/policies/your-policy-bundle.json\n" +
 		"  nomos mcp serve --http --listen 127.0.0.1:8090 -c ./examples/configs/config.example.json\n"
@@ -1344,7 +1422,8 @@ func mcpServeHelpText() string {
 		"  -c, --config <path>          config json path (or NOMOS_CONFIG)\n" +
 		"  -p, --policy-bundle <path>   policy bundle path (or NOMOS_POLICY_BUNDLE)\n" +
 		"      --http                   serve downstream MCP over streamable http\n" +
-		"      --listen <addr>          bind address for downstream MCP http server\n\n" +
+		"      --listen <addr>          bind address for downstream MCP http server\n" +
+		"      --tool-surface <mode>    canonical|friendly|both\n\n" +
 		"example:\n" +
 		"  nomos mcp serve --http --listen 127.0.0.1:8090 -c ./examples/configs/config.example.json\n"
 }
