@@ -18,7 +18,7 @@ Set `runtime.stateless_mode: true` for stateless deployments.
 Stateless mode is an operational mode, not a guarantee level.
 
 Behavior in stateless mode:
-- approvals are disabled (no local sqlite approval state)
+- approvals are disabled (no local durable approval state)
 - sqlite audit sink is disallowed
 - suitable sinks are `stdout` and/or `webhook:<url>`
 

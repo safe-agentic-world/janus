@@ -25,6 +25,7 @@ type RuntimeOptions struct {
 	ExecCompatibilityMode string
 	BundleRoles           []string
 	SandboxEvidence       sandbox.Evidence
+	ApprovalStoreBackend  string
 	ApprovalStorePath     string
 	ApprovalTTLSeconds    int
 	UpstreamRoutes        []UpstreamRoute
@@ -127,6 +128,7 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 		ExecCompatibilityMode: options.ExecCompatibilityMode,
 		BundleRoles:           options.BundleRoles,
 		SandboxEvidence:       options.SandboxEvidence,
+		ApprovalStoreBackend:  strings.TrimSpace(options.ApprovalStoreBackend),
 		ApprovalStorePath:     strings.TrimSpace(options.ApprovalStorePath),
 		ApprovalTTLSeconds:    options.ApprovalTTLSeconds,
 		UpstreamRoutes:        append([]UpstreamRoute(nil), options.UpstreamRoutes...),

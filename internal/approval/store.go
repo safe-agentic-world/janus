@@ -82,8 +82,16 @@ func Open(path string, ttl time.Duration, now func() time.Time) (*Store, error) 
 	if err != nil {
 		return nil, err
 	}
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	store := &Store{db: db, now: now, ttl: ttl}
 	if err := store.init(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := store.purgeExpired(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -124,7 +132,21 @@ CREATE INDEX IF NOT EXISTS idx_approvals_scope ON approvals(scope_type, scope_ke
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
-	return s.ensureArgumentPreviewColumn()
+	if err := s.ensureArgumentPreviewColumn(); err != nil {
+		return err
+	}
+	return s.integrityCheck()
+}
+
+func (s *Store) integrityCheck() error {
+	var result string
+	if err := s.db.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("approval sqlite integrity check failed: %s", result)
+	}
+	return nil
 }
 
 func (s *Store) ensureArgumentPreviewColumn() error {
@@ -227,6 +249,12 @@ func (s *Store) Decide(ctx context.Context, approvalID, decision string) (Record
 	}
 	now := s.now().UTC()
 	if now.After(rec.ExpiresAt) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM approvals WHERE approval_id = ?`, rec.ApprovalID); err != nil {
+			return Record{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Record{}, err
+		}
 		return Record{}, ErrExpired
 	}
 	if rec.Status == status {
@@ -264,6 +292,9 @@ func (s *Store) CheckApproved(ctx context.Context, approvalID, fingerprint, clas
 		return false, Record{}, err
 	}
 	if s.now().UTC().After(rec.ExpiresAt) {
+		if err := s.deleteApproval(ctx, rec.ApprovalID); err != nil {
+			return false, Record{}, err
+		}
 		return false, rec, nil
 	}
 	if rec.Status != StatusApproved {
@@ -373,6 +404,9 @@ func (s *Store) ListPending(ctx context.Context, limit int) ([]Record, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("approval store not initialized")
 	}
+	if err := s.purgeExpired(ctx); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -394,6 +428,19 @@ func (s *Store) ListPending(ctx context.Context, limit int) ([]Record, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *Store) purgeExpired(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return errors.New("approval store not initialized")
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM approvals WHERE expires_at < ?`, s.now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) deleteApproval(ctx context.Context, approvalID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM approvals WHERE approval_id = ?`, approvalID)
+	return err
 }
 
 func normalizeDecision(decision string) (string, error) {

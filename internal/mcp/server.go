@@ -35,7 +35,7 @@ import (
 
 type Server struct {
 	service               *service.Service
-	approvals             *approval.Store
+	approvals             approval.Backend
 	identity              identity.VerifiedIdentity
 	approvalsEnabled      bool
 	sandboxEnabled        bool
@@ -273,16 +273,23 @@ func NewServerForBundlesWithRuntimeOptionsAndRecorder(bundlePaths []string, iden
 	if recorder == nil {
 		recorder = noopRecorder{}
 	}
-	var approvalStore *approval.Store
+	var approvalStore approval.Backend
 	if approvalsEnabled && parsedRuntime.ApprovalStorePath != "" {
 		ttl := time.Duration(parsedRuntime.ApprovalTTLSeconds) * time.Second
 		if ttl <= 0 {
 			ttl = 10 * time.Minute
 		}
-		approvalStore, err = approval.Open(parsedRuntime.ApprovalStorePath, ttl, time.Now)
+		approvalStore, err = approval.OpenBackend(approval.Options{
+			Backend: parsedRuntime.ApprovalStoreBackend,
+			Path:    parsedRuntime.ApprovalStorePath,
+			TTL:     ttl,
+			Now:     time.Now,
+		})
 		if err != nil {
 			return nil, err
 		}
+	} else if approvalsEnabled && parsedRuntime.ApprovalStorePath == "" {
+		logger.Warn("approvals requested without durable store path; approvals disabled")
 	}
 	svc := service.New(engine, reader, writerExec, patcher, execRunner, httpRunner, recorder, logger.redactor, approvalStore, nil, sandboxProfile, nil)
 	svc.SetSandboxEvidence(parsedRuntime.SandboxEvidence, []string{workspaceRoot})

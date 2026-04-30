@@ -43,7 +43,7 @@ type Gateway struct {
 	policy              *policy.Engine
 	policyState         atomic.Pointer[gatewayPolicyState]
 	service             *service.Service
-	approvals           *approval.Store
+	approvals           approval.Backend
 	auth                *identity.Authenticator
 	telemetry           *telemetry.Emitter
 	actionTokens        chan struct{}
@@ -133,9 +133,14 @@ func New(cfg Config) (*Gateway, error) {
 	if breakerCooldown <= 0 {
 		breakerCooldown = 60
 	}
-	var approvalStore *approval.Store
+	var approvalStore approval.Backend
 	if cfg.Approvals.Enabled {
-		approvalStore, err = approval.Open(cfg.Approvals.StorePath, time.Duration(cfg.Approvals.TTLSeconds)*time.Second, time.Now)
+		approvalStore, err = approval.OpenBackend(approval.Options{
+			Backend: cfg.Approvals.Backend,
+			Path:    cfg.Approvals.StorePath,
+			TTL:     time.Duration(cfg.Approvals.TTLSeconds) * time.Second,
+			Now:     time.Now,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -237,9 +242,14 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	if breakerCooldown <= 0 {
 		breakerCooldown = 60
 	}
-	var approvalStore *approval.Store
+	var approvalStore approval.Backend
 	if cfg.Approvals.Enabled {
-		approvalStore, err = approval.Open(cfg.Approvals.StorePath, time.Duration(cfg.Approvals.TTLSeconds)*time.Second, now)
+		approvalStore, err = approval.OpenBackend(approval.Options{
+			Backend: cfg.Approvals.Backend,
+			Path:    cfg.Approvals.StorePath,
+			TTL:     time.Duration(cfg.Approvals.TTLSeconds) * time.Second,
+			Now:     now,
+		})
 		if err != nil {
 			return nil, err
 		}

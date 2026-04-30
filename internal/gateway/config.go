@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/safe-agentic-world/nomos/internal/approval"
 	"github.com/safe-agentic-world/nomos/internal/assurance"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/ratelimit"
@@ -318,6 +319,7 @@ func (u *UpstreamConfig) UnmarshalJSON(data []byte) error {
 
 type ApprovalsConfig struct {
 	Enabled      bool   `json:"enabled"`
+	Backend      string `json:"backend,omitempty"`
 	StorePath    string `json:"store_path"`
 	TTLSeconds   int    `json:"ttl_seconds"`
 	WebhookToken string `json:"webhook_token"`
@@ -476,8 +478,16 @@ func (c *Config) SetDefaults() error {
 		c.Credentials.Enabled = false
 	}
 	if c.Approvals.Enabled {
+		if c.Approvals.Backend == "" {
+			c.Approvals.Backend = approval.BackendFile
+		}
 		if c.Approvals.StorePath == "" {
-			c.Approvals.StorePath = "nomos-approvals.db"
+			switch approval.NormalizeBackend(c.Approvals.Backend) {
+			case approval.BackendSQLite:
+				c.Approvals.StorePath = "nomos-approvals.db"
+			default:
+				c.Approvals.StorePath = "nomos-approvals.json"
+			}
 		}
 		if c.Approvals.TTLSeconds == 0 {
 			c.Approvals.TTLSeconds = 900
@@ -583,6 +593,10 @@ func (c Config) Validate() error {
 		return err
 	}
 	if c.Approvals.Enabled {
+		backend := approval.NormalizeBackend(c.Approvals.Backend)
+		if backend == "" || backend == approval.BackendAuto {
+			return errors.New("approvals.backend must be file or sqlite when approvals are enabled")
+		}
 		if c.Approvals.StorePath == "" {
 			return errors.New("approvals.store_path is required when approvals are enabled")
 		}
@@ -1166,6 +1180,9 @@ func ApplyEnvOverrides(cfg *Config, getenv func(string) string) {
 	}
 	if v := getenv("NOMOS_APPROVALS_STORE_PATH"); v != "" {
 		cfg.Approvals.StorePath = v
+	}
+	if v := getenv("NOMOS_APPROVALS_BACKEND"); v != "" {
+		cfg.Approvals.Backend = v
 	}
 	if v := getenv("NOMOS_APPROVALS_TTL_SECONDS"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil {
