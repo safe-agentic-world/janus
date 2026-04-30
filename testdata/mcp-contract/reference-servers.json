@@ -1,0 +1,36 @@
+{
+  "schema_version": "nomos.mcp_reference_contract.v1",
+  "protocol_version": "2024-11-05",
+  "references": [
+    {
+      "id": "everything",
+      "display_name": "Everything Reference Server",
+      "source": "npm:@modelcontextprotocol/server-everything",
+      "version": "2026.1.26",
+      "integrity": "sha512-RIEXAQuKZeXZqFzJMqLDlzmMmG5sjq2uhS/VqzF4HIZ3w1V73YcWf+UXkxJueJuHMBO3Z8ceBrQ5wI6o/plZ+Q==",
+      "tarball": "https://registry.npmjs.org/@modelcontextprotocol/server-everything/-/server-everything-2026.1.26.tgz",
+      "transports": ["stdio", "streamable_http"],
+      "scenarios": ["initialize", "tools/list", "tools/call", "resources", "prompts", "sampling"]
+    },
+    {
+      "id": "filesystem",
+      "display_name": "Filesystem Reference Server",
+      "source": "npm:@modelcontextprotocol/server-filesystem",
+      "version": "2026.1.14",
+      "integrity": "sha512-bGAfu3fWRVeF10NxvPhFBDlRen6ExSx6YkKJzoVgQMNrbdVVV4okfGGQ3KBRu9ygXYfw5/N9ermHAJXA0uys+g==",
+      "tarball": "https://registry.npmjs.org/@modelcontextprotocol/server-filesystem/-/server-filesystem-2026.1.14.tgz",
+      "transports": ["stdio", "streamable_http"],
+      "scenarios": ["initialize", "tools/list", "tools/call", "resources", "prompts"]
+    },
+    {
+      "id": "memory",
+      "display_name": "Memory Reference Server",
+      "source": "npm:@modelcontextprotocol/server-memory",
+      "version": "2026.1.26",
+      "integrity": "sha512-7F0hbaEB4lVqkYhNWmrC5jJjEWPCofgXd7OIk3h97HyvJL6aTAhlUNYaH8lCDxAzlK9sr2pLCkZEYI+m4HSOiA==",
+      "tarball": "https://registry.npmjs.org/@modelcontextprotocol/server-memory/-/server-memory-2026.1.26.tgz",
+      "transports": ["stdio", "streamable_http"],
+      "scenarios": ["initialize", "tools/list", "tools/call", "resources", "prompts"]
+    }
+  ]
+}
