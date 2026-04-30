@@ -41,7 +41,7 @@ Approvals are never global.
 ## Resume Flow
 
 1. Policy returns `REQUIRE_APPROVAL`.
-2. Nomos persists a pending approval with TTL in sqlite, including a redacted MCP argument preview when the action is `mcp.call`.
+2. Nomos durably persists a pending approval with TTL, including a redacted MCP argument preview when the action is `mcp.call`.
 3. External approver records `APPROVE` or `DENY` via approval endpoint/webhook.
 4. Agent retries the same action with `context.extensions.approval = {"approval_id":"..."}`.
 5. Nomos recomputes normalized action and fingerprint and only resumes when approval binding matches and TTL is valid.
@@ -69,12 +69,64 @@ Teams payload schema:
 
 Unknown fields are rejected for deterministic validation behavior.
 
+## Durable Store
+
+Approvals are persisted before Nomos returns a pending, approved, or denied state to a client or operator.
+
+Configured gateway deployments use the file-backed store by default:
+
+```json
+{
+  "approvals": {
+    "enabled": true,
+    "backend": "file",
+    "store_path": "nomos-approvals.json",
+    "ttl_seconds": 900
+  }
+}
+```
+
+Supported backends:
+
+- `file`: default durable JSON store with checksum validation and atomic writes.
+- `sqlite`: optional SQLite store for operators that prefer a database file.
+
+SQLite configuration:
+
+```json
+{
+  "approvals": {
+    "enabled": true,
+    "backend": "sqlite",
+    "store_path": "nomos-approvals.db",
+    "ttl_seconds": 900
+  }
+}
+```
+
+Durability semantics:
+
+- startup verifies persisted store integrity before serving approvals
+- expired approvals are purged deterministically on startup and pending-list reads
+- TTL checks survive process restarts because `expires_at` is persisted
+- partial file-store writes are isolated in a temporary file and do not replace the last committed store
+- existing approval ids, fingerprints, scopes, and approval resume behavior are stable across file and SQLite backends
+
+Migration from older deployments:
+
+1. If approvals were disabled or no durable store path was configured, enable approvals and set `approvals.store_path`.
+2. For the default backend, use `backend: "file"` and a path such as `nomos-approvals.json`.
+3. To keep an existing SQLite approval database, set `backend: "sqlite"` and point `store_path` at the existing `.db` file.
+4. Keep `ttl_seconds` at least as long as the previous approval TTL window.
+5. Restart Nomos and verify `nomos approvals list --store <path> --backend <file|sqlite>` before routing approval-gated actions.
+
 ## Approval CLI
 
 Operators can inspect pending approvals with:
 
 ```bash
-nomos approvals list --store ./nomos-approvals.db
+nomos approvals list --store ./nomos-approvals.json --backend file
+nomos approvals list --store ./nomos-approvals.db --backend sqlite
 ```
 
 The JSON output includes `argument_preview` for `mcp.call` approvals and omits it for non-MCP approvals.

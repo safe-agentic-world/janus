@@ -344,6 +344,12 @@ func TestLoadConfigApprovalsValidationAndDefaults(t *testing.T) {
 	if cfg.Approvals.StorePath == "" {
 		t.Fatal("expected approvals.store_path default")
 	}
+	if cfg.Approvals.Backend != "file" {
+		t.Fatalf("expected file-backed approvals default, got %q", cfg.Approvals.Backend)
+	}
+	if filepath.Base(cfg.Approvals.StorePath) != "nomos-approvals.json" {
+		t.Fatalf("expected file-backed approvals default path, got %s", cfg.Approvals.StorePath)
+	}
 	if cfg.Approvals.TTLSeconds <= 0 {
 		t.Fatal("expected approvals.ttl_seconds default")
 	}

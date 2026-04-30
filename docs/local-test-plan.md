@@ -805,7 +805,8 @@ Stop the gateway with `Ctrl+C` before moving on.
 $ApprovalsConfig = Join-Path $TmpDir "config-approvals.json"
 $json = Get-Content -Raw $ConfigAll | ConvertFrom-Json
 $json.approvals.enabled = $true
-$json.approvals.store_path = ".\.tmp\manual-tests\nomos-approvals.db"
+$json.approvals.backend = "file"
+$json.approvals.store_path = ".\.tmp\manual-tests\nomos-approvals.json"
 $json.audit.sink = "stdout"
 $json | ConvertTo-Json -Depth 12 | Set-Content -Encoding UTF8 $ApprovalsConfig
 ```

@@ -286,7 +286,8 @@ Exit codes:
 {
   "approvals": {
     "enabled": true,
-    "store_path": ".\\nomos-approvals.db",
+    "backend": "file",
+    "store_path": ".\\nomos-approvals.json",
     "ttl_seconds": 900,
     "webhook_token": "replace-me"
   }

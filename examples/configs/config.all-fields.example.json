@@ -99,7 +99,8 @@
   },
   "approvals": {
     "enabled": false,
-    "store_path": "../../nomos-approvals.db",
+    "backend": "file",
+    "store_path": "../../nomos-approvals.json",
     "ttl_seconds": 900,
     "webhook_token": "replace-me",
     "slack_token": "replace-me",

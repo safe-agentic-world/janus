@@ -193,6 +193,7 @@ func runMCP(args []string) {
 		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
 		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
 		ApprovalStorePath:     cfg.Approvals.StorePath,
+		ApprovalStoreBackend:  cfg.Approvals.Backend,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
@@ -283,6 +284,7 @@ func runMCPServe(args []string) {
 		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
 		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
 		ApprovalStorePath:     cfg.Approvals.StorePath,
+		ApprovalStoreBackend:  cfg.Approvals.Backend,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
@@ -403,7 +405,8 @@ func executeApprovalsList(args []string, stdout io.Writer, getenv func(string) s
 		now = time.Now
 	}
 	fs := flag.NewFlagSet("approvals list", flag.ExitOnError)
-	storePath := fs.String("store", "", "path to approval sqlite store")
+	storePath := fs.String("store", "", "path to approval store")
+	storeBackend := fs.String("backend", "auto", "approval store backend: auto|file|sqlite")
 	limit := fs.Int("limit", 50, "maximum pending approvals to list")
 	format := fs.String("format", "json", "output format: json|text")
 	fs.Parse(args)
@@ -411,13 +414,22 @@ func executeApprovalsList(args []string, stdout io.Writer, getenv func(string) s
 	if resolvedStore == "" {
 		resolvedStore = strings.TrimSpace(getenv("NOMOS_APPROVALS_STORE_PATH"))
 	}
+	resolvedBackend := strings.TrimSpace(*storeBackend)
+	if value := strings.TrimSpace(getenv("NOMOS_APPROVALS_BACKEND")); value != "" && resolvedBackend == "auto" {
+		resolvedBackend = value
+	}
 	if resolvedStore == "" {
 		return errors.New("--store is required unless NOMOS_APPROVALS_STORE_PATH is set")
 	}
 	if *limit <= 0 {
 		return errors.New("--limit must be > 0")
 	}
-	store, err := approval.Open(resolvedStore, 15*time.Minute, now)
+	store, err := approval.OpenBackend(approval.Options{
+		Backend: resolvedBackend,
+		Path:    resolvedStore,
+		TTL:     15 * time.Minute,
+		Now:     now,
+	})
 	if err != nil {
 		return err
 	}
@@ -1128,6 +1140,7 @@ func reloadMCPServerFromConfig(ctx context.Context, server *mcp.Server, configPa
 		BundleRoles:           cfg.Policy.EffectiveBundleRoles(),
 		SandboxEvidence:       cfg.Runtime.Evidence.SandboxEvidence(),
 		ApprovalStorePath:     cfg.Approvals.StorePath,
+		ApprovalStoreBackend:  cfg.Approvals.Backend,
 		ApprovalTTLSeconds:    cfg.Approvals.TTLSeconds,
 		UpstreamRoutes:        toMCPUpstreamRoutes(cfg.Upstream.Routes),
 		UpstreamServers:       toMCPUpstreamServers(cfg.MCP.Timeouts, cfg.MCP.Breaker, cfg.MCP.UpstreamServers),
