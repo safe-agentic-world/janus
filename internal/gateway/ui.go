@@ -1,10 +1,13 @@
 package gateway
 
 import (
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	neturl "net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -138,6 +141,40 @@ type uiTraceEvent struct {
 	AssuranceLevel       string         `json:"assurance_level,omitempty"`
 	ActionSummary        string         `json:"action_summary,omitempty"`
 	ExecutorMetadata     map[string]any `json:"executor_metadata,omitempty"`
+}
+
+type uiUpstreamListResponse struct {
+	GeneratedAt string             `json:"generated_at"`
+	DataSource  string             `json:"data_source"`
+	Upstreams   []uiUpstreamRecord `json:"upstreams"`
+}
+
+type uiUpstreamRecord struct {
+	Name             string              `json:"name"`
+	Transport        string              `json:"transport"`
+	Endpoint         string              `json:"endpoint,omitempty"`
+	Command          string              `json:"command,omitempty"`
+	BreakerState     string              `json:"breaker_state"`
+	BreakerEnabled   bool                `json:"breaker_enabled"`
+	Health           string              `json:"health"`
+	RequestCount     int                 `json:"request_count"`
+	ErrorCount       int                 `json:"error_count"`
+	ErrorRate        float64             `json:"error_rate"`
+	AvgLatencyMS     int64               `json:"avg_latency_ms"`
+	P95LatencyMS     int64               `json:"p95_latency_ms"`
+	LastEventAt      string              `json:"last_event_at,omitempty"`
+	RecentFailures   []uiUpstreamFailure `json:"recent_failures,omitempty"`
+	ConfigurationRef string              `json:"configuration_ref"`
+}
+
+type uiUpstreamFailure struct {
+	Timestamp            string `json:"timestamp"`
+	EventType            string `json:"event_type"`
+	TraceID              string `json:"trace_id,omitempty"`
+	ActionID             string `json:"action_id,omitempty"`
+	ActionType           string `json:"action_type,omitempty"`
+	Decision             string `json:"decision,omitempty"`
+	ResultClassification string `json:"result_classification,omitempty"`
 }
 
 func (g *Gateway) handleUIRoot(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +416,22 @@ func (g *Gateway) handleUITraceDetail(w http.ResponseWriter, r *http.Request) {
 	g.writeUIJSON(w, uiTraceDetailResponse{TraceID: traceID, Events: out})
 }
 
+func (g *Gateway) handleUIUpstreams(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if _, ok := g.requireOperatorUIAuth(w, r); !ok {
+		return
+	}
+	resp, err := buildUIUpstreamListResponse(g.cfg, audit.FirstSQLiteSinkPath(g.cfg.Audit.Sink), g.now().UTC())
+	if err != nil {
+		g.respondError(w, http.StatusInternalServerError, "upstream_ui_error", err.Error())
+		return
+	}
+	g.writeUIJSON(w, resp)
+}
+
 func (g *Gateway) handleUIExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -437,6 +490,312 @@ func buildUIReadinessResponse(report UIReadinessReport, cfg Config, bundleHash s
 		OperatorPrincipal:   principal,
 		GuaranteeNote:       guaranteeNote,
 	}
+}
+
+func buildUIUpstreamListResponse(cfg Config, sqlitePath string, now time.Time) (uiUpstreamListResponse, error) {
+	evidence, dataSource, err := loadUIUpstreamEvidence(sqlitePath, 1200)
+	if err != nil {
+		return uiUpstreamListResponse{}, err
+	}
+	records := make([]uiUpstreamRecord, 0, len(cfg.MCP.UpstreamServers)+len(evidence))
+	seen := map[string]struct{}{}
+	for idx, server := range cfg.MCP.UpstreamServers {
+		name := strings.TrimSpace(server.Name)
+		if name == "" {
+			name = "upstream-" + strconv.Itoa(idx+1)
+		}
+		key := strings.ToLower(name)
+		seen[key] = struct{}{}
+		stats := evidence[key]
+		records = append(records, buildUIUpstreamRecord(name, server, cfg.MCP.Breaker, stats, idx+1))
+	}
+	for key, stats := range evidence {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		records = append(records, buildUIUpstreamRecord(stats.name, MCPUpstreamServerConfig{
+			Name:      stats.name,
+			Transport: "unknown",
+		}, cfg.MCP.Breaker, stats, len(records)+1))
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		return strings.ToLower(records[i].Name) < strings.ToLower(records[j].Name)
+	})
+	return uiUpstreamListResponse{
+		GeneratedAt: now.UTC().Format(time.RFC3339Nano),
+		DataSource:  dataSource,
+		Upstreams:   records,
+	}, nil
+}
+
+type uiUpstreamEvidence struct {
+	name          string
+	requests      map[string]struct{}
+	errorCount    int
+	latencyMS     []int64
+	lastEventAt   time.Time
+	recentFailure []uiUpstreamFailure
+}
+
+func loadUIUpstreamEvidence(sqlitePath string, limit int) (map[string]*uiUpstreamEvidence, string, error) {
+	out := map[string]*uiUpstreamEvidence{}
+	if strings.TrimSpace(sqlitePath) == "" {
+		return out, "config_only", nil
+	}
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer db.Close()
+	if limit <= 0 {
+		limit = 1200
+	}
+	rows, err := db.Query(`SELECT payload_json FROM audit_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, "", err
+		}
+		var event audit.Event
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			return nil, "", err
+		}
+		server := uiUpstreamServerFromAuditEvent(event)
+		if server == "" {
+			continue
+		}
+		key := strings.ToLower(server)
+		stats := out[key]
+		if stats == nil {
+			stats = &uiUpstreamEvidence{name: server, requests: map[string]struct{}{}}
+			out[key] = stats
+		}
+		if event.Timestamp.After(stats.lastEventAt) {
+			stats.lastEventAt = event.Timestamp
+		}
+		if uiAuditEventContributesRequest(event) {
+			stats.requests[uiAuditRequestKey(event)] = struct{}{}
+		}
+		if event.DurationMS > 0 && event.EventType == "action.completed" {
+			stats.latencyMS = append(stats.latencyMS, event.DurationMS)
+		}
+		if uiAuditEventFailed(event) {
+			stats.errorCount++
+			if len(stats.recentFailure) < 5 {
+				stats.recentFailure = append(stats.recentFailure, uiUpstreamFailure{
+					Timestamp:            event.Timestamp.UTC().Format(time.RFC3339Nano),
+					EventType:            event.EventType,
+					TraceID:              event.TraceID,
+					ActionID:             event.ActionID,
+					ActionType:           event.ActionType,
+					Decision:             event.Decision,
+					ResultClassification: event.ResultClassification,
+				})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return out, "config_and_audit", nil
+}
+
+func buildUIUpstreamRecord(name string, server MCPUpstreamServerConfig, globalBreaker MCPBreakerConfig, stats *uiUpstreamEvidence, configOrdinal int) uiUpstreamRecord {
+	breakerEnabled := effectiveUIBreakerEnabled(globalBreaker, server.Breaker)
+	record := uiUpstreamRecord{
+		Name:             name,
+		Transport:        uiNonEmpty(server.Transport, "unknown"),
+		Endpoint:         uiSafeEndpoint(server.Endpoint),
+		Command:          uiCommandSummary(server.Command),
+		BreakerEnabled:   breakerEnabled,
+		BreakerState:     uiBreakerStateLabel(breakerEnabled),
+		Health:           "unknown",
+		ConfigurationRef: "mcp.upstream_servers[" + strconv.Itoa(configOrdinal-1) + "]",
+	}
+	if stats != nil {
+		record.RequestCount = len(stats.requests)
+		record.ErrorCount = stats.errorCount
+		record.ErrorRate = uiErrorRate(record.ErrorCount, record.RequestCount)
+		record.AvgLatencyMS = uiAverageLatency(stats.latencyMS)
+		record.P95LatencyMS = uiP95Latency(stats.latencyMS)
+		if !stats.lastEventAt.IsZero() {
+			record.LastEventAt = stats.lastEventAt.UTC().Format(time.RFC3339Nano)
+		}
+		record.RecentFailures = append([]uiUpstreamFailure{}, stats.recentFailure...)
+	}
+	record.Health = uiUpstreamHealth(record)
+	return record
+}
+
+func effectiveUIBreakerEnabled(global, server MCPBreakerConfig) bool {
+	if server.Enabled != nil {
+		return *server.Enabled
+	}
+	if global.Enabled != nil {
+		return *global.Enabled
+	}
+	return true
+}
+
+func uiBreakerStateLabel(enabled bool) string {
+	if enabled {
+		return "configured"
+	}
+	return "disabled"
+}
+
+func uiUpstreamHealth(record uiUpstreamRecord) string {
+	switch {
+	case record.RequestCount == 0 && record.ErrorCount == 0:
+		return "unknown"
+	case record.RequestCount > 0 && record.ErrorRate >= 0.2:
+		return "degraded"
+	case record.ErrorCount > 0:
+		return "watch"
+	default:
+		return "healthy"
+	}
+}
+
+func uiAuditEventContributesRequest(event audit.Event) bool {
+	if event.EventType == "action.completed" {
+		return true
+	}
+	if event.EventType == "action.decision" && strings.EqualFold(event.Decision, policy.DecisionDeny) {
+		return true
+	}
+	return strings.HasPrefix(event.EventType, "mcp.") && event.TraceID != ""
+}
+
+func uiAuditEventFailed(event audit.Event) bool {
+	class := strings.ToUpper(strings.TrimSpace(event.ResultClassification))
+	switch class {
+	case "", "SUCCESS", "APPROVAL_REQUIRED", "OUTPUT_LIMIT":
+		return false
+	default:
+		return true
+	}
+}
+
+func uiAuditRequestKey(event audit.Event) string {
+	if strings.TrimSpace(event.ActionID) != "" && event.ActionID != "-" {
+		return "action:" + event.ActionID
+	}
+	if strings.TrimSpace(event.TraceID) != "" {
+		return "trace:" + event.TraceID + ":" + event.EventType
+	}
+	return event.EventType + ":" + event.Timestamp.UTC().Format(time.RFC3339Nano)
+}
+
+func uiUpstreamServerFromAuditEvent(event audit.Event) string {
+	if value := uiStringFromMap(event.ExecutorMetadata, "upstream_server"); value != "" {
+		return value
+	}
+	if !strings.HasPrefix(strings.TrimSpace(event.ActionType), "mcp.") {
+		return ""
+	}
+	return uiUpstreamFromMCPResource(event.Resource)
+}
+
+func uiUpstreamFromMCPResource(resource string) string {
+	trimmed := strings.TrimSpace(resource)
+	if !strings.HasPrefix(trimmed, "mcp://") {
+		return ""
+	}
+	trimmed = strings.TrimPrefix(trimmed, "mcp://")
+	if idx := strings.Index(trimmed, "/"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	if trimmed == "" || trimmed == "tools" {
+		return ""
+	}
+	return trimmed
+}
+
+func uiStringFromMap(input map[string]any, key string) string {
+	if len(input) == 0 {
+		return ""
+	}
+	value, ok := input[key]
+	if !ok {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func uiSafeEndpoint(endpoint string) string {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := neturl.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func uiCommandSummary(command string) string {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.ReplaceAll(trimmed, "\\", "/")
+	if idx := strings.LastIndex(trimmed, "/"); idx >= 0 {
+		return trimmed[idx+1:]
+	}
+	return trimmed
+}
+
+func uiNonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func uiErrorRate(errors, total int) float64 {
+	if total <= 0 || errors <= 0 {
+		return 0
+	}
+	return float64(errors) / float64(total)
+}
+
+func uiAverageLatency(samples []int64) int64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var total int64
+	for _, sample := range samples {
+		total += sample
+	}
+	return total / int64(len(samples))
+}
+
+func uiP95Latency(samples []int64) int64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]int64{}, samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := ((len(sorted) * 95) + 99) / 100
+	if idx <= 0 {
+		idx = 1
+	}
+	if idx > len(sorted) {
+		idx = len(sorted)
+	}
+	return sorted[idx-1]
 }
 
 func buildUIActionDetailResponse(event audit.Event) uiActionDetailResponse {
