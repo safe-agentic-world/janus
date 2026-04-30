@@ -16,6 +16,7 @@ The format is based on Keep a Changelog and semantic versioning.
 - actionable `policy explain` denial context and remediation hints
 - workflow-managed release publishing with multi-arch archives, checksums, Homebrew tap updates, and Scoop manifest updates
 - `safe` starter policy bundle for safer local file mediation defaults
+- default workspace profiles `safe-dev` (`4d39231248c1f4887034b63745c7b8ec5ad3a3e78ccab4dffb3d31c7f9eaf93d`), `ci-strict` (`bf7ec65a2868f03551e3d754ecb51b67764a8de902a096b62bb0354a4105e3ce`), and `prod-locked` (`878afd82cdb2a248658ec8e57286592f4f1f39acd78e73ef80d7afce0e6eb7bc`)
 
 ### Changed
 

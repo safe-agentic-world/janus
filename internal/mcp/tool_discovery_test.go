@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/safe-agentic-world/nomos/internal/identity"
@@ -33,6 +34,97 @@ func TestToolsListAllowApprovalAndDenyModes(t *testing.T) {
 	}
 	if toolListHasName(tools, "nomos_http_request") {
 		t.Fatalf("did not expect denied tool in list, got %+v", tools)
+	}
+}
+
+func TestFriendlyAliasesCanonicalizeCoreTools(t *testing.T) {
+	tests := map[string]string{
+		"read_file":    "nomos.fs_read",
+		"write_file":   "nomos.fs_write",
+		"apply_patch":  "nomos.apply_patch",
+		"run_command":  "nomos.exec",
+		"http_request": "nomos.http_request",
+	}
+	for friendly, canonical := range tests {
+		if got := canonicalToolName(friendly); got != canonical {
+			t.Fatalf("%s canonicalized to %s, want %s", friendly, got, canonical)
+		}
+	}
+}
+
+func TestToolsListFriendlySurfaceAdvertisesDefaultToolNames(t *testing.T) {
+	server := newToolDiscoveryTestServerWithOptions(t, `{"version":"v1","rules":[
+		{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-write","action_type":"fs.write","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-patch","action_type":"repo.apply_patch","resource":"repo://local/workspace","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-exec","action_type":"process.exec","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-http","action_type":"net.http_request","resource":"url://example.com/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}
+	]}`, RuntimeOptions{ToolSurface: ToolSurfaceFriendly})
+
+	tools := server.toolsList()
+	for _, name := range []string{"read_file", "write_file", "apply_patch", "run_command", "http_request"} {
+		entry := toolListEntry(tools, name)
+		if entry == nil {
+			t.Fatalf("expected friendly tool %q in list, got %+v", name, tools)
+		}
+		description, _ := entry["description"].(string)
+		if !strings.Contains(description, "Default governed") || !strings.Contains(description, "Backed by Nomos") {
+			t.Fatalf("expected default-governed description for %q, got %q", name, description)
+		}
+	}
+	for _, name := range []string{"nomos_fs_read", "nomos_fs_write", "nomos_apply_patch", "nomos_exec", "nomos_http_request"} {
+		if toolListHasName(tools, name) {
+			t.Fatalf("did not expect canonical compatibility tool %q in friendly-only surface: %+v", name, tools)
+		}
+	}
+}
+
+func TestToolsListBothSurfaceAdvertisesFriendlyAndCompatibilityNames(t *testing.T) {
+	server := newToolDiscoveryTestServerWithOptions(t, `{"version":"v1","rules":[
+		{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-write","action_type":"fs.write","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-patch","action_type":"repo.apply_patch","resource":"repo://local/workspace","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-exec","action_type":"process.exec","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]},
+		{"id":"allow-http","action_type":"net.http_request","resource":"url://example.com/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}
+	]}`, RuntimeOptions{ToolSurface: ToolSurfaceBoth})
+
+	tools := server.toolsList()
+	for _, name := range []string{"read_file", "nomos_fs_read", "write_file", "nomos_fs_write", "apply_patch", "nomos_apply_patch", "run_command", "nomos_exec", "http_request", "nomos_http_request"} {
+		if !toolListHasName(tools, name) {
+			t.Fatalf("expected tool %q in both surface, got %+v", name, tools)
+		}
+	}
+}
+
+func TestFriendlyRunCommandUsesCanonicalProcessExecAudit(t *testing.T) {
+	recorder := &recordingSink{}
+	server := newToolDiscoveryTestServerWithOptionsAndRecorder(t, `{"version":"v1","rules":[
+		{"id":"allow-exec","action_type":"process.exec","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}
+	]}`, RuntimeOptions{ToolSurface: ToolSurfaceFriendly}, recorder)
+
+	resp := server.handleRequest(Request{
+		ID:     "friendly-exec",
+		Method: "run_command",
+		Params: mustJSONBytes(map[string]any{
+			"argv": []string{"go", "version"},
+		}),
+	})
+	if resp.Error != "" {
+		t.Fatalf("unexpected run_command error: %+v", resp)
+	}
+	events := recorder.snapshot()
+	var found bool
+	for _, event := range events {
+		if event.ActionType != "process.exec" {
+			continue
+		}
+		found = true
+		if event.Resource != "file://workspace/" {
+			t.Fatalf("unexpected canonical exec resource: %+v", event)
+		}
+	}
+	if !found {
+		t.Fatalf("expected canonical process.exec audit event, got %+v", events)
 	}
 }
 
@@ -118,6 +210,15 @@ func newToolDiscoveryTestServer(t *testing.T, bundle string) *Server {
 }
 
 func newToolDiscoveryTestServerWithRecorder(t *testing.T, bundle string, recorder *recordingSink) *Server {
+	return newToolDiscoveryTestServerWithOptionsAndRecorder(t, bundle, RuntimeOptions{}, recorder)
+}
+
+func newToolDiscoveryTestServerWithOptions(t *testing.T, bundle string, options RuntimeOptions) *Server {
+	t.Helper()
+	return newToolDiscoveryTestServerWithOptionsAndRecorder(t, bundle, options, &recordingSink{})
+}
+
+func newToolDiscoveryTestServerWithOptionsAndRecorder(t *testing.T, bundle string, options RuntimeOptions, recorder *recordingSink) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
@@ -129,14 +230,24 @@ func newToolDiscoveryTestServerWithRecorder(t *testing.T, bundle string, recorde
 		Agent:       "nomos",
 		Environment: "dev",
 	}, dir, 1024, 10, false, false, "local", RuntimeOptions{
-		LogLevel:  "error",
-		LogFormat: "text",
-		ErrWriter: io.Discard,
+		LogLevel:    firstNonEmpty(options.LogLevel, "error"),
+		LogFormat:   firstNonEmpty(options.LogFormat, "text"),
+		ErrWriter:   io.Discard,
+		ToolSurface: options.ToolSurface,
 	}, recorder)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 	return server
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func toolListHasName(tools []map[string]any, name string) bool {

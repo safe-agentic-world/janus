@@ -62,6 +62,16 @@ Exposed tools:
 
 Nomos advertises MCP tool names using a conservative cross-vendor-safe character set. Legacy dotted names such as `nomos.fs_read` remain accepted for backward compatibility, but new clients should use the advertised names from `tools/list`.
 
+Launcher/workspace-profile mode can request `--tool-surface friendly`, which advertises natural aliases for the five primary governed capabilities:
+
+- `read_file` -> `fs.read`
+- `write_file` -> `fs.write`
+- `apply_patch` -> `repo.apply_patch`
+- `run_command` -> `process.exec`
+- `http_request` -> `net.http_request`
+
+`--tool-surface canonical` preserves the compatibility-safe names above. `--tool-surface both` advertises both sets. Incoming calls through any supported alias are canonicalized before policy, approval, and audit evaluation.
+
 Tool surfacing semantics:
 
 - `tools/list` is static and returns the full advertised Nomos MCP surface

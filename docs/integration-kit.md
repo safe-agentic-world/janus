@@ -81,6 +81,7 @@ nomos mcp -c .\examples\quickstart\config.quickstart.json
 M41 shorthand note:
 
 - Nomos now advertises compatibility-safe MCP tool names such as `nomos_fs_read`, `nomos_fs_write`, `nomos_apply_patch`, `nomos_exec`, and `nomos_http_request`
+- `nomos run codex` and `nomos run claude` use the friendly launcher surface: `read_file`, `write_file`, `apply_patch`, `run_command`, and `http_request`
 - legacy dotted names such as `nomos.fs_read` remain accepted for backward compatibility
 - for `nomos_fs_read` and `nomos_fs_write`, common workspace-relative inputs such as `README.md`, `./README.md`, `.env`, or `src/app.py` are now accepted and adapted to canonical `file://workspace/...` resources
 - policy, explain, and audit still operate on the canonical normalized resource

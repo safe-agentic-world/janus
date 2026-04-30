@@ -23,6 +23,7 @@ type RuntimeOptions struct {
 	LogFormat             string
 	ErrWriter             io.Writer
 	ExecCompatibilityMode string
+	ToolSurface           string
 	BundleRoles           []string
 	SandboxEvidence       sandbox.Evidence
 	ApprovalStoreBackend  string
@@ -117,6 +118,10 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 			options.ExecCompatibilityMode = normalized
 		}
 	}
+	toolSurface := NormalizeToolSurface(options.ToolSurface)
+	if toolSurface == "" {
+		return RuntimeOptions{}, fmt.Errorf("invalid tool surface %q: expected canonical|friendly|both", strings.TrimSpace(options.ToolSurface))
+	}
 	if err := tenant.ValidateConfig(options.TenantConfig); err != nil {
 		return RuntimeOptions{}, err
 	}
@@ -126,6 +131,7 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 		LogFormat:             format,
 		ErrWriter:             options.ErrWriter,
 		ExecCompatibilityMode: options.ExecCompatibilityMode,
+		ToolSurface:           toolSurface,
 		BundleRoles:           options.BundleRoles,
 		SandboxEvidence:       options.SandboxEvidence,
 		ApprovalStoreBackend:  strings.TrimSpace(options.ApprovalStoreBackend),

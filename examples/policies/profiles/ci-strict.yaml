@@ -1,0 +1,282 @@
+version: v1
+rules:
+  # CI must never read root dotenv files.
+  - id: ci-strict-deny-root-env-read
+    action_type: fs.read
+    resource: file://workspace/.env
+    decision: DENY
+
+  # CI must never read nested dotenv files.
+  - id: ci-strict-deny-nested-env-read
+    action_type: fs.read
+    resource: file://workspace/**/.env
+    decision: DENY
+
+  # CI must never read dotenv variants.
+  - id: ci-strict-deny-env-variant-read
+    action_type: fs.read
+    resource: file://workspace/**/.env.*
+    decision: DENY
+
+  # CI must never read private keys.
+  - id: ci-strict-deny-private-key-read
+    action_type: fs.read
+    resource: file://workspace/**/*.key
+    decision: DENY
+
+  # CI must never read netrc machine credentials.
+  - id: ci-strict-deny-netrc-read
+    action_type: fs.read
+    resource: file://workspace/**/.netrc
+    decision: DENY
+
+  # CI must never read SSH key material.
+  - id: ci-strict-deny-ssh-dir-read
+    action_type: fs.read
+    resource: file://workspace/**/.ssh/**
+    decision: DENY
+
+  # CI must never read AWS credential files.
+  - id: ci-strict-deny-aws-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.aws/credentials
+    decision: DENY
+
+  # CI must never read GCP credential directories.
+  - id: ci-strict-deny-gcp-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.gcp/**
+    decision: DENY
+
+  # CI must never read kubeconfig files.
+  - id: ci-strict-deny-kubeconfig-read
+    action_type: fs.read
+    resource: file://workspace/**/kubeconfig
+    decision: DENY
+
+  # CI must never read kubeconfig variants.
+  - id: ci-strict-deny-kubeconfig-variant-read
+    action_type: fs.read
+    resource: file://workspace/**/kubeconfig.*
+    decision: DENY
+
+  # CI must never read Kubernetes credential directories.
+  - id: ci-strict-deny-kube-dir-read
+    action_type: fs.read
+    resource: file://workspace/**/.kube/**
+    decision: DENY
+
+  # CI may read non-secret workspace content for build and validation.
+  - id: ci-strict-allow-workspace-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+
+  # CI may write generated artifacts inside the checked-out workspace.
+  - id: ci-strict-allow-workspace-write
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: ALLOW
+    obligations:
+      sandbox_mode: ci
+
+  # CI may apply generated patches only when workflows explicitly route through this action.
+  - id: ci-strict-allow-workspace-patch
+    action_type: repo.apply_patch
+    resource: repo://local/workspace
+    decision: ALLOW
+    obligations:
+      sandbox_mode: ci
+
+  # CI must not publish repository state through ad hoc git push commands.
+  - id: ci-strict-deny-git-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "push"]
+        - ["git", "push", "**"]
+
+  # CI must not rewrite repository history.
+  - id: ci-strict-deny-git-history-rewrite
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "reset", "--hard"]
+        - ["git", "rebase"]
+        - ["git", "rebase", "**"]
+        - ["git", "checkout", "--"]
+        - ["git", "checkout", "--", "**"]
+
+  # CI must not perform infrastructure mutations.
+  - id: ci-strict-deny-infra-mutations
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["terraform", "apply"]
+        - ["terraform", "apply", "**"]
+        - ["terraform", "destroy"]
+        - ["terraform", "destroy", "**"]
+        - ["kubectl", "apply"]
+        - ["kubectl", "apply", "**"]
+        - ["kubectl", "delete"]
+        - ["kubectl", "delete", "**"]
+        - ["helm", "upgrade"]
+        - ["helm", "upgrade", "**"]
+        - ["helm", "uninstall"]
+        - ["helm", "uninstall", "**"]
+
+  # CI must not install or mutate dependencies outside reproducible setup stages.
+  - id: ci-strict-deny-package-installs
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["go", "get"]
+        - ["go", "get", "**"]
+        - ["go", "mod", "tidy"]
+        - ["npm", "install"]
+        - ["npm", "install", "**"]
+        - ["npm", "ci"]
+        - ["python", "-m", "pip", "install", "**"]
+        - ["py", "-3", "-m", "pip", "install", "**"]
+
+  # CI may inspect repository state.
+  - id: ci-strict-allow-git-readonly
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "status"]
+        - ["git", "status", "**"]
+        - ["git", "diff"]
+        - ["git", "diff", "**"]
+        - ["git", "log"]
+        - ["git", "log", "**"]
+        - ["git", "show"]
+        - ["git", "show", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may run deterministic Go validation.
+  - id: ci-strict-allow-go-validation
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["go", "test"]
+        - ["go", "test", "**"]
+        - ["go", "build"]
+        - ["go", "build", "**"]
+        - ["go", "vet"]
+        - ["go", "vet", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may run deterministic npm validation.
+  - id: ci-strict-allow-npm-validation
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["npm", "test"]
+        - ["npm", "test", "**"]
+        - ["npm", "run", "lint"]
+        - ["npm", "run", "build"]
+        - ["npm", "run", "test"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may run deterministic Python tests.
+  - id: ci-strict-allow-python-validation
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["python", "-m", "pytest"]
+        - ["python", "-m", "pytest", "**"]
+        - ["py", "-3", "-m", "pytest"]
+        - ["py", "-3", "-m", "pytest", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may run safe local inspection commands.
+  - id: ci-strict-allow-local-inspection
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["pwd"]
+        - ["ls"]
+        - ["ls", "**"]
+        - ["dir"]
+        - ["dir", "**"]
+        - ["go", "version"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may publish through the structured Nomos artifact path only.
+  - id: ci-strict-allow-structured-publish
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["nomos", "publish-artifact"]
+        - ["nomos", "publish-artifact", "**"]
+    obligations:
+      sandbox_mode: ci
+      publish_channel: structured
+
+  # CI must not send authorization material through HTTP.
+  - id: ci-strict-deny-http-authorization-header
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Authorization:
+        present: true
+
+  # CI may make read-only requests to source hosts required by validation.
+  - id: ci-strict-allow-http-source-hosts
+    action_type: net.http_request
+    resource: url://github.com/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # CI may make read-only requests to the Go proxy for module resolution.
+  - id: ci-strict-allow-http-go-proxy
+    action_type: net.http_request
+    resource: url://proxy.golang.org/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # CI may upload artifacts only to the configured internal artifact endpoint.
+  - id: ci-strict-allow-http-artifact-upload
+    action_type: net.http_request
+    resource: url://artifacts.example.internal/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["PUT", "POST"]
+
+  # CI cannot check out arbitrary secrets through Nomos by default.
+  - id: ci-strict-deny-secret-checkout
+    action_type: secrets.checkout
+    resource: secret://**/**
+    decision: DENY
