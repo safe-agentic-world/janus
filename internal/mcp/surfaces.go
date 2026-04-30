@@ -12,6 +12,7 @@ import (
 
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/canonicaljson"
+	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/redact"
 )
@@ -71,6 +72,7 @@ func parseDownstreamResourceURI(raw string) (string, string, error) {
 }
 
 func (s *Server) processGovernedMCPAction(reqID, actionType, resource string, params any, approvalID string, session *downstreamSession, extraMetadata map[string]any) (action.Response, error) {
+	id := s.identityForSession(session)
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + reqID,
@@ -80,7 +82,7 @@ func (s *Server) processGovernedMCPAction(reqID, actionType, resource string, pa
 		TraceID:       "mcp_" + reqID,
 		Context:       action.Context{Extensions: buildActionExtensionsForSessionWithMetadata(approvalID, session, extraMetadata)},
 	}
-	act, err := action.ToAction(actionReq, s.identity)
+	act, err := action.ToAction(actionReq, id)
 	if err != nil {
 		return action.Response{}, err
 	}
@@ -178,17 +180,23 @@ func downstreamClientSupportsSampling(raw json.RawMessage) bool {
 	return ok
 }
 
-func (s *Server) handleResourcesListRPC(req rpcRequest) *rpcResponse {
+func (s *Server) handleResourcesListRPC(req rpcRequest, session *downstreamSession) *rpcResponse {
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	id := s.identityForSession(session)
 	items := []map[string]any{}
 	if s.upstream != nil {
-		var err error
-		items, err = s.upstream.listResources(ctx)
-		if err != nil {
-			return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
+		for _, serverName := range s.upstream.serverNames() {
+			if !s.upstreamVisibleForIdentity(id, serverName) {
+				continue
+			}
+			next, err := s.upstream.listResourcesForServer(ctx, serverName)
+			if err != nil {
+				return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
+			}
+			items = append(items, next...)
 		}
 	}
 	return &rpcResponse{
@@ -212,6 +220,10 @@ func (s *Server) handleResourcesReadRPC(req rpcRequest, session *downstreamSessi
 	if err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
 	}
+	id := s.identityForSession(session)
+	if !s.upstreamVisibleForIdentity(id, serverName) {
+		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
+	}
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -233,17 +245,23 @@ func (s *Server) handleResourcesReadRPC(req rpcRequest, session *downstreamSessi
 	return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Result: redactMCPResult(s.logger.redactor, result)}
 }
 
-func (s *Server) handlePromptsListRPC(req rpcRequest) *rpcResponse {
+func (s *Server) handlePromptsListRPC(req rpcRequest, session *downstreamSession) *rpcResponse {
 	ctx := req.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	id := s.identityForSession(session)
 	items := []map[string]any{}
 	if s.upstream != nil {
-		var err error
-		items, err = s.upstream.listPrompts(ctx)
-		if err != nil {
-			return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
+		for _, serverName := range s.upstream.serverNames() {
+			if !s.upstreamVisibleForIdentity(id, serverName) {
+				continue
+			}
+			next, err := s.upstream.listPromptsForServer(ctx, serverName)
+			if err != nil {
+				return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: err.Error()}}
+			}
+			items = append(items, next...)
 		}
 	}
 	return &rpcResponse{
@@ -267,8 +285,12 @@ func (s *Server) handlePromptsGetRPC(req rpcRequest, session *downstreamSession)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	serverName, upstreamPrompt, err := s.resolvePromptReference(ctx, params.Name)
+	id := s.identityForSession(session)
+	serverName, upstreamPrompt, err := s.resolvePromptReference(ctx, params.Name, id)
 	if err != nil {
+		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
+	}
+	if !s.upstreamVisibleForIdentity(id, serverName) {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
 	}
 	actionResp, err := s.processGovernedMCPAction(rpcIDKey(parseRPCID(req.ID)), "mcp.prompt_get", downstreamPromptActionResource(serverName, upstreamPrompt), map[string]any{
@@ -301,8 +323,12 @@ func (s *Server) handleCompletionRPC(req rpcRequest, session *downstreamSession)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	serverName, upstreamRef, actionResource, err := s.resolveCompletionReference(ctx, params.Ref)
+	id := s.identityForSession(session)
+	serverName, upstreamRef, actionResource, err := s.resolveCompletionReference(ctx, params.Ref, id)
 	if err != nil {
+		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
+	}
+	if !s.upstreamVisibleForIdentity(id, serverName) {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32602, Message: "invalid params"}}
 	}
 	actionResp, err := s.processGovernedMCPAction(rpcIDKey(parseRPCID(req.ID)), "mcp.completion", actionResource, map[string]any{
@@ -324,32 +350,37 @@ func (s *Server) handleCompletionRPC(req rpcRequest, session *downstreamSession)
 	return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Result: redactMCPResult(s.logger.redactor, result)}
 }
 
-func (s *Server) resolvePromptReference(ctx context.Context, downstreamName string) (string, string, error) {
-	items, err := s.upstream.listPrompts(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	for _, item := range items {
-		name, _ := item["name"].(string)
-		if name != downstreamName {
+func (s *Server) resolvePromptReference(ctx context.Context, downstreamName string, id identity.VerifiedIdentity) (string, string, error) {
+	for _, serverName := range s.upstream.serverNames() {
+		if !s.upstreamVisibleForIdentity(id, serverName) {
 			continue
 		}
-		meta, _ := item["_meta"].(map[string]any)
-		serverName, _ := meta["upstream_server"].(string)
-		upstreamPrompt, _ := meta["upstream_prompt"].(string)
-		if serverName != "" && upstreamPrompt != "" {
-			return serverName, upstreamPrompt, nil
+		items, err := s.upstream.listPromptsForServer(ctx, serverName)
+		if err != nil {
+			return "", "", err
+		}
+		for _, item := range items {
+			name, _ := item["name"].(string)
+			if name != downstreamName {
+				continue
+			}
+			meta, _ := item["_meta"].(map[string]any)
+			serverName, _ := meta["upstream_server"].(string)
+			upstreamPrompt, _ := meta["upstream_prompt"].(string)
+			if serverName != "" && upstreamPrompt != "" {
+				return serverName, upstreamPrompt, nil
+			}
 		}
 	}
 	return "", "", errors.New("prompt not found")
 }
 
-func (s *Server) resolveCompletionReference(ctx context.Context, ref map[string]any) (string, map[string]any, string, error) {
+func (s *Server) resolveCompletionReference(ctx context.Context, ref map[string]any, id identity.VerifiedIdentity) (string, map[string]any, string, error) {
 	refType, _ := ref["type"].(string)
 	switch refType {
 	case "ref/prompt":
 		name, _ := ref["name"].(string)
-		serverName, upstreamPrompt, err := s.resolvePromptReference(ctx, name)
+		serverName, upstreamPrompt, err := s.resolvePromptReference(ctx, name, id)
 		if err != nil {
 			return "", nil, "", err
 		}
@@ -405,6 +436,10 @@ func (s *Server) handleSamplingRPC(req rpcRequest, session *downstreamSession, s
 	if session == nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32601, Message: "sampling unavailable"}}
 	}
+	id := s.identityForSession(session)
+	if !s.upstreamVisibleForIdentity(id, serverName) {
+		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32601, Message: "sampling unavailable"}}
+	}
 	if !session.clientSampling {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32601, Message: "downstream client does not support sampling"}}
 	}
@@ -430,7 +465,7 @@ func (s *Server) handleSamplingRPC(req rpcRequest, session *downstreamSession, s
 	if resp == nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: parseRPCID(req.ID), Error: &rpcError{Code: -32603, Message: "downstream sampling returned no response"}}
 	}
-	if denied, governedResp := s.governSamplingResponseContent(resp, actionResp, serverName); denied {
+	if denied, governedResp := s.governSamplingResponseContent(resp, actionResp, serverName, id); denied {
 		governedResp.ID = parseRPCID(req.ID)
 		return governedResp
 	} else if governedResp != nil {

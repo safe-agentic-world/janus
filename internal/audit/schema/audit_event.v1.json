@@ -33,6 +33,9 @@
     "environment": {
       "type": "string"
     },
+    "tenant_id": {
+      "type": "string"
+    },
     "decision": {
       "type": "string"
     },

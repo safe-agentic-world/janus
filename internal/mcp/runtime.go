@@ -14,6 +14,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/sandbox"
 	"github.com/safe-agentic-world/nomos/internal/telemetry"
+	"github.com/safe-agentic-world/nomos/internal/tenant"
 )
 
 type RuntimeOptions struct {
@@ -30,6 +31,7 @@ type RuntimeOptions struct {
 	UpstreamServers       []UpstreamServerConfig
 	CredentialBroker      UpstreamCredentialBroker
 	Telemetry             *telemetry.Emitter
+	TenantConfig          tenant.Config
 }
 
 type UpstreamRoute struct {
@@ -68,6 +70,7 @@ type UpstreamServerConfig struct {
 	BreakerWindow           time.Duration
 	BreakerOpenTime         time.Duration
 	AllowMissingToolSchemas bool
+	Tenants                 []string
 }
 
 type UpstreamCredentialsConfig struct {
@@ -113,6 +116,9 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 			options.ExecCompatibilityMode = normalized
 		}
 	}
+	if err := tenant.ValidateConfig(options.TenantConfig); err != nil {
+		return RuntimeOptions{}, err
+	}
 	return RuntimeOptions{
 		LogLevel:              level,
 		Quiet:                 options.Quiet,
@@ -127,6 +133,7 @@ func ParseRuntimeOptions(options RuntimeOptions) (RuntimeOptions, error) {
 		UpstreamServers:       append([]UpstreamServerConfig(nil), options.UpstreamServers...),
 		CredentialBroker:      options.CredentialBroker,
 		Telemetry:             options.Telemetry,
+		TenantConfig:          options.TenantConfig,
 	}, nil
 }
 

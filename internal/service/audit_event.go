@@ -77,6 +77,7 @@ type auditContext struct {
 	fallbackPrincipal  string
 	fallbackAgent      string
 	fallbackEnv        string
+	fallbackTenantID   string
 }
 
 func (s *Service) emitCompletedAudit(ctx auditContext, started time.Time) {
@@ -95,6 +96,7 @@ func (s *Service) emitCompletedAudit(ctx auditContext, started time.Time) {
 		e.Principal = ctx.normalized.Principal
 		e.Agent = ctx.normalized.Agent
 		e.Environment = ctx.normalized.Environment
+		e.TenantID = ctx.normalized.TenantID
 		e.ActionType = ctx.normalized.ActionType
 		e.ResourceNormalized = ctx.normalized.Resource
 		e.Resource = ctx.normalized.Resource
@@ -105,6 +107,7 @@ func (s *Service) emitCompletedAudit(ctx auditContext, started time.Time) {
 		e.Principal = ctx.fallbackPrincipal
 		e.Agent = ctx.fallbackAgent
 		e.Environment = ctx.fallbackEnv
+		e.TenantID = ctx.fallbackTenantID
 		e.ActionType = strings.TrimSpace(ctx.fallbackAction.ActionType)
 	}
 	e.Decision = ctx.decision.Decision

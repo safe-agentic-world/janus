@@ -17,6 +17,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/policy"
 	"github.com/safe-agentic-world/nomos/internal/ratelimit"
 	"github.com/safe-agentic-world/nomos/internal/sandbox"
+	"github.com/safe-agentic-world/nomos/internal/tenant"
 )
 
 type Config struct {
@@ -33,6 +34,7 @@ type Config struct {
 	Approvals   ApprovalsConfig   `json:"approvals"`
 	Identity    IdentityConfig    `json:"identity"`
 	Redaction   RedactionConfig   `json:"redaction"`
+	Tenancy     tenant.Config     `json:"tenancy,omitempty"`
 	SourcePath  string            `json:"-"`
 }
 
@@ -250,6 +252,7 @@ type MCPUpstreamServerConfig struct {
 	AllowMissingToolSchemas bool                          `json:"allow_missing_tool_schemas,omitempty"`
 	Auth                    *MCPUpstreamAuthConfig        `json:"auth,omitempty"`
 	Credentials             *MCPUpstreamCredentialsConfig `json:"credentials,omitempty"`
+	Tenants                 []string                      `json:"tenants,omitempty"`
 }
 
 type MCPUpstreamAuthConfig struct {
@@ -848,6 +851,72 @@ func (c Config) Validate() error {
 					return errors.New("mcp.upstream_servers.workdir must be an existing directory")
 				}
 			}
+			for _, tenantID := range server.Tenants {
+				if _, err := tenant.NormalizeID(tenantID); err != nil {
+					return fmt.Errorf("mcp.upstream_servers.tenants: %w", err)
+				}
+			}
+		}
+	}
+	if err := validateTenancyConfig(c); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateTenancyConfig(c Config) error {
+	if err := tenant.ValidateConfig(c.Tenancy); err != nil {
+		return err
+	}
+	if !c.Tenancy.Configured() {
+		return nil
+	}
+	upstreamNames := map[string]struct{}{}
+	for _, server := range c.MCP.UpstreamServers {
+		name := strings.ToLower(strings.TrimSpace(server.Name))
+		if name != "" {
+			upstreamNames[name] = struct{}{}
+		}
+	}
+	for _, def := range c.Tenancy.Tenants {
+		id, err := tenant.NormalizeID(def.ID)
+		if err != nil {
+			return err
+		}
+		paths := effectiveTenantBundlePaths(def)
+		for _, path := range paths {
+			if _, err := os.Stat(path); err != nil {
+				return fmt.Errorf("tenant %q policy bundle path invalid: %w", id, err)
+			}
+		}
+		if len(def.PolicyBundleRoles) > 0 {
+			if len(def.PolicyBundleRoles) != len(paths) {
+				return fmt.Errorf("tenant %q policy_bundle_roles must have the same length as the tenant policy bundle path list", id)
+			}
+			for _, role := range def.PolicyBundleRoles {
+				switch normalizeBundleRole(role) {
+				case "baseline", "org", "repo", "env", "local_override":
+				default:
+					return fmt.Errorf("tenant %q policy_bundle_roles entries must be baseline, org, repo, env, or local_override", id)
+				}
+			}
+		}
+		if c.Policy.VerifySignatures && len(paths) > 0 {
+			signatures := effectiveTenantSignaturePaths(def, len(paths))
+			if len(signatures) != len(paths) {
+				return fmt.Errorf("tenant %q policy signatures must match tenant policy bundle paths when policy.verify_signatures is true", id)
+			}
+			for _, path := range signatures {
+				if _, err := os.Stat(path); err != nil {
+					return fmt.Errorf("tenant %q policy signature path invalid: %w", id, err)
+				}
+			}
+		}
+		for _, upstream := range def.UpstreamServers {
+			key := strings.ToLower(strings.TrimSpace(upstream))
+			if _, ok := upstreamNames[key]; !ok {
+				return fmt.Errorf("tenant %q upstream_servers entry %q does not match a configured MCP upstream server", id, strings.TrimSpace(upstream))
+			}
 		}
 	}
 	return nil
@@ -1192,6 +1261,12 @@ func (c *Config) ResolveRelativePaths(baseDir string) error {
 	c.Policy.SignaturePaths = resolveRelativePaths(absBase, c.Policy.SignaturePaths)
 	c.Policy.PublicKeyPath = resolveRelativePath(absBase, c.Policy.PublicKeyPath)
 	c.Policy.OPA.PolicyPath = resolveRelativePath(absBase, c.Policy.OPA.PolicyPath)
+	for idx := range c.Tenancy.Tenants {
+		c.Tenancy.Tenants[idx].PolicyBundlePath = resolveRelativePath(absBase, c.Tenancy.Tenants[idx].PolicyBundlePath)
+		c.Tenancy.Tenants[idx].PolicyBundlePaths = resolveRelativePaths(absBase, c.Tenancy.Tenants[idx].PolicyBundlePaths)
+		c.Tenancy.Tenants[idx].PolicySignaturePath = resolveRelativePath(absBase, c.Tenancy.Tenants[idx].PolicySignaturePath)
+		c.Tenancy.Tenants[idx].PolicySignaturePaths = resolveRelativePaths(absBase, c.Tenancy.Tenants[idx].PolicySignaturePaths)
+	}
 	c.Executor.WorkspaceRoot = resolveRelativePath(absBase, c.Executor.WorkspaceRoot)
 	c.Approvals.StorePath = resolveRelativePath(absBase, c.Approvals.StorePath)
 	c.Identity.OIDC.PublicKeyPath = resolveRelativePath(absBase, c.Identity.OIDC.PublicKeyPath)
@@ -1267,6 +1342,51 @@ func (p PolicyConfig) EffectiveBundlePaths() []string {
 		}
 	}
 	return out
+}
+
+func effectiveTenantBundlePaths(def tenant.Definition) []string {
+	if strings.TrimSpace(def.PolicyBundlePath) != "" {
+		return []string{def.PolicyBundlePath}
+	}
+	out := make([]string, 0, len(def.PolicyBundlePaths))
+	for _, value := range def.PolicyBundlePaths {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func effectiveTenantBundleRoles(def tenant.Definition) []string {
+	if len(def.PolicyBundleRoles) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(def.PolicyBundleRoles))
+	for _, value := range def.PolicyBundleRoles {
+		if trimmed := normalizeBundleRole(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func effectiveTenantSignaturePaths(def tenant.Definition, tenantPathCount int) []string {
+	if tenantPathCount <= 0 {
+		return nil
+	}
+	if tenantPathCount > 1 {
+		out := make([]string, 0, len(def.PolicySignaturePaths))
+		for _, value := range def.PolicySignaturePaths {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	}
+	if strings.TrimSpace(def.PolicySignaturePath) == "" {
+		return nil
+	}
+	return []string{def.PolicySignaturePath}
 }
 
 func (p PolicyConfig) EffectiveBundleRoles() []string {

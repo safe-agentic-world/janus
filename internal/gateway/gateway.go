@@ -58,6 +58,13 @@ type Gateway struct {
 }
 
 type gatewayPolicyState struct {
+	Engine         *policy.Engine
+	BundleHash     string
+	BundleSources  []string
+	TenantPolicies map[string]*gatewayTenantPolicyState
+}
+
+type gatewayTenantPolicyState struct {
 	Engine        *policy.Engine
 	BundleHash    string
 	BundleSources []string
@@ -74,6 +81,15 @@ type ReloadResult struct {
 
 func newGatewayPolicyState(bundle policy.Bundle) *gatewayPolicyState {
 	return &gatewayPolicyState{
+		Engine:         policy.NewEngine(bundle),
+		BundleHash:     bundle.Hash,
+		BundleSources:  policy.BundleSourceLabels(bundle),
+		TenantPolicies: map[string]*gatewayTenantPolicyState{},
+	}
+}
+
+func newGatewayTenantPolicyState(bundle policy.Bundle) *gatewayTenantPolicyState {
+	return &gatewayTenantPolicyState{
 		Engine:        policy.NewEngine(bundle),
 		BundleHash:    bundle.Hash,
 		BundleSources: policy.BundleSourceLabels(bundle),
@@ -96,20 +112,11 @@ func New(cfg Config) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	bundle, err := policy.LoadBundlesWithOptions(cfg.Policy.EffectiveBundlePaths(), policy.MultiLoadOptions{
-		VerifySignatures: cfg.Policy.VerifySignatures,
-		SignaturePaths:   cfg.Policy.EffectiveSignaturePaths(),
-		PublicKeyPath:    cfg.Policy.PublicKeyPath,
-		BundleRoles:      cfg.Policy.EffectiveBundleRoles(),
-	})
+	state, err := loadGatewayPolicyStateFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	state := newGatewayPolicyState(bundle)
 	engine := state.Engine
-	if err := policy.ValidateExecCompatibility(bundle, cfg.Policy.ExecCompatibilityMode); err != nil {
-		return nil, err
-	}
 	limit := cfg.Gateway.ConcurrencyLimit
 	if limit <= 0 {
 		limit = 32
@@ -198,6 +205,7 @@ func New(cfg Config) (*Gateway, error) {
 		now:                 time.Now,
 	}
 	gw.policyState.Store(state)
+	svc.SetPolicySelector(gw.selectPolicyEngine)
 	return gw, nil
 }
 
@@ -208,20 +216,11 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 	if now == nil {
 		now = time.Now
 	}
-	bundle, err := policy.LoadBundlesWithOptions(cfg.Policy.EffectiveBundlePaths(), policy.MultiLoadOptions{
-		VerifySignatures: cfg.Policy.VerifySignatures,
-		SignaturePaths:   cfg.Policy.EffectiveSignaturePaths(),
-		PublicKeyPath:    cfg.Policy.PublicKeyPath,
-		BundleRoles:      cfg.Policy.EffectiveBundleRoles(),
-	})
+	state, err := loadGatewayPolicyStateFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	state := newGatewayPolicyState(bundle)
 	engine := state.Engine
-	if err := policy.ValidateExecCompatibility(bundle, cfg.Policy.ExecCompatibilityMode); err != nil {
-		return nil, err
-	}
 	limit := cfg.Gateway.ConcurrencyLimit
 	if limit <= 0 {
 		limit = 32
@@ -321,6 +320,7 @@ func NewWithRecorder(cfg Config, recorder audit.Recorder, now func() time.Time) 
 		now:                 now,
 	}
 	gw.policyState.Store(state)
+	svc.SetPolicySelector(gw.selectPolicyEngine)
 	return gw, nil
 }
 
@@ -359,19 +359,7 @@ func (g *Gateway) currentPolicyState() *gatewayPolicyState {
 }
 
 func (g *Gateway) loadPolicyState() (*gatewayPolicyState, error) {
-	bundle, err := policy.LoadBundlesWithOptions(g.cfg.Policy.EffectiveBundlePaths(), policy.MultiLoadOptions{
-		VerifySignatures: g.cfg.Policy.VerifySignatures,
-		SignaturePaths:   g.cfg.Policy.EffectiveSignaturePaths(),
-		PublicKeyPath:    g.cfg.Policy.PublicKeyPath,
-		BundleRoles:      g.cfg.Policy.EffectiveBundleRoles(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := policy.ValidateExecCompatibility(bundle, g.cfg.Policy.ExecCompatibilityMode); err != nil {
-		return nil, err
-	}
-	return newGatewayPolicyState(bundle), nil
+	return loadGatewayPolicyStateFromConfig(g.cfg)
 }
 
 func (g *Gateway) ReloadPolicy(ctx context.Context, trigger string) (ReloadResult, error) {
@@ -607,6 +595,10 @@ func (g *Gateway) handleAction(w http.ResponseWriter, r *http.Request) {
 	act, err := action.ToAction(req, id)
 	if err != nil {
 		g.respondError(w, http.StatusBadRequest, "validation_error", err.Error())
+		return
+	}
+	if err := g.attachTenant(&act, id); err != nil {
+		g.respondError(w, http.StatusForbidden, "tenant_resolution_error", err.Error())
 		return
 	}
 	if err := g.validateUpstreamRoute(act); err != nil {

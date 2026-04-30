@@ -135,6 +135,9 @@ func StableInput(action normalize.NormalizedAction) ([]byte, error) {
 		"environment":    action.Environment,
 		"trace_id":       action.TraceID,
 	}
+	if strings.TrimSpace(action.TenantID) != "" {
+		payload["tenant_id"] = action.TenantID
+	}
 	return json.Marshal(payload)
 }
 

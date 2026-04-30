@@ -47,6 +47,7 @@ type CapabilityEnvelope struct {
 	OutputMaxLines        int                       `json:"output_max_lines"`
 	ApprovalsEnabled      bool                      `json:"approvals_enabled"`
 	AssuranceLevel        string                    `json:"assurance_level,omitempty"`
+	TenantID              string                    `json:"tenant_id,omitempty"`
 	MediationNotice       string                    `json:"mediation_notice,omitempty"`
 	ForwardedTools        []map[string]any          `json:"forwarded_tools,omitempty"`
 	MCPSurfaces           map[string]ToolCapability `json:"mcp_surfaces,omitempty"`
@@ -126,10 +127,9 @@ func actionCapabilityState(actionType string, actionCapability policy.ActionCapa
 
 func (s *Service) ToolCapabilities(id identity.VerifiedIdentity) map[string]ToolCapability {
 	capabilities := make(map[string]ToolCapability, len(capabilityToolDefinitions()))
-	engine := s.currentPolicyEngine()
 	for _, def := range capabilityToolDefinitions() {
 		actionCapability := policy.ActionCapability{}
-		if engine != nil {
+		if engine := s.policyEngineForCapability(def.ActionType, id); engine != nil {
 			actionCapability = engine.CapabilityForActionType(def.ActionType, id.Principal, id.Agent, id.Environment)
 		}
 		capabilities[def.Name] = toolCapabilityState(def, actionCapability)
@@ -139,10 +139,30 @@ func (s *Service) ToolCapabilities(id identity.VerifiedIdentity) map[string]Tool
 
 func (s *Service) ActionCapability(actionType string, id identity.VerifiedIdentity) ToolCapability {
 	actionCapability := policy.ActionCapability{}
-	if engine := s.currentPolicyEngine(); engine != nil {
+	if engine := s.policyEngineForCapability(actionType, id); engine != nil {
 		actionCapability = engine.CapabilityForActionType(actionType, id.Principal, id.Agent, id.Environment)
 	}
 	return actionCapabilityState(actionType, actionCapability)
+}
+
+func (s *Service) policyEngineForCapability(actionType string, id identity.VerifiedIdentity) *policy.Engine {
+	normalized := normalize.NormalizedAction{
+		ActionType:    actionType,
+		Principal:     id.Principal,
+		Agent:         id.Agent,
+		Environment:   id.Environment,
+		TraceID:       "capability",
+		ActionID:      "capability",
+		Resource:      "capability://probe",
+		Params:        []byte(`{}`),
+		ParamsHash:    "",
+		SchemaVersion: "v1",
+	}
+	engine, _, err := s.policyEngineForAction(normalized)
+	if err != nil {
+		return nil
+	}
+	return engine
 }
 
 func (s *Service) EnabledTools(id identity.VerifiedIdentity) []string {
@@ -221,6 +241,7 @@ func FinalizeCapabilityEnvelope(envelope CapabilityEnvelope, id identity.Verifie
 		"output_max_lines":        envelope.OutputMaxLines,
 		"approvals_enabled":       envelope.ApprovalsEnabled,
 		"assurance_level":         envelope.AssuranceLevel,
+		"tenant_id":               envelope.TenantID,
 		"mediation_notice":        envelope.MediationNotice,
 		"forwarded_tools":         envelope.ForwardedTools,
 		"mcp_surfaces":            envelope.MCPSurfaces,
@@ -259,7 +280,11 @@ func (s *Service) ValidateChangeSet(id identity.VerifiedIdentity, paths []string
 			blocked = append(blocked, path)
 			continue
 		}
-		engine := s.currentPolicyEngine()
+		engine, _, err := s.policyEngineForAction(normalized)
+		if err != nil {
+			blocked = append(blocked, path)
+			continue
+		}
 		if engine == nil {
 			blocked = append(blocked, path)
 			continue

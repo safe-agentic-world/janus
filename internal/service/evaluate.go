@@ -1,22 +1,21 @@
 package service
 
 import (
-	"errors"
-
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
 )
 
 func (s *Service) EvaluateAction(actionInput action.Action) (normalize.NormalizedAction, policy.Decision, error) {
-	engine := s.currentPolicyEngine()
-	if engine == nil {
-		return normalize.NormalizedAction{}, policy.Decision{}, errors.New("service not initialized")
-	}
 	normalized, err := normalize.Action(actionInput)
 	if err != nil {
 		return normalize.NormalizedAction{}, policy.Decision{}, err
 	}
+	engine, tenantID, err := s.policyEngineForAction(normalized)
+	if err != nil {
+		return normalize.NormalizedAction{}, policy.Decision{}, err
+	}
+	normalized.TenantID = tenantID
 	decision := engine.Evaluate(normalized)
 	if s.externalPolicy != nil {
 		externalDecision, err := s.externalPolicy.Evaluate(normalized)
