@@ -38,6 +38,15 @@ Policy selection:
 - if neither is provided, Nomos prints `No policy provided — using default profile: safe-dev` and uses `safe-dev`.
 - `--policy-bundle` and `--profile` are mutually exclusive.
 
+## How The Launcher Wires MCP
+
+The launcher writes a generated MCP client config at `.nomos/agent/session-*/<agent>.mcp.json` with the friendly tool surface and `--quiet`. How that config reaches the agent depends on the agent CLI:
+
+- **Claude Code** — the launcher passes `--mcp-config <generated path>` directly to the `claude` invocation, so Nomos is attached for the launched session by construction. The summary prints `MCP wiring: launcher passes --mcp-config to the agent (verified path)` and the `agent.launcher.session` audit event records `mcp_wiring_method: "mcp_config_flag"` along with the resolved `agent_launch_argv`.
+- **OpenAI Codex CLI** — Codex loads MCP servers from `~/.codex/config.toml` and has no documented one-shot equivalent of `--mcp-config`. The launcher does NOT silently set unverified env vars (the previous `CODEX_MCP_CONFIG` approach was a no-op). Instead the summary prints `MCP wiring: operator-managed (launcher cannot auto-wire MCP for this agent)` and instructs the operator to register the generated MCP config in `~/.codex/config.toml` before trusting the session. The audit event records `mcp_wiring_method: "operator_managed"`.
+
+After the agent starts, run `/mcp` (Claude Code) or the equivalent in your codex session and confirm `nomos` is listed as a connected server and the friendly tools are visible. If `nomos` is missing or those tools are absent, the session is NOT governed — exit and reconfigure before issuing prompts. The launcher cannot verify the agent loaded the MCP config (the agent is a separate process); the post-launch checklist is the operator's verification step.
+
 ## Tool Surface
 
 The launcher configures MCP with the friendly tool surface:

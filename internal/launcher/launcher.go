@@ -56,10 +56,30 @@ type Result struct {
 	AssuranceLevel      string
 	MCPConfigPath       string
 	MCPConfigJSON       []byte
+	MCPWiringMethod     string
+	AgentLaunchArgv     []string
 	InstructionsWritten []string
 	Warnings            []string
 	Launched            bool
 }
+
+// MCP wiring methods recorded in audit and printed in the launcher summary.
+// They describe how the launcher attached (or did not attach) Nomos as the
+// MCP boundary for the launched agent. The values are stable strings; do not
+// rename them without an audit-schema review.
+const (
+	// mcpWiringMCPConfigFlag indicates Nomos passed --mcp-config <path> to the
+	// agent CLI and the agent is expected to load the generated MCP config on
+	// startup. Used for Claude Code.
+	mcpWiringMCPConfigFlag = "mcp_config_flag"
+	// mcpWiringOperatorManaged indicates the launcher cannot auto-wire MCP for
+	// this agent and the operator is responsible for registering the generated
+	// MCP config in the agent's persistent configuration. Used for Codex.
+	mcpWiringOperatorManaged = "operator_managed"
+	// mcpWiringSkipped indicates dry-run or no-launch: no wiring was attempted
+	// because no agent process was started.
+	mcpWiringSkipped = "skipped"
+)
 
 type mcpClientConfig struct {
 	MCPServers map[string]mcpClientServer `json:"mcpServers"`
@@ -154,6 +174,16 @@ func Run(opts Options) (Result, error) {
 	if extra := rawMCPWarnings(opts.ExistingMCPConfigPath); len(extra) > 0 {
 		warnings = append(warnings, extra...)
 	}
+	wiringMethod := mcpWiringSkipped
+	var plannedArgv []string
+	if mcpConfigPath != "" {
+		plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, opts.Args)
+		if err != nil {
+			return Result{}, err
+		}
+		wiringMethod = plan.WiringMethod
+		plannedArgv = plan.Argv
+	}
 	result := Result{
 		Agent:            agent,
 		WorkspaceRoot:    workspaceRoot,
@@ -166,6 +196,8 @@ func Run(opts Options) (Result, error) {
 		AssuranceLevel:   "BEST_EFFORT",
 		MCPConfigPath:    mcpConfigPath,
 		MCPConfigJSON:    mcpConfigJSON,
+		MCPWiringMethod:  wiringMethod,
+		AgentLaunchArgv:  plannedArgv,
 		Warnings:         warnings,
 	}
 	if opts.WriteInstructions {
@@ -413,10 +445,12 @@ func writeSummary(out io.Writer, result Result, opts Options, defaulted bool) {
 	} else {
 		_, _ = fmt.Fprintf(out, "MCP config:    %s\n", result.MCPConfigPath)
 	}
+	_, _ = fmt.Fprintf(out, "MCP wiring:    %s\n", displayMCPWiringMethod(result.MCPWiringMethod, opts.DryRun))
 	_, _ = fmt.Fprintln(out, "Governed tools:")
 	for _, mapping := range governedToolMappings {
 		_, _ = fmt.Fprintf(out, "  %-14s -> %s\n", mapping.Friendly, mapping.Canonical)
 	}
+	writeVerifyAfterLaunch(out, result, opts)
 	if len(result.InstructionsWritten) > 0 {
 		_, _ = fmt.Fprintln(out, "Instructions:")
 		for _, path := range result.InstructionsWritten {
@@ -437,6 +471,46 @@ func displayGeneratedPath(path string, generated, dryRun bool) string {
 		return "<generated-nomos-config>"
 	}
 	return path
+}
+
+func displayMCPWiringMethod(method string, dryRun bool) string {
+	if dryRun {
+		return "<dry-run>"
+	}
+	switch method {
+	case mcpWiringMCPConfigFlag:
+		return "launcher passes --mcp-config to the agent (verified path)"
+	case mcpWiringOperatorManaged:
+		return "operator-managed (launcher cannot auto-wire MCP for this agent)"
+	case mcpWiringSkipped, "":
+		return "skipped (no agent process started)"
+	default:
+		return method
+	}
+}
+
+// writeVerifyAfterLaunch prints the post-launch verification checklist. The
+// launcher cannot prove the agent loaded the MCP config (the agent is a
+// separate process the launcher does not control), so we tell the operator
+// exactly what to confirm before trusting the session.
+func writeVerifyAfterLaunch(out io.Writer, result Result, opts Options) {
+	if opts.DryRun {
+		return
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Verify after launch:")
+	switch result.Agent {
+	case AgentClaude:
+		_, _ = fmt.Fprintln(out, "  - In Claude Code, run `/mcp` and confirm `nomos` appears as a connected server.")
+		_, _ = fmt.Fprintln(out, "  - Confirm the MCP tool list includes read_file, write_file, apply_patch, run_command, http_request.")
+	case AgentCodex:
+		_, _ = fmt.Fprintln(out, "  - The launcher does NOT auto-wire MCP for codex. Register the generated MCP config")
+		_, _ = fmt.Fprintf(out, "    (%s) in ~/.codex/config.toml before trusting this session.\n", result.MCPConfigPath)
+		_, _ = fmt.Fprintln(out, "  - In codex, list MCP servers and confirm `nomos` is connected and exposes read_file,")
+		_, _ = fmt.Fprintln(out, "    write_file, apply_patch, run_command, http_request.")
+	}
+	_, _ = fmt.Fprintln(out, "  - If `nomos` is missing or those tools are absent, the session is NOT governed —")
+	_, _ = fmt.Fprintln(out, "    exit and reconfigure before issuing prompts.")
 }
 
 func writeInstructionFiles(workspaceRoot string) ([]string, error) {
@@ -499,6 +573,21 @@ func recordLauncherSession(cfg gateway.Config, result Result, now func() time.Ti
 		return
 	}
 	defer func() { _ = writer.Close() }()
+	metadata := map[string]any{
+		"workspace_root":      result.WorkspaceRoot,
+		"profile":             result.Profile,
+		"mcp_tool_surface":    "friendly",
+		"mcp_config_path":     result.MCPConfigPath,
+		"nomos_config_path":   result.ConfigPath,
+		"nomos_version":       version.Version,
+		"dual_tool_warning":   true,
+		"mcp_wiring_method":   result.MCPWiringMethod,
+		"generated_config":    result.GeneratedConfig,
+		"governed_tool_count": len(governedToolMappings),
+	}
+	if len(result.AgentLaunchArgv) > 0 {
+		metadata["agent_launch_argv"] = append([]string(nil), result.AgentLaunchArgv...)
+	}
 	_ = writer.WriteEvent(audit.Event{
 		SchemaVersion:    "v1",
 		Timestamp:        now().UTC(),
@@ -510,18 +599,7 @@ func recordLauncherSession(cfg gateway.Config, result Result, now func() time.Ti
 		Environment:      cfg.Identity.Environment,
 		PolicyBundleHash: result.PolicyBundleHash,
 		AssuranceLevel:   result.AssuranceLevel,
-		ExecutorMetadata: map[string]any{
-			"workspace_root":      result.WorkspaceRoot,
-			"profile":             result.Profile,
-			"mcp_tool_surface":    "friendly",
-			"mcp_config_path":     result.MCPConfigPath,
-			"nomos_config_path":   result.ConfigPath,
-			"nomos_version":       version.Version,
-			"dual_tool_warning":   true,
-			"default_boundary":    true,
-			"generated_config":    result.GeneratedConfig,
-			"governed_tool_count": len(governedToolMappings),
-		},
+		ExecutorMetadata: metadata,
 	})
 }
 
@@ -541,24 +619,72 @@ func launcherAuditSink(sink string) string {
 	return strings.Join(out, ",")
 }
 
+// agentLaunchPlan is the deterministic set of arguments and environment
+// variables the launcher will use to start an agent process. It is produced
+// independently of os.Exec so it can be unit-tested.
+type agentLaunchPlan struct {
+	Argv         []string
+	Env          []string
+	WiringMethod string
+}
+
+// resolveAgentLaunchPlan returns the argv and env required to start the named
+// agent with Nomos as its MCP boundary. The plan is pure — it does not start
+// any process — so the launcher's wiring contract is verifiable in tests.
+//
+// Threat-model invariant: the launcher MUST NOT print or audit integrity
+// claims it has not enforced. Each agent has a different MCP wiring story:
+//
+//   - Claude Code (`claude --mcp-config <path>`) accepts a per-invocation MCP
+//     config file. The launcher passes its generated config via that flag, so
+//     the launched session is governed by Nomos by construction. WiringMethod
+//     is "mcp_config_flag".
+//
+//   - The OpenAI Codex CLI loads MCP servers from ~/.codex/config.toml; it has
+//     no documented one-shot equivalent of --mcp-config, and the previous
+//     CODEX_MCP_CONFIG environment variable was unverified and silently
+//     ignored. Rather than ship a false integrity claim, the launcher records
+//     "operator_managed": the operator is responsible for registering the
+//     generated MCP config in their codex configuration. The launched agent
+//     still runs, but the launcher is honest that it did not attach Nomos.
+func resolveAgentLaunchPlan(agent, mcpConfigPath string, userArgs []string) (agentLaunchPlan, error) {
+	if strings.TrimSpace(mcpConfigPath) == "" {
+		return agentLaunchPlan{}, errors.New("mcp config path required")
+	}
+	plan := agentLaunchPlan{
+		Env: []string{
+			"NOMOS_MCP_CONFIG=" + mcpConfigPath,
+			"NOMOS_AGENT_MCP_CONFIG=" + mcpConfigPath,
+		},
+	}
+	switch agent {
+	case AgentClaude:
+		plan.Argv = append([]string{"--mcp-config", mcpConfigPath}, userArgs...)
+		plan.Env = append(plan.Env, "CLAUDE_MCP_CONFIG="+mcpConfigPath)
+		plan.WiringMethod = mcpWiringMCPConfigFlag
+	case AgentCodex:
+		plan.Argv = append([]string(nil), userArgs...)
+		plan.WiringMethod = mcpWiringOperatorManaged
+	default:
+		return agentLaunchPlan{}, fmt.Errorf("unknown agent %q", agent)
+	}
+	return plan, nil
+}
+
 func launchAgent(agent, mcpConfigPath string, args []string) error {
 	bin, err := exec.LookPath(agent)
 	if err != nil {
 		return fmt.Errorf("%s executable not found; rerun with --no-launch or configure the client with %s: %w", agent, mcpConfigPath, err)
 	}
-	cmd := exec.Command(bin, args...)
+	plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, args)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, plan.Argv...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	env := os.Environ()
-	env = append(env, "NOMOS_MCP_CONFIG="+mcpConfigPath, "NOMOS_AGENT_MCP_CONFIG="+mcpConfigPath)
-	switch agent {
-	case AgentCodex:
-		env = append(env, "CODEX_MCP_CONFIG="+mcpConfigPath)
-	case AgentClaude:
-		env = append(env, "CLAUDE_MCP_CONFIG="+mcpConfigPath)
-	}
-	cmd.Env = env
+	cmd.Env = append(os.Environ(), plan.Env...)
 	return cmd.Run()
 }
 

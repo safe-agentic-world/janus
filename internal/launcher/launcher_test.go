@@ -187,6 +187,199 @@ func TestInstructionFilesMentionBypassAvoidance(t *testing.T) {
 	}
 }
 
+func TestResolveAgentLaunchPlanClaudePassesMCPConfigFlag(t *testing.T) {
+	plan, err := resolveAgentLaunchPlan(AgentClaude, "/tmp/x/claude.mcp.json", []string{"--resume"})
+	if err != nil {
+		t.Fatalf("resolve plan: %v", err)
+	}
+	if plan.WiringMethod != mcpWiringMCPConfigFlag {
+		t.Fatalf("expected wiring method %q, got %q", mcpWiringMCPConfigFlag, plan.WiringMethod)
+	}
+	if len(plan.Argv) < 3 || plan.Argv[0] != "--mcp-config" || plan.Argv[1] != "/tmp/x/claude.mcp.json" || plan.Argv[2] != "--resume" {
+		t.Fatalf("expected argv to start with --mcp-config <path> then user args, got %+v", plan.Argv)
+	}
+	wantEnv := map[string]bool{
+		"NOMOS_MCP_CONFIG=/tmp/x/claude.mcp.json":       false,
+		"NOMOS_AGENT_MCP_CONFIG=/tmp/x/claude.mcp.json": false,
+		"CLAUDE_MCP_CONFIG=/tmp/x/claude.mcp.json":      false,
+	}
+	for _, e := range plan.Env {
+		if _, ok := wantEnv[e]; ok {
+			wantEnv[e] = true
+		}
+	}
+	for k, present := range wantEnv {
+		if !present {
+			t.Fatalf("expected env entry %q in plan.Env=%+v", k, plan.Env)
+		}
+	}
+}
+
+func TestResolveAgentLaunchPlanCodexIsOperatorManaged(t *testing.T) {
+	plan, err := resolveAgentLaunchPlan(AgentCodex, "/tmp/x/codex.mcp.json", []string{"some-arg"})
+	if err != nil {
+		t.Fatalf("resolve plan: %v", err)
+	}
+	if plan.WiringMethod != mcpWiringOperatorManaged {
+		t.Fatalf("expected wiring method %q, got %q", mcpWiringOperatorManaged, plan.WiringMethod)
+	}
+	if len(plan.Argv) != 1 || plan.Argv[0] != "some-arg" {
+		t.Fatalf("expected argv to be user args only, got %+v", plan.Argv)
+	}
+	for _, e := range plan.Env {
+		if strings.HasPrefix(e, "CODEX_MCP_CONFIG=") {
+			t.Fatalf("launcher must not set unverified CODEX_MCP_CONFIG env var: %q", e)
+		}
+	}
+}
+
+func TestResolveAgentLaunchPlanRejectsEmptyMCPConfig(t *testing.T) {
+	if _, err := resolveAgentLaunchPlan(AgentClaude, "", nil); err == nil {
+		t.Fatal("expected error for empty mcp config path")
+	}
+}
+
+func TestResolveAgentLaunchPlanRejectsUnknownAgent(t *testing.T) {
+	if _, err := resolveAgentLaunchPlan("not-a-real-agent", "/tmp/x.json", nil); err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+}
+
+func TestRunClaudePopulatesWiringMethodAndArgv(t *testing.T) {
+	workspace := t.TempDir()
+	var out bytes.Buffer
+	result, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	if result.MCPWiringMethod != mcpWiringMCPConfigFlag {
+		t.Fatalf("expected MCPWiringMethod %q, got %q", mcpWiringMCPConfigFlag, result.MCPWiringMethod)
+	}
+	if len(result.AgentLaunchArgv) < 2 || result.AgentLaunchArgv[0] != "--mcp-config" || result.AgentLaunchArgv[1] != result.MCPConfigPath {
+		t.Fatalf("expected AgentLaunchArgv to start with --mcp-config <generated mcp config>, got %+v", result.AgentLaunchArgv)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"MCP wiring:    launcher passes --mcp-config to the agent",
+		"Verify after launch:",
+		"In Claude Code, run `/mcp`",
+		"read_file, write_file, apply_patch, run_command, http_request",
+		"the session is NOT governed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunCodexRecordsOperatorManagedAndPrintsManualSetup(t *testing.T) {
+	workspace := t.TempDir()
+	var out bytes.Buffer
+	result, err := Run(Options{
+		Agent:         AgentCodex,
+		WorkspaceRoot: workspace,
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	if result.MCPWiringMethod != mcpWiringOperatorManaged {
+		t.Fatalf("expected MCPWiringMethod %q, got %q", mcpWiringOperatorManaged, result.MCPWiringMethod)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"MCP wiring:    operator-managed",
+		"Verify after launch:",
+		"launcher does NOT auto-wire MCP for codex",
+		"~/.codex/config.toml",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunDryRunOmitsVerifyAfterLaunchBlock(t *testing.T) {
+	workspace := t.TempDir()
+	var out bytes.Buffer
+	if _, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		DryRun:        true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	}); err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "Verify after launch:") {
+		t.Fatalf("dry-run output should not include the verify block:\n%s", got)
+	}
+	if !strings.Contains(got, "MCP wiring:    <dry-run>") {
+		t.Fatalf("dry-run summary should mark MCP wiring as <dry-run>:\n%s", got)
+	}
+}
+
+func TestLauncherAuditMetadataReflectsWiringTruthfully(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &bytes.Buffer{},
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	}); err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(workspace, ".nomos", "agent", "audit.db"))
+	if err != nil {
+		t.Fatalf("open audit db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var payloadJSON string
+	if err := db.QueryRow(`SELECT payload_json FROM audit_events WHERE event_type='agent.launcher.session' LIMIT 1`).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query audit payload: %v", err)
+	}
+	var payload struct {
+		ExecutorMetadata map[string]any `json:"executor_metadata"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("decode audit payload: %v", err)
+	}
+	meta := payload.ExecutorMetadata
+	if meta == nil {
+		t.Fatalf("audit payload missing executor_metadata: %s", payloadJSON)
+	}
+	// Truthful claims that MUST be present.
+	if got := meta["mcp_wiring_method"]; got != mcpWiringMCPConfigFlag {
+		t.Fatalf("expected mcp_wiring_method=%q, got %v", mcpWiringMCPConfigFlag, got)
+	}
+	argv, ok := meta["agent_launch_argv"].([]any)
+	if !ok || len(argv) < 2 || argv[0] != "--mcp-config" {
+		t.Fatalf("expected agent_launch_argv to start with --mcp-config, got %v", meta["agent_launch_argv"])
+	}
+	// False claim that MUST NOT be present after the integrity fix.
+	if _, present := meta["default_boundary"]; present {
+		t.Fatalf("audit metadata must not record the un-verifiable `default_boundary` claim; got %v", meta)
+	}
+}
+
 func emptyEnv(string) string {
 	return ""
 }

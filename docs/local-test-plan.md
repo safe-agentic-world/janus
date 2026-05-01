@@ -677,6 +677,64 @@ Expected:
 - `AGENTS.md`, `CLAUDE.md`, and `.codex/instructions.md` are created under `$EmptyWS`
 - each file references `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`
 
+### Scenario 25b: Verify `--mcp-config` is passed to Claude Code
+
+This is the integrity check that the launcher actually attaches Nomos to the launched session. The launcher prints `MCP wiring: launcher passes --mcp-config to the agent (verified path)` for Claude. Confirm the resolved argv:
+
+```powershell
+nomos run claude --no-launch --print-config 2>&1 | Select-String "MCP wiring:"
+```
+
+Expected:
+
+- output line: `MCP wiring:    launcher passes --mcp-config to the agent (verified path)`
+
+Inspect the audit event written by the launcher:
+
+```powershell
+$Db = Join-Path $Repo ".nomos\agent\audit.db"
+sqlite3 $Db "SELECT json_extract(payload_json, '$.executor_metadata.mcp_wiring_method'), json_extract(payload_json, '$.executor_metadata.agent_launch_argv') FROM audit_events WHERE event_type = 'agent.launcher.session' ORDER BY id DESC LIMIT 1;"
+```
+
+Expected:
+
+- first column: `mcp_config_flag`
+- second column: a JSON array starting with `"--mcp-config"` followed by the absolute path to `claude.mcp.json`
+- the `default_boundary` field is NOT present (the launcher must not record un-verifiable integrity claims)
+
+Then start Claude Code under the launcher (this DOES launch the agent — drop `--no-launch`):
+
+```powershell
+nomos run claude
+```
+
+Inside Claude, run:
+
+```text
+/mcp
+```
+
+Expected:
+
+- the `nomos` server appears under the connected-servers list
+- listing MCP tools (for example `What MCP tools are available?`) returns `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`
+
+If `nomos` is missing from `/mcp`, the launcher's MCP wiring is broken — stop and capture: the launcher's printed `MCP wiring:` line, the resolved `agent_launch_argv` from audit, and the running `claude` argv (`Get-Process claude | Select CommandLine`). Do NOT issue prompts in this state — the session is ungoverned and any `git push`, `fs.write`, or shell command will bypass policy entirely.
+
+### Scenario 25c: Codex is `operator-managed`, not auto-wired
+
+```powershell
+nomos run codex --no-launch 2>&1 | Select-String "MCP wiring:|launcher does NOT auto-wire"
+```
+
+Expected:
+
+- `MCP wiring: operator-managed (launcher cannot auto-wire MCP for this agent)`
+- a `Verify after launch:` block tells the operator to register the generated MCP config in `~/.codex/config.toml` before trusting the session
+- the audit event records `mcp_wiring_method: "operator_managed"`
+
+This is the staff-engineering correction for the prior CLI version, which set an unverified `CODEX_MCP_CONFIG` env var that Codex ignored — silently launching an ungoverned session while printing integrity claims.
+
 ### Scenario 26: Launcher generated config drives a real `nomos mcp` process
 
 Use the artifact written by Scenario 23 to launch `nomos mcp` directly:
