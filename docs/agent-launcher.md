@@ -89,13 +89,23 @@ Stronger guarantees require controlled runtimes such as containers, CI, or remot
 
 ## Default Profiles
 
-The launcher ships three standalone profiles under `examples/policies/profiles/`:
+The launcher ships three standalone profiles. The canonical YAML is at `examples/policies/profiles/<name>.yaml`; the same bytes are also embedded in the binary so the launcher works without a nomos source checkout on disk:
 
 - `safe-dev`: local development, workspace edits allowed, secrets denied, risky publish/infra actions require approval, unknown egress denied.
 - `ci-strict`: deterministic validation and structured artifact publishing allowed, package installs and mutations denied, unknown egress denied.
 - `prod-locked`: read-only production inspection, writes/patches/mutations denied, narrow break-glass rollout approval.
 
-Profile hashes are pinned in `testdata/policy-profiles/hashes.json` and mentioned in `CHANGELOG.md`. If a profile changes, update both intentionally.
+Profile hashes are pinned in `testdata/policy-profiles/hashes.json` and mentioned in `CHANGELOG.md`. If a profile changes, update both intentionally; the embedded copy at `internal/launcher/embedded_profiles/<name>.yaml` must remain byte-for-byte identical (enforced by `TestEmbeddedProfilesMatchRepoSourceByteForByte`).
+
+### Profile Bundle Source Resolution
+
+When the launcher needs to load `<name>.yaml`, it tries three sources in order and prints the result as `Bundle source:` in its summary (and `profile_source` in the `agent.launcher.session` audit event):
+
+1. **`workspace`** — `<workspaceRoot>/examples/policies/profiles/<name>.yaml`. Lets a nomos developer iterate on a profile YAML without rebuilding.
+2. **`repo`** — the same path under the calling process's git root. Covers `go run ./cmd/nomos run claude` from a subdirectory.
+3. **`embedded`** — materialized from the binary to `~/.nomos/profiles/<name>.yaml`. This is the path enterprise users hit: install via Homebrew/Scoop/installer, run `nomos run claude` from any project. The file is written atomically (tempfile + rename), with mode `0o600` where the platform supports it, and rewritten only when the on-disk content does not already match the embedded bytes.
+
+The materialized path is stable across launcher invocations, so a persistent agent MCP config (e.g. `~/.codex/config.toml`) can reference `~/.nomos/profiles/<name>.yaml` and continue to point at the right file after the session-scoped artifacts under `.nomos/agent/session-*/` are cleaned up. When you upgrade the nomos binary, the next invocation rewrites the materialized file to match the new embedded YAML; verify the printed `Policy hash:` matches the value pinned in `CHANGELOG.md` for the version you intend to run.
 
 ## Generated Instructions
 

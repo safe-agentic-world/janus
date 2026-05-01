@@ -677,6 +677,38 @@ Expected:
 - `AGENTS.md`, `CLAUDE.md`, and `.codex/instructions.md` are created under `$EmptyWS`
 - each file references `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`
 
+### Scenario 25a: Default profile resolves from the embedded binary outside the nomos repo
+
+This is the integrity check that the launcher's profile resolver is not coupled to a checkout of the nomos source repo. Enterprise installs (Homebrew, Scoop, installer, `go install`) ship the binary alone; the launcher must materialize the embedded profile to `~/.nomos/profiles/<name>.yaml` and use it.
+
+```powershell
+$DemoDir = Join-Path $TmpDir "demo-not-a-nomos-repo"
+New-Item -ItemType Directory -Force $DemoDir | Out-Null
+Push-Location $DemoDir
+try {
+  nomos run claude --no-launch --profile safe-dev 2>&1 | Select-String "Policy bundle:|Bundle source:|Policy hash:"
+} finally {
+  Pop-Location
+}
+```
+
+Expected:
+
+- `Bundle source: embedded (materialized to ~/.nomos/profiles/)`
+- `Policy bundle:` points at `~/.nomos/profiles/safe-dev.yaml` (`$env:USERPROFILE\.nomos\profiles\safe-dev.yaml` on Windows)
+- `Policy hash:` matches the safe-dev value pinned in `CHANGELOG.md` (currently `4d39231248c1f4887034b63745c7b8ec5ad3a3e78ccab4dffb3d31c7f9eaf93d`)
+
+Verify the materialized file persisted:
+
+```powershell
+Get-Item "$env:USERPROFILE\.nomos\profiles\safe-dev.yaml" | Format-List FullName,Length,LastWriteTime
+```
+
+Expected:
+
+- file exists and is non-empty
+- a second invocation of `nomos run claude --no-launch --profile safe-dev` does NOT update `LastWriteTime` (idempotent rewrite)
+
 ### Scenario 25b: Verify `--mcp-config` is passed to Claude Code
 
 This is the integrity check that the launcher actually attaches Nomos to the launched session. The launcher prints `MCP wiring: launcher passes --mcp-config to the agent (verified path)` for Claude. Confirm the resolved argv:
