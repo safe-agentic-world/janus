@@ -38,6 +38,15 @@ Policy selection:
 - if neither is provided, Nomos prints `No policy provided — using default profile: safe-dev` and uses `safe-dev`.
 - `--policy-bundle` and `--profile` are mutually exclusive.
 
+## How The Launcher Wires MCP
+
+The launcher writes a generated MCP client config at `.nomos/agent/session-*/<agent>.mcp.json` with the friendly tool surface and `--quiet`. How that config reaches the agent depends on the agent CLI:
+
+- **Claude Code** — the launcher passes `--mcp-config <generated path>` directly to the `claude` invocation, so Nomos is attached for the launched session by construction. The summary prints `MCP wiring: launcher passes --mcp-config to the agent (verified path)` and the `agent.launcher.session` audit event records `mcp_wiring_method: "mcp_config_flag"` along with the resolved `agent_launch_argv`.
+- **OpenAI Codex CLI** — Codex loads MCP servers from `~/.codex/config.toml` and has no documented one-shot equivalent of `--mcp-config`. The launcher does NOT silently set unverified env vars (the previous `CODEX_MCP_CONFIG` approach was a no-op). Instead the summary prints `MCP wiring: operator-managed (launcher cannot auto-wire MCP for this agent)` and instructs the operator to register the generated MCP config in `~/.codex/config.toml` before trusting the session. The audit event records `mcp_wiring_method: "operator_managed"`.
+
+After the agent starts, run `/mcp` (Claude Code) or the equivalent in your codex session and confirm `nomos` is listed as a connected server and the friendly tools are visible. If `nomos` is missing or those tools are absent, the session is NOT governed — exit and reconfigure before issuing prompts. The launcher cannot verify the agent loaded the MCP config (the agent is a separate process); the post-launch checklist is the operator's verification step.
+
 ## Tool Surface
 
 The launcher configures MCP with the friendly tool surface:
@@ -80,13 +89,23 @@ Stronger guarantees require controlled runtimes such as containers, CI, or remot
 
 ## Default Profiles
 
-The launcher ships three standalone profiles under `examples/policies/profiles/`:
+The launcher ships three standalone profiles. The canonical YAML is at `examples/policies/profiles/<name>.yaml`; the same bytes are also embedded in the binary so the launcher works without a nomos source checkout on disk:
 
 - `safe-dev`: local development, workspace edits allowed, secrets denied, risky publish/infra actions require approval, unknown egress denied.
 - `ci-strict`: deterministic validation and structured artifact publishing allowed, package installs and mutations denied, unknown egress denied.
 - `prod-locked`: read-only production inspection, writes/patches/mutations denied, narrow break-glass rollout approval.
 
-Profile hashes are pinned in `testdata/policy-profiles/hashes.json` and mentioned in `CHANGELOG.md`. If a profile changes, update both intentionally.
+Profile hashes are pinned in `testdata/policy-profiles/hashes.json` and mentioned in `CHANGELOG.md`. If a profile changes, update both intentionally; the embedded copy at `internal/launcher/embedded_profiles/<name>.yaml` must remain byte-for-byte identical (enforced by `TestEmbeddedProfilesMatchRepoSourceByteForByte`).
+
+### Profile Bundle Source Resolution
+
+When the launcher needs to load `<name>.yaml`, it tries three sources in order and prints the result as `Bundle source:` in its summary (and `profile_source` in the `agent.launcher.session` audit event):
+
+1. **`workspace`** — `<workspaceRoot>/examples/policies/profiles/<name>.yaml`. Lets a nomos developer iterate on a profile YAML without rebuilding.
+2. **`repo`** — the same path under the calling process's git root. Covers `go run ./cmd/nomos run claude` from a subdirectory.
+3. **`embedded`** — materialized from the binary to `~/.nomos/profiles/<name>.yaml`. This is the path enterprise users hit: install via Homebrew/Scoop/installer, run `nomos run claude` from any project. The file is written atomically (tempfile + rename), with mode `0o600` where the platform supports it, and rewritten only when the on-disk content does not already match the embedded bytes.
+
+The materialized path is stable across launcher invocations, so a persistent agent MCP config (e.g. `~/.codex/config.toml`) can reference `~/.nomos/profiles/<name>.yaml` and continue to point at the right file after the session-scoped artifacts under `.nomos/agent/session-*/` are cleaned up. When you upgrade the nomos binary, the next invocation rewrites the materialized file to match the new embedded YAML; verify the printed `Policy hash:` matches the value pinned in `CHANGELOG.md` for the version you intend to run.
 
 ## Generated Instructions
 

@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"bytes"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +21,27 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/redact"
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
+
+// embeddedProfiles ships the canonical default profile bundles inside the
+// binary so `nomos run` works for operators who installed nomos via Homebrew,
+// Scoop, the installer script, or `go install` and run it from any project
+// directory. The byte-for-byte equivalence with examples/policies/profiles/
+// is enforced by a unit test in this package; if the source profiles change,
+// the embedded copies must be updated in lockstep (and the hashes pinned in
+// testdata/policy-profiles/hashes.json updated through the policy test).
+//
+//go:embed embedded_profiles/*.yaml
+var embeddedProfiles embed.FS
+
+// repoRootForProfileLookup is the function used by resolvePolicySelection to
+// find a checkout of the nomos source repository when looking for on-disk
+// profile YAMLs. Production code uses repoRootFromPackage (current working
+// directory's git root), which preserves the developer experience inside a
+// nomos checkout. Tests override this to simulate running from outside the
+// nomos repo (the path enterprise users hit) so we exercise the embedded
+// fallback. Not safe for parallel tests — the launcher tests do not use
+// t.Parallel.
+var repoRootForProfileLookup = repoRootFromPackage
 
 const (
 	AgentCodex  = "codex"
@@ -50,16 +73,37 @@ type Result struct {
 	ConfigPath          string
 	GeneratedConfig     bool
 	PolicyBundlePath    string
+	PolicyBundleSource  string // "custom", "workspace", "repo", or "embedded"
 	Profile             string
 	ProfileSummary      string
 	PolicyBundleHash    string
 	AssuranceLevel      string
 	MCPConfigPath       string
 	MCPConfigJSON       []byte
+	MCPWiringMethod     string
+	AgentLaunchArgv     []string
 	InstructionsWritten []string
 	Warnings            []string
 	Launched            bool
 }
+
+// MCP wiring methods recorded in audit and printed in the launcher summary.
+// They describe how the launcher attached (or did not attach) Nomos as the
+// MCP boundary for the launched agent. The values are stable strings; do not
+// rename them without an audit-schema review.
+const (
+	// mcpWiringMCPConfigFlag indicates Nomos passed --mcp-config <path> to the
+	// agent CLI and the agent is expected to load the generated MCP config on
+	// startup. Used for Claude Code.
+	mcpWiringMCPConfigFlag = "mcp_config_flag"
+	// mcpWiringOperatorManaged indicates the launcher cannot auto-wire MCP for
+	// this agent and the operator is responsible for registering the generated
+	// MCP config in the agent's persistent configuration. Used for Codex.
+	mcpWiringOperatorManaged = "operator_managed"
+	// mcpWiringSkipped indicates dry-run or no-launch: no wiring was attempted
+	// because no agent process was started.
+	mcpWiringSkipped = "skipped"
+)
 
 type mcpClientConfig struct {
 	MCPServers map[string]mcpClientServer `json:"mcpServers"`
@@ -105,7 +149,7 @@ func Run(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	policySelection, err := resolvePolicySelection(workspaceRoot, opts.PolicyBundlePath, opts.Profile)
+	policySelection, err := resolvePolicySelection(workspaceRoot, opts.PolicyBundlePath, opts.Profile, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -154,19 +198,32 @@ func Run(opts Options) (Result, error) {
 	if extra := rawMCPWarnings(opts.ExistingMCPConfigPath); len(extra) > 0 {
 		warnings = append(warnings, extra...)
 	}
+	wiringMethod := mcpWiringSkipped
+	var plannedArgv []string
+	if mcpConfigPath != "" {
+		plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, opts.Args)
+		if err != nil {
+			return Result{}, err
+		}
+		wiringMethod = plan.WiringMethod
+		plannedArgv = plan.Argv
+	}
 	result := Result{
-		Agent:            agent,
-		WorkspaceRoot:    workspaceRoot,
-		ConfigPath:       configPath,
-		GeneratedConfig:  generatedConfig,
-		PolicyBundlePath: policySelection.BundlePath,
-		Profile:          policySelection.Profile,
-		ProfileSummary:   policySelection.Summary,
-		PolicyBundleHash: bundle.Hash,
-		AssuranceLevel:   "BEST_EFFORT",
-		MCPConfigPath:    mcpConfigPath,
-		MCPConfigJSON:    mcpConfigJSON,
-		Warnings:         warnings,
+		Agent:              agent,
+		WorkspaceRoot:      workspaceRoot,
+		ConfigPath:         configPath,
+		GeneratedConfig:    generatedConfig,
+		PolicyBundlePath:   policySelection.BundlePath,
+		PolicyBundleSource: policySelection.Source,
+		Profile:            policySelection.Profile,
+		ProfileSummary:     policySelection.Summary,
+		PolicyBundleHash:   bundle.Hash,
+		AssuranceLevel:     "BEST_EFFORT",
+		MCPConfigPath:      mcpConfigPath,
+		MCPConfigJSON:      mcpConfigJSON,
+		MCPWiringMethod:    wiringMethod,
+		AgentLaunchArgv:    plannedArgv,
+		Warnings:           warnings,
 	}
 	if opts.WriteInstructions {
 		written, err := writeInstructionFiles(workspaceRoot)
@@ -197,10 +254,21 @@ type policySelection struct {
 	BundlePath string
 	Profile    string
 	Summary    string
+	Source     string // "custom", "workspace", "repo", or "embedded"
 	Defaulted  bool
 }
 
-func resolvePolicySelection(workspaceRoot, policyBundlePath, profile string) (policySelection, error) {
+// Profile bundle source labels recorded in audit and printed in the launcher
+// summary. The labels are stable strings; do not rename them without an
+// audit-schema review.
+const (
+	profileSourceCustom    = "custom"
+	profileSourceWorkspace = "workspace"
+	profileSourceRepo      = "repo"
+	profileSourceEmbedded  = "embedded"
+)
+
+func resolvePolicySelection(workspaceRoot, policyBundlePath, profile string, opts Options) (policySelection, error) {
 	policyBundlePath = strings.TrimSpace(policyBundlePath)
 	profile = strings.TrimSpace(profile)
 	if policyBundlePath != "" {
@@ -208,7 +276,7 @@ func resolvePolicySelection(workspaceRoot, policyBundlePath, profile string) (po
 		if err != nil {
 			return policySelection{}, err
 		}
-		return policySelection{BundlePath: abs, Profile: "custom", Summary: "custom policy bundle"}, nil
+		return policySelection{BundlePath: abs, Profile: "custom", Summary: "custom policy bundle", Source: profileSourceCustom}, nil
 	}
 	defaulted := false
 	if profile == "" {
@@ -219,15 +287,141 @@ func resolvePolicySelection(workspaceRoot, policyBundlePath, profile string) (po
 	if !ok {
 		return policySelection{}, fmt.Errorf("unknown profile %q: expected safe-dev, ci-strict, or prod-locked", profile)
 	}
-	path := filepath.Join(workspaceRoot, "examples", "policies", "profiles", profile+".yaml")
-	if _, err := os.Stat(path); err != nil {
-		path = filepath.Join(repoRootFromPackage(), "examples", "policies", "profiles", profile+".yaml")
-	}
-	abs, err := filepath.Abs(path)
+	bundlePath, source, err := locateOrMaterializeProfile(profile, workspaceRoot, opts)
 	if err != nil {
 		return policySelection{}, err
 	}
-	return policySelection{BundlePath: abs, Profile: profile, Summary: summary, Defaulted: defaulted}, nil
+	return policySelection{BundlePath: bundlePath, Profile: profile, Summary: summary, Source: source, Defaulted: defaulted}, nil
+}
+
+// locateOrMaterializeProfile resolves a profile name to an absolute filesystem
+// path that exists when the function returns.
+//
+// Lookup tiers, in order:
+//
+//  1. Workspace checkout: <workspaceRoot>/examples/policies/profiles/<name>.yaml.
+//     This lets a nomos developer iterate on a profile YAML inside their own
+//     checkout without rebuilding the binary.
+//
+//  2. Calling-process git root: <repoRootForProfileLookup()>/examples/policies/
+//     profiles/<name>.yaml. Covers `go run ./cmd/nomos run claude` from a
+//     subdirectory of a nomos checkout where the workspace root is not the
+//     repo root.
+//
+//  3. Embedded: materialize the profile baked into the binary to
+//     ~/.nomos/profiles/<name>.yaml. This is the path enterprise users hit:
+//     they install nomos via Homebrew/installer/`go install` and run from
+//     their own project directory which has no examples/policies/profiles/
+//     anywhere on disk. Without this tier, `nomos run` is broken outside a
+//     nomos source checkout.
+//
+// Tier 3 is the integrity-critical path. The embedded YAML is byte-for-byte
+// identical to the repo-shipped source — guarded by
+// TestEmbeddedProfilesMatchRepoSourceByteForByte — and the resulting bundle
+// hash matches the value pinned in testdata/policy-profiles/hashes.json.
+func locateOrMaterializeProfile(profile, workspaceRoot string, opts Options) (string, string, error) {
+	candidate := filepath.Join(workspaceRoot, "examples", "policies", "profiles", profile+".yaml")
+	if _, err := os.Stat(candidate); err == nil {
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			return "", "", err
+		}
+		return abs, profileSourceWorkspace, nil
+	}
+	if root := strings.TrimSpace(repoRootForProfileLookup()); root != "" {
+		candidate := filepath.Join(root, "examples", "policies", "profiles", profile+".yaml")
+		if _, err := os.Stat(candidate); err == nil {
+			abs, err := filepath.Abs(candidate)
+			if err != nil {
+				return "", "", err
+			}
+			return abs, profileSourceRepo, nil
+		}
+	}
+	path, err := materializeEmbeddedProfile(profile, opts.Getenv)
+	if err != nil {
+		return "", "", fmt.Errorf("materialize embedded profile %q: %w", profile, err)
+	}
+	return path, profileSourceEmbedded, nil
+}
+
+// materializeEmbeddedProfile writes the embedded profile bundle to a stable
+// per-user path so the on-disk file outlives the launcher process and can be
+// referenced by a persistent agent MCP config (e.g. ~/.codex/config.toml).
+//
+// Path: <home>/.nomos/profiles/<name>.yaml.
+//
+// The function is idempotent and safe under concurrent launchers: if the
+// destination already matches the embedded bytes, it is left untouched;
+// otherwise it is rewritten atomically via a tempfile-and-rename, which is a
+// single inode replacement on POSIX and a best-effort replacement on Windows.
+// File permissions are tightened to 0o600 where the platform supports it so
+// the cached profile is not world-readable.
+//
+// This function is the integrity-critical materialization path for the embed
+// fallback; the byte-equivalence test in this package guarantees the embed
+// content equals the canonical YAML in examples/policies/profiles/.
+func materializeEmbeddedProfile(name string, getenv func(string) string) (string, error) {
+	data, err := embeddedProfiles.ReadFile("embedded_profiles/" + name + ".yaml")
+	if err != nil {
+		return "", fmt.Errorf("read embedded profile: %w", err)
+	}
+	home, err := launcherHomeDir(getenv)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".nomos", "profiles")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create profile cache dir: %w", err)
+	}
+	target := filepath.Join(dir, name+".yaml")
+	if existing, err := os.ReadFile(target); err == nil && bytes.Equal(existing, data) {
+		return target, nil
+	}
+	tmp, err := os.CreateTemp(dir, name+".*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("stage profile cache file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", fmt.Errorf("write profile cache file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", fmt.Errorf("close profile cache file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil && runtime.GOOS != "windows" {
+		cleanup()
+		return "", fmt.Errorf("chmod profile cache file: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		cleanup()
+		return "", fmt.Errorf("install profile cache file: %w", err)
+	}
+	return target, nil
+}
+
+// launcherHomeDir resolves the per-user home directory used to cache embedded
+// profiles. It prefers the explicit HOME / USERPROFILE env vars (so tests can
+// inject a tempdir via Options.Getenv) and falls back to os.UserHomeDir. A
+// missing home is a fatal launcher error: the launcher cannot honestly claim
+// it materialized the profile if it has no place to put the file.
+func launcherHomeDir(getenv func(string) string) (string, error) {
+	if getenv != nil {
+		for _, key := range []string{"NOMOS_HOME_OVERRIDE", "USERPROFILE", "HOME"} {
+			if value := strings.TrimSpace(getenv(key)); value != "" {
+				return value, nil
+			}
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate user home directory: %w", err)
+	}
+	return home, nil
 }
 
 func profileSummaries() map[string]string {
@@ -406,6 +600,7 @@ func writeSummary(out io.Writer, result Result, opts Options, defaulted bool) {
 	_, _ = fmt.Fprintf(out, "Config:        %s\n", displayGeneratedPath(result.ConfigPath, result.GeneratedConfig, opts.DryRun))
 	_, _ = fmt.Fprintf(out, "Profile:       %s\n", result.Profile)
 	_, _ = fmt.Fprintf(out, "Policy bundle: %s\n", result.PolicyBundlePath)
+	_, _ = fmt.Fprintf(out, "Bundle source: %s\n", displayPolicyBundleSource(result.PolicyBundleSource))
 	_, _ = fmt.Fprintf(out, "Policy hash:   %s\n", result.PolicyBundleHash)
 	_, _ = fmt.Fprintf(out, "Assurance:     %s\n", result.AssuranceLevel)
 	if opts.DryRun {
@@ -413,10 +608,12 @@ func writeSummary(out io.Writer, result Result, opts Options, defaulted bool) {
 	} else {
 		_, _ = fmt.Fprintf(out, "MCP config:    %s\n", result.MCPConfigPath)
 	}
+	_, _ = fmt.Fprintf(out, "MCP wiring:    %s\n", displayMCPWiringMethod(result.MCPWiringMethod, opts.DryRun))
 	_, _ = fmt.Fprintln(out, "Governed tools:")
 	for _, mapping := range governedToolMappings {
 		_, _ = fmt.Fprintf(out, "  %-14s -> %s\n", mapping.Friendly, mapping.Canonical)
 	}
+	writeVerifyAfterLaunch(out, result, opts)
 	if len(result.InstructionsWritten) > 0 {
 		_, _ = fmt.Fprintln(out, "Instructions:")
 		for _, path := range result.InstructionsWritten {
@@ -437,6 +634,64 @@ func displayGeneratedPath(path string, generated, dryRun bool) string {
 		return "<generated-nomos-config>"
 	}
 	return path
+}
+
+func displayPolicyBundleSource(source string) string {
+	switch source {
+	case profileSourceCustom:
+		return "custom (--policy-bundle path provided by operator)"
+	case profileSourceWorkspace:
+		return "workspace (./examples/policies/profiles/)"
+	case profileSourceRepo:
+		return "nomos repo checkout"
+	case profileSourceEmbedded:
+		return "embedded (materialized to ~/.nomos/profiles/)"
+	default:
+		if strings.TrimSpace(source) == "" {
+			return "unknown"
+		}
+		return source
+	}
+}
+
+func displayMCPWiringMethod(method string, dryRun bool) string {
+	if dryRun {
+		return "<dry-run>"
+	}
+	switch method {
+	case mcpWiringMCPConfigFlag:
+		return "launcher passes --mcp-config to the agent (verified path)"
+	case mcpWiringOperatorManaged:
+		return "operator-managed (launcher cannot auto-wire MCP for this agent)"
+	case mcpWiringSkipped, "":
+		return "skipped (no agent process started)"
+	default:
+		return method
+	}
+}
+
+// writeVerifyAfterLaunch prints the post-launch verification checklist. The
+// launcher cannot prove the agent loaded the MCP config (the agent is a
+// separate process the launcher does not control), so we tell the operator
+// exactly what to confirm before trusting the session.
+func writeVerifyAfterLaunch(out io.Writer, result Result, opts Options) {
+	if opts.DryRun {
+		return
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Verify after launch:")
+	switch result.Agent {
+	case AgentClaude:
+		_, _ = fmt.Fprintln(out, "  - In Claude Code, run `/mcp` and confirm `nomos` appears as a connected server.")
+		_, _ = fmt.Fprintln(out, "  - Confirm the MCP tool list includes read_file, write_file, apply_patch, run_command, http_request.")
+	case AgentCodex:
+		_, _ = fmt.Fprintln(out, "  - The launcher does NOT auto-wire MCP for codex. Register the generated MCP config")
+		_, _ = fmt.Fprintf(out, "    (%s) in ~/.codex/config.toml before trusting this session.\n", result.MCPConfigPath)
+		_, _ = fmt.Fprintln(out, "  - In codex, list MCP servers and confirm `nomos` is connected and exposes read_file,")
+		_, _ = fmt.Fprintln(out, "    write_file, apply_patch, run_command, http_request.")
+	}
+	_, _ = fmt.Fprintln(out, "  - If `nomos` is missing or those tools are absent, the session is NOT governed —")
+	_, _ = fmt.Fprintln(out, "    exit and reconfigure before issuing prompts.")
 }
 
 func writeInstructionFiles(workspaceRoot string) ([]string, error) {
@@ -499,6 +754,22 @@ func recordLauncherSession(cfg gateway.Config, result Result, now func() time.Ti
 		return
 	}
 	defer func() { _ = writer.Close() }()
+	metadata := map[string]any{
+		"workspace_root":      result.WorkspaceRoot,
+		"profile":             result.Profile,
+		"profile_source":      result.PolicyBundleSource,
+		"mcp_tool_surface":    "friendly",
+		"mcp_config_path":     result.MCPConfigPath,
+		"nomos_config_path":   result.ConfigPath,
+		"nomos_version":       version.Version,
+		"dual_tool_warning":   true,
+		"mcp_wiring_method":   result.MCPWiringMethod,
+		"generated_config":    result.GeneratedConfig,
+		"governed_tool_count": len(governedToolMappings),
+	}
+	if len(result.AgentLaunchArgv) > 0 {
+		metadata["agent_launch_argv"] = append([]string(nil), result.AgentLaunchArgv...)
+	}
 	_ = writer.WriteEvent(audit.Event{
 		SchemaVersion:    "v1",
 		Timestamp:        now().UTC(),
@@ -510,18 +781,7 @@ func recordLauncherSession(cfg gateway.Config, result Result, now func() time.Ti
 		Environment:      cfg.Identity.Environment,
 		PolicyBundleHash: result.PolicyBundleHash,
 		AssuranceLevel:   result.AssuranceLevel,
-		ExecutorMetadata: map[string]any{
-			"workspace_root":      result.WorkspaceRoot,
-			"profile":             result.Profile,
-			"mcp_tool_surface":    "friendly",
-			"mcp_config_path":     result.MCPConfigPath,
-			"nomos_config_path":   result.ConfigPath,
-			"nomos_version":       version.Version,
-			"dual_tool_warning":   true,
-			"default_boundary":    true,
-			"generated_config":    result.GeneratedConfig,
-			"governed_tool_count": len(governedToolMappings),
-		},
+		ExecutorMetadata: metadata,
 	})
 }
 
@@ -541,24 +801,72 @@ func launcherAuditSink(sink string) string {
 	return strings.Join(out, ",")
 }
 
+// agentLaunchPlan is the deterministic set of arguments and environment
+// variables the launcher will use to start an agent process. It is produced
+// independently of os.Exec so it can be unit-tested.
+type agentLaunchPlan struct {
+	Argv         []string
+	Env          []string
+	WiringMethod string
+}
+
+// resolveAgentLaunchPlan returns the argv and env required to start the named
+// agent with Nomos as its MCP boundary. The plan is pure — it does not start
+// any process — so the launcher's wiring contract is verifiable in tests.
+//
+// Threat-model invariant: the launcher MUST NOT print or audit integrity
+// claims it has not enforced. Each agent has a different MCP wiring story:
+//
+//   - Claude Code (`claude --mcp-config <path>`) accepts a per-invocation MCP
+//     config file. The launcher passes its generated config via that flag, so
+//     the launched session is governed by Nomos by construction. WiringMethod
+//     is "mcp_config_flag".
+//
+//   - The OpenAI Codex CLI loads MCP servers from ~/.codex/config.toml; it has
+//     no documented one-shot equivalent of --mcp-config, and the previous
+//     CODEX_MCP_CONFIG environment variable was unverified and silently
+//     ignored. Rather than ship a false integrity claim, the launcher records
+//     "operator_managed": the operator is responsible for registering the
+//     generated MCP config in their codex configuration. The launched agent
+//     still runs, but the launcher is honest that it did not attach Nomos.
+func resolveAgentLaunchPlan(agent, mcpConfigPath string, userArgs []string) (agentLaunchPlan, error) {
+	if strings.TrimSpace(mcpConfigPath) == "" {
+		return agentLaunchPlan{}, errors.New("mcp config path required")
+	}
+	plan := agentLaunchPlan{
+		Env: []string{
+			"NOMOS_MCP_CONFIG=" + mcpConfigPath,
+			"NOMOS_AGENT_MCP_CONFIG=" + mcpConfigPath,
+		},
+	}
+	switch agent {
+	case AgentClaude:
+		plan.Argv = append([]string{"--mcp-config", mcpConfigPath}, userArgs...)
+		plan.Env = append(plan.Env, "CLAUDE_MCP_CONFIG="+mcpConfigPath)
+		plan.WiringMethod = mcpWiringMCPConfigFlag
+	case AgentCodex:
+		plan.Argv = append([]string(nil), userArgs...)
+		plan.WiringMethod = mcpWiringOperatorManaged
+	default:
+		return agentLaunchPlan{}, fmt.Errorf("unknown agent %q", agent)
+	}
+	return plan, nil
+}
+
 func launchAgent(agent, mcpConfigPath string, args []string) error {
 	bin, err := exec.LookPath(agent)
 	if err != nil {
 		return fmt.Errorf("%s executable not found; rerun with --no-launch or configure the client with %s: %w", agent, mcpConfigPath, err)
 	}
-	cmd := exec.Command(bin, args...)
+	plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, args)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, plan.Argv...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	env := os.Environ()
-	env = append(env, "NOMOS_MCP_CONFIG="+mcpConfigPath, "NOMOS_AGENT_MCP_CONFIG="+mcpConfigPath)
-	switch agent {
-	case AgentCodex:
-		env = append(env, "CODEX_MCP_CONFIG="+mcpConfigPath)
-	case AgentClaude:
-		env = append(env, "CLAUDE_MCP_CONFIG="+mcpConfigPath)
-	}
-	cmd.Env = env
+	cmd.Env = append(os.Environ(), plan.Env...)
 	return cmd.Run()
 }
 

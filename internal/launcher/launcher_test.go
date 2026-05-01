@@ -187,6 +187,398 @@ func TestInstructionFilesMentionBypassAvoidance(t *testing.T) {
 	}
 }
 
+func TestResolveAgentLaunchPlanClaudePassesMCPConfigFlag(t *testing.T) {
+	plan, err := resolveAgentLaunchPlan(AgentClaude, "/tmp/x/claude.mcp.json", []string{"--resume"})
+	if err != nil {
+		t.Fatalf("resolve plan: %v", err)
+	}
+	if plan.WiringMethod != mcpWiringMCPConfigFlag {
+		t.Fatalf("expected wiring method %q, got %q", mcpWiringMCPConfigFlag, plan.WiringMethod)
+	}
+	if len(plan.Argv) < 3 || plan.Argv[0] != "--mcp-config" || plan.Argv[1] != "/tmp/x/claude.mcp.json" || plan.Argv[2] != "--resume" {
+		t.Fatalf("expected argv to start with --mcp-config <path> then user args, got %+v", plan.Argv)
+	}
+	wantEnv := map[string]bool{
+		"NOMOS_MCP_CONFIG=/tmp/x/claude.mcp.json":       false,
+		"NOMOS_AGENT_MCP_CONFIG=/tmp/x/claude.mcp.json": false,
+		"CLAUDE_MCP_CONFIG=/tmp/x/claude.mcp.json":      false,
+	}
+	for _, e := range plan.Env {
+		if _, ok := wantEnv[e]; ok {
+			wantEnv[e] = true
+		}
+	}
+	for k, present := range wantEnv {
+		if !present {
+			t.Fatalf("expected env entry %q in plan.Env=%+v", k, plan.Env)
+		}
+	}
+}
+
+func TestResolveAgentLaunchPlanCodexIsOperatorManaged(t *testing.T) {
+	plan, err := resolveAgentLaunchPlan(AgentCodex, "/tmp/x/codex.mcp.json", []string{"some-arg"})
+	if err != nil {
+		t.Fatalf("resolve plan: %v", err)
+	}
+	if plan.WiringMethod != mcpWiringOperatorManaged {
+		t.Fatalf("expected wiring method %q, got %q", mcpWiringOperatorManaged, plan.WiringMethod)
+	}
+	if len(plan.Argv) != 1 || plan.Argv[0] != "some-arg" {
+		t.Fatalf("expected argv to be user args only, got %+v", plan.Argv)
+	}
+	for _, e := range plan.Env {
+		if strings.HasPrefix(e, "CODEX_MCP_CONFIG=") {
+			t.Fatalf("launcher must not set unverified CODEX_MCP_CONFIG env var: %q", e)
+		}
+	}
+}
+
+func TestResolveAgentLaunchPlanRejectsEmptyMCPConfig(t *testing.T) {
+	if _, err := resolveAgentLaunchPlan(AgentClaude, "", nil); err == nil {
+		t.Fatal("expected error for empty mcp config path")
+	}
+}
+
+func TestResolveAgentLaunchPlanRejectsUnknownAgent(t *testing.T) {
+	if _, err := resolveAgentLaunchPlan("not-a-real-agent", "/tmp/x.json", nil); err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+}
+
+func TestRunClaudePopulatesWiringMethodAndArgv(t *testing.T) {
+	workspace := t.TempDir()
+	var out bytes.Buffer
+	result, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	if result.MCPWiringMethod != mcpWiringMCPConfigFlag {
+		t.Fatalf("expected MCPWiringMethod %q, got %q", mcpWiringMCPConfigFlag, result.MCPWiringMethod)
+	}
+	if len(result.AgentLaunchArgv) < 2 || result.AgentLaunchArgv[0] != "--mcp-config" || result.AgentLaunchArgv[1] != result.MCPConfigPath {
+		t.Fatalf("expected AgentLaunchArgv to start with --mcp-config <generated mcp config>, got %+v", result.AgentLaunchArgv)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"MCP wiring:    launcher passes --mcp-config to the agent",
+		"Verify after launch:",
+		"In Claude Code, run `/mcp`",
+		"read_file, write_file, apply_patch, run_command, http_request",
+		"the session is NOT governed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunCodexRecordsOperatorManagedAndPrintsManualSetup(t *testing.T) {
+	workspace := t.TempDir()
+	var out bytes.Buffer
+	result, err := Run(Options{
+		Agent:         AgentCodex,
+		WorkspaceRoot: workspace,
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	if result.MCPWiringMethod != mcpWiringOperatorManaged {
+		t.Fatalf("expected MCPWiringMethod %q, got %q", mcpWiringOperatorManaged, result.MCPWiringMethod)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"MCP wiring:    operator-managed",
+		"Verify after launch:",
+		"launcher does NOT auto-wire MCP for codex",
+		"~/.codex/config.toml",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunDryRunOmitsVerifyAfterLaunchBlock(t *testing.T) {
+	workspace := t.TempDir()
+	var out bytes.Buffer
+	if _, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		DryRun:        true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	}); err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "Verify after launch:") {
+		t.Fatalf("dry-run output should not include the verify block:\n%s", got)
+	}
+	if !strings.Contains(got, "MCP wiring:    <dry-run>") {
+		t.Fatalf("dry-run summary should mark MCP wiring as <dry-run>:\n%s", got)
+	}
+}
+
+func TestLauncherAuditMetadataReflectsWiringTruthfully(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &bytes.Buffer{},
+		Getenv:        emptyEnv,
+		Now:           fixedTime,
+	}); err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(workspace, ".nomos", "agent", "audit.db"))
+	if err != nil {
+		t.Fatalf("open audit db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var payloadJSON string
+	if err := db.QueryRow(`SELECT payload_json FROM audit_events WHERE event_type='agent.launcher.session' LIMIT 1`).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query audit payload: %v", err)
+	}
+	var payload struct {
+		ExecutorMetadata map[string]any `json:"executor_metadata"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("decode audit payload: %v", err)
+	}
+	meta := payload.ExecutorMetadata
+	if meta == nil {
+		t.Fatalf("audit payload missing executor_metadata: %s", payloadJSON)
+	}
+	// Truthful claims that MUST be present.
+	if got := meta["mcp_wiring_method"]; got != mcpWiringMCPConfigFlag {
+		t.Fatalf("expected mcp_wiring_method=%q, got %v", mcpWiringMCPConfigFlag, got)
+	}
+	argv, ok := meta["agent_launch_argv"].([]any)
+	if !ok || len(argv) < 2 || argv[0] != "--mcp-config" {
+		t.Fatalf("expected agent_launch_argv to start with --mcp-config, got %v", meta["agent_launch_argv"])
+	}
+	// False claim that MUST NOT be present after the integrity fix.
+	if _, present := meta["default_boundary"]; present {
+		t.Fatalf("audit metadata must not record the un-verifiable `default_boundary` claim; got %v", meta)
+	}
+}
+
+// TestEmbeddedProfilesMatchRepoSourceByteForByte is the drift guard that
+// keeps internal/launcher/embedded_profiles/<name>.yaml byte-identical to
+// examples/policies/profiles/<name>.yaml. The launcher embeds the YAML so
+// the binary works for enterprise installs where the repo source is not on
+// disk; this test prevents the embedded copies from silently drifting away
+// from the canonical hand-authored bundles. If you intentionally update a
+// profile, copy the change into both locations and update
+// testdata/policy-profiles/hashes.json + CHANGELOG.md (asserted by
+// TestDefaultPolicyProfilesGoldenHashes in internal/policy).
+func TestEmbeddedProfilesMatchRepoSourceByteForByte(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	for _, name := range []string{"safe-dev", "ci-strict", "prod-locked"} {
+		repoBytes, err := os.ReadFile(filepath.Join(repoRoot, "examples", "policies", "profiles", name+".yaml"))
+		if err != nil {
+			t.Fatalf("read repo profile %s: %v", name, err)
+		}
+		embedBytes, err := embeddedProfiles.ReadFile("embedded_profiles/" + name + ".yaml")
+		if err != nil {
+			t.Fatalf("read embedded profile %s: %v", name, err)
+		}
+		if !bytes.Equal(repoBytes, embedBytes) {
+			t.Fatalf("embedded profile %s.yaml has drifted from examples/policies/profiles/%s.yaml; copy the canonical YAML into internal/launcher/embedded_profiles/", name, name)
+		}
+	}
+}
+
+func TestMaterializeEmbeddedProfileWritesToHomeAndIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(key string) string {
+		if key == "NOMOS_HOME_OVERRIDE" {
+			return home
+		}
+		return ""
+	}
+	path1, err := materializeEmbeddedProfile("safe-dev", getenv)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if want := filepath.Join(home, ".nomos", "profiles", "safe-dev.yaml"); path1 != want {
+		t.Fatalf("expected materialized path %s, got %s", want, path1)
+	}
+	if _, err := os.Stat(path1); err != nil {
+		t.Fatalf("materialized file missing: %v", err)
+	}
+	embedBytes, err := embeddedProfiles.ReadFile("embedded_profiles/safe-dev.yaml")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	gotBytes, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("read materialized: %v", err)
+	}
+	if !bytes.Equal(embedBytes, gotBytes) {
+		t.Fatalf("materialized YAML differs from embedded source")
+	}
+	stat1, err := os.Stat(path1)
+	if err != nil {
+		t.Fatalf("stat materialized: %v", err)
+	}
+	// Second call must be a no-op when content already matches; the file's
+	// inode timestamp must not change. This protects against race-y rewrites
+	// when multiple `nomos run` invocations execute concurrently.
+	path2, err := materializeEmbeddedProfile("safe-dev", getenv)
+	if err != nil {
+		t.Fatalf("materialize idempotent: %v", err)
+	}
+	if path2 != path1 {
+		t.Fatalf("expected stable materialized path, got %s then %s", path1, path2)
+	}
+	stat2, err := os.Stat(path1)
+	if err != nil {
+		t.Fatalf("stat second pass: %v", err)
+	}
+	if !stat1.ModTime().Equal(stat2.ModTime()) {
+		t.Fatalf("idempotent materialize must not rewrite when content matches")
+	}
+}
+
+func TestMaterializeEmbeddedProfileRejectsUnknownName(t *testing.T) {
+	getenv := func(key string) string {
+		if key == "NOMOS_HOME_OVERRIDE" {
+			return t.TempDir()
+		}
+		return ""
+	}
+	if _, err := materializeEmbeddedProfile("not-a-real-profile", getenv); err == nil {
+		t.Fatal("expected error for unknown embedded profile name")
+	}
+}
+
+// TestRunFallsBackToEmbeddedProfileWhenNotOnDisk simulates the enterprise
+// install path: a workspace without examples/policies/profiles/ and a
+// process working directory whose git root also has no profiles. Before the
+// embed fix, this scenario produced the operator's reported error
+// (`policy bundle path invalid: GetFileAttributesEx ...`). After the fix,
+// the launcher must materialize the profile from the binary, load it
+// successfully, and report PolicyBundleSource == "embedded".
+func TestRunFallsBackToEmbeddedProfileWhenNotOnDisk(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	// Force tier 2 to fail so the embed fallback is exercised; restore the
+	// real provider after the test so we don't leak state to other tests.
+	saved := repoRootForProfileLookup
+	repoRootForProfileLookup = func() string { return "" }
+	t.Cleanup(func() { repoRootForProfileLookup = saved })
+	getenv := func(key string) string {
+		if key == "NOMOS_HOME_OVERRIDE" {
+			return home
+		}
+		return ""
+	}
+	var out bytes.Buffer
+	result, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		Profile:       "safe-dev",
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        getenv,
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher with embed fallback: %v", err)
+	}
+	if result.PolicyBundleSource != profileSourceEmbedded {
+		t.Fatalf("expected PolicyBundleSource=%q, got %q (path=%s)", profileSourceEmbedded, result.PolicyBundleSource, result.PolicyBundlePath)
+	}
+	wantPath := filepath.Join(home, ".nomos", "profiles", "safe-dev.yaml")
+	if result.PolicyBundlePath != wantPath {
+		t.Fatalf("expected materialized path %s, got %s", wantPath, result.PolicyBundlePath)
+	}
+	// The materialized bundle must produce the canonical hash pinned in
+	// testdata/policy-profiles/hashes.json. If this assertion ever fails,
+	// the embedded YAML drifted from the source — the byte-equivalence
+	// test above would catch that earlier, but this is a defense-in-depth
+	// check that the runtime hash is identical regardless of materialize
+	// path.
+	const safeDevPinnedHash = "4d39231248c1f4887034b63745c7b8ec5ad3a3e78ccab4dffb3d31c7f9eaf93d"
+	if result.PolicyBundleHash != safeDevPinnedHash {
+		t.Fatalf("embedded safe-dev hash drift: got %s want %s", result.PolicyBundleHash, safeDevPinnedHash)
+	}
+	if !strings.Contains(out.String(), "Bundle source: embedded") {
+		t.Fatalf("expected printed summary to disclose embedded source:\n%s", out.String())
+	}
+}
+
+func TestRunPrefersWorkspaceProfileWhenPresent(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	// Drop a workspace-local profile that shadows the embedded one. The
+	// launcher must prefer the on-disk file (tier 1) so nomos developers
+	// can iterate on profile YAML without rebuilding the binary.
+	profilesDir := filepath.Join(workspace, "examples", "policies", "profiles")
+	if err := os.MkdirAll(profilesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	embedBytes, err := embeddedProfiles.ReadFile("embedded_profiles/safe-dev.yaml")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	target := filepath.Join(profilesDir, "safe-dev.yaml")
+	if err := os.WriteFile(target, embedBytes, 0o644); err != nil {
+		t.Fatalf("write workspace profile: %v", err)
+	}
+	saved := repoRootForProfileLookup
+	repoRootForProfileLookup = func() string { return "" }
+	t.Cleanup(func() { repoRootForProfileLookup = saved })
+	getenv := func(key string) string {
+		if key == "NOMOS_HOME_OVERRIDE" {
+			return home
+		}
+		return ""
+	}
+	result, err := Run(Options{
+		Agent:         AgentClaude,
+		WorkspaceRoot: workspace,
+		Profile:       "safe-dev",
+		NoLaunch:      true,
+		NomosCommand:  "nomos",
+		Stdout:        &bytes.Buffer{},
+		Getenv:        getenv,
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	if result.PolicyBundleSource != profileSourceWorkspace {
+		t.Fatalf("expected PolicyBundleSource=%q, got %q", profileSourceWorkspace, result.PolicyBundleSource)
+	}
+	wantAbs, _ := filepath.Abs(target)
+	if result.PolicyBundlePath != wantAbs {
+		t.Fatalf("expected workspace-local path %s, got %s", wantAbs, result.PolicyBundlePath)
+	}
+}
+
 func emptyEnv(string) string {
 	return ""
 }

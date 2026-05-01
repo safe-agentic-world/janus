@@ -1,0 +1,317 @@
+version: v1
+rules:
+  # Never expose root dotenv files to local agents.
+  - id: safe-dev-deny-root-env-read
+    action_type: fs.read
+    resource: file://workspace/.env
+    decision: DENY
+
+  # Never expose nested dotenv files to local agents.
+  - id: safe-dev-deny-nested-env-read
+    action_type: fs.read
+    resource: file://workspace/**/.env
+    decision: DENY
+
+  # Block common dotenv variants such as .env.local and .env.production.
+  - id: safe-dev-deny-env-variant-read
+    action_type: fs.read
+    resource: file://workspace/**/.env.*
+    decision: DENY
+
+  # Block local shell environment hooks that often contain secrets.
+  - id: safe-dev-deny-envrc-read
+    action_type: fs.read
+    resource: file://workspace/**/.envrc
+    decision: DENY
+
+  # Block private key files anywhere in the workspace.
+  - id: safe-dev-deny-private-key-read
+    action_type: fs.read
+    resource: file://workspace/**/*.key
+    decision: DENY
+
+  # Block PEM credentials anywhere in the workspace.
+  - id: safe-dev-deny-pem-read
+    action_type: fs.read
+    resource: file://workspace/**/*.pem
+    decision: DENY
+
+  # Block common cloud and cluster credential directories.
+  - id: safe-dev-deny-credential-dirs-read
+    action_type: fs.read
+    resource: file://workspace/**/.kube/**
+    decision: DENY
+
+  # Block netrc machine credentials.
+  - id: safe-dev-deny-netrc-read
+    action_type: fs.read
+    resource: file://workspace/**/.netrc
+    decision: DENY
+
+  # Block SSH key material in checked-out workspaces.
+  - id: safe-dev-deny-ssh-dir-read
+    action_type: fs.read
+    resource: file://workspace/**/.ssh/**
+    decision: DENY
+
+  # Block AWS credential files in checked-out workspaces.
+  - id: safe-dev-deny-aws-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.aws/credentials
+    decision: DENY
+
+  # Block GCP credential directories in checked-out workspaces.
+  - id: safe-dev-deny-gcp-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.gcp/**
+    decision: DENY
+
+  # Block kubeconfig files in checked-out workspaces.
+  - id: safe-dev-deny-kubeconfig-read
+    action_type: fs.read
+    resource: file://workspace/**/kubeconfig
+    decision: DENY
+
+  # Block kubeconfig variants in checked-out workspaces.
+  - id: safe-dev-deny-kubeconfig-variant-read
+    action_type: fs.read
+    resource: file://workspace/**/kubeconfig.*
+    decision: DENY
+
+  # Allow non-secret workspace reads for normal coding tasks.
+  - id: safe-dev-allow-workspace-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+
+  # Allow local workspace writes; path controls remain enforced by the executor.
+  - id: safe-dev-allow-workspace-write
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: ALLOW
+    obligations:
+      sandbox_mode: local
+
+  # Allow deterministic patch application inside the checked-out workspace.
+  - id: safe-dev-allow-workspace-patch
+    action_type: repo.apply_patch
+    resource: repo://local/workspace
+    decision: ALLOW
+    obligations:
+      sandbox_mode: local
+
+  # Require human review before publishing repository state.
+  - id: safe-dev-approve-git-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: REQUIRE_APPROVAL
+    exec_match:
+      argv_patterns:
+        - ["git", "push"]
+        - ["git", "push", "**"]
+    obligations:
+      approval_scope_class: action_type_resource
+      reason: publishing repository changes requires human confirmation
+
+  # Require human review before history-rewriting git operations.
+  - id: safe-dev-approve-git-history-rewrite
+    action_type: process.exec
+    resource: file://workspace/
+    decision: REQUIRE_APPROVAL
+    exec_match:
+      argv_patterns:
+        - ["git", "reset", "--hard"]
+        - ["git", "rebase"]
+        - ["git", "rebase", "**"]
+        - ["git", "checkout", "--"]
+        - ["git", "checkout", "--", "**"]
+    obligations:
+      approval_scope_class: action_type_resource
+      reason: destructive git operations require human confirmation
+
+  # Require approval before infrastructure mutations.
+  - id: safe-dev-approve-infra-mutations
+    action_type: process.exec
+    resource: file://workspace/
+    decision: REQUIRE_APPROVAL
+    exec_match:
+      argv_patterns:
+        - ["terraform", "apply"]
+        - ["terraform", "apply", "**"]
+        - ["terraform", "destroy"]
+        - ["terraform", "destroy", "**"]
+        - ["kubectl", "apply"]
+        - ["kubectl", "apply", "**"]
+        - ["kubectl", "delete"]
+        - ["kubectl", "delete", "**"]
+        - ["helm", "upgrade"]
+        - ["helm", "upgrade", "**"]
+        - ["helm", "uninstall"]
+        - ["helm", "uninstall", "**"]
+    obligations:
+      approval_scope_class: action_type_resource
+      reason: infrastructure mutations require human confirmation
+
+  # Require approval for database mutation clients.
+  - id: safe-dev-approve-db-mutations
+    action_type: process.exec
+    resource: file://workspace/
+    decision: REQUIRE_APPROVAL
+    exec_match:
+      argv_patterns:
+        - ["psql", "**"]
+        - ["mysql", "**"]
+        - ["mongosh", "**"]
+        - ["redis-cli", "**"]
+    obligations:
+      approval_scope_class: action_type_resource
+      reason: database clients may mutate production-like data
+
+  # Allow common read-only git inspection.
+  - id: safe-dev-allow-git-readonly
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "status"]
+        - ["git", "status", "**"]
+        - ["git", "diff"]
+        - ["git", "diff", "**"]
+        - ["git", "log"]
+        - ["git", "log", "**"]
+        - ["git", "show"]
+        - ["git", "show", "**"]
+        - ["git", "branch"]
+        - ["git", "branch", "**"]
+    obligations:
+      sandbox_mode: local
+
+  # Allow local test and build loops.
+  - id: safe-dev-allow-build-test
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["go", "test"]
+        - ["go", "test", "**"]
+        - ["go", "build"]
+        - ["go", "build", "**"]
+        - ["go", "vet"]
+        - ["go", "vet", "**"]
+        - ["npm", "test"]
+        - ["npm", "test", "**"]
+        - ["npm", "run", "**"]
+        - ["python", "-m", "pytest"]
+        - ["python", "-m", "pytest", "**"]
+        - ["py", "-3", "-m", "pytest"]
+        - ["py", "-3", "-m", "pytest", "**"]
+    obligations:
+      sandbox_mode: local
+
+  # Allow dependency installation in the developer profile.
+  - id: safe-dev-allow-package-installs
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["go", "mod", "download"]
+        - ["go", "mod", "download", "**"]
+        - ["go", "mod", "tidy"]
+        - ["npm", "install"]
+        - ["npm", "install", "**"]
+        - ["npm", "ci"]
+        - ["python", "-m", "pip", "install", "**"]
+        - ["py", "-3", "-m", "pip", "install", "**"]
+    obligations:
+      sandbox_mode: local
+
+  # Allow safe local inspection commands.
+  - id: safe-dev-allow-local-inspection
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["pwd"]
+        - ["ls"]
+        - ["ls", "**"]
+        - ["dir"]
+        - ["dir", "**"]
+        - ["go", "version"]
+        - ["node", "--version"]
+        - ["python", "--version"]
+        - ["py", "--version"]
+    obligations:
+      sandbox_mode: local
+
+  # Prevent outbound requests that include bearer or basic auth material.
+  - id: safe-dev-deny-http-authorization-header
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Authorization:
+        present: true
+
+  # Prevent outbound requests that include lowercase authorization headers.
+  - id: safe-dev-deny-http-lowercase-authorization-header
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.authorization:
+        present: true
+
+  # Prevent cookie-bearing HTTP requests from leaking session material.
+  - id: safe-dev-deny-http-cookie-header
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Cookie:
+        present: true
+
+  # Allow read-only requests to common source and package hosts.
+  - id: safe-dev-allow-http-get-allowlist
+    action_type: net.http_request
+    resource: url://github.com/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # Allow read-only requests to Go module mirrors.
+  - id: safe-dev-allow-http-go-proxy
+    action_type: net.http_request
+    resource: url://proxy.golang.org/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # Allow read-only requests to npm registry metadata.
+  - id: safe-dev-allow-http-npm-registry
+    action_type: net.http_request
+    resource: url://registry.npmjs.org/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # Allow read-only requests to Python package indexes.
+  - id: safe-dev-allow-http-python-packages
+    action_type: net.http_request
+    resource: url://pypi.org/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  # Forbid direct secret checkout by default.
+  - id: safe-dev-deny-secret-checkout
+    action_type: secrets.checkout
+    resource: secret://**/**
+    decision: DENY

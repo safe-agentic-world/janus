@@ -6,6 +6,11 @@ The format is based on Keep a Changelog and semantic versioning.
 
 ## [Unreleased]
 
+### Security
+
+- agent launcher now passes `--mcp-config <generated>` to `claude` so the launched Claude Code session is actually governed by Nomos. Previously the launcher set `CLAUDE_MCP_CONFIG` and `CODEX_MCP_CONFIG` environment variables that neither CLI honors, producing sessions that printed `Nomos workspace active` and recorded `default_boundary: true` in the audit log without any MCP server attached. The launcher now records `mcp_wiring_method` (`mcp_config_flag` for Claude, `operator_managed` for Codex) and the resolved `agent_launch_argv`, drops the un-verifiable `default_boundary` claim, and prints a `Verify after launch` block instructing operators to confirm `nomos` shows in `/mcp` before trusting the session.
+- agent launcher now embeds the three default profile bundles (`safe-dev`, `ci-strict`, `prod-locked`) into the binary and materializes them to `~/.nomos/profiles/<name>.yaml` on demand. Previously the launcher only resolved profiles via `<workspaceRoot>/examples/policies/profiles/` or the calling process's git root, so `nomos run` failed closed for every enterprise install path (Homebrew, Scoop, installer script, `go install`) when run from any project directory that was not a checkout of the nomos source repo. The new `Bundle source:` line in the launcher summary and the `profile_source` audit field disclose which tier (`workspace`, `repo`, or `embedded`) was used, and a byte-equivalence test guards the embedded copies against silent drift from `examples/policies/profiles/`.
+
 ### Added
 
 - strong-guarantee deployment guidance and conservative readiness checks (`runtime.strong_guarantee`)
