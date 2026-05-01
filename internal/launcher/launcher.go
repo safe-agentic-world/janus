@@ -755,17 +755,17 @@ func recordLauncherSession(cfg gateway.Config, result Result, now func() time.Ti
 	}
 	defer func() { _ = writer.Close() }()
 	metadata := map[string]any{
-		"workspace_root":       result.WorkspaceRoot,
-		"profile":              result.Profile,
-		"profile_source":       result.PolicyBundleSource,
-		"mcp_tool_surface":     "friendly",
-		"mcp_config_path":      result.MCPConfigPath,
-		"nomos_config_path":    result.ConfigPath,
-		"nomos_version":        version.Version,
-		"dual_tool_warning":    true,
-		"mcp_wiring_method":    result.MCPWiringMethod,
-		"generated_config":     result.GeneratedConfig,
-		"governed_tool_count":  len(governedToolMappings),
+		"workspace_root":      result.WorkspaceRoot,
+		"profile":             result.Profile,
+		"profile_source":      result.PolicyBundleSource,
+		"mcp_tool_surface":    "friendly",
+		"mcp_config_path":     result.MCPConfigPath,
+		"nomos_config_path":   result.ConfigPath,
+		"nomos_version":       version.Version,
+		"dual_tool_warning":   true,
+		"mcp_wiring_method":   result.MCPWiringMethod,
+		"generated_config":    result.GeneratedConfig,
+		"governed_tool_count": len(governedToolMappings),
 	}
 	if len(result.AgentLaunchArgv) > 0 {
 		metadata["agent_launch_argv"] = append([]string(nil), result.AgentLaunchArgv...)
