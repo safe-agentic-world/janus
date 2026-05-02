@@ -40,37 +40,6 @@ Nomos can:
 
 Nomos is **agent-agnostic** and **model-agnostic**. It does not constrain reasoning. It governs execution authority, resource usage, and side effects.
 
-### One decision in one place
-
-Real output from `nomos policy explain` against the checked-in quickstart fixtures:
-
-```
-$ nomos policy explain \
-    --action ./examples/quickstart/actions/deny-env.json \
-    --bundle ./examples/policies/safe.yaml
-
-Agent requested:
-  fs.read  file://workspace/.env
-
-Decision:
-  DENY  (reason_code = deny_by_rule)
-
-Matched rules:
-  safe-deny-root-env
-  safe-deny-nested-env
-
-Audit:
-  trace_id           = quickstart-deny-env
-  policy_bundle_hash = 7ec7bd2481d8cb07eed2c21c21563a62e6fe6277ae8333d1cbf9c01bd8b0bafb
-  assurance_level    = BEST_EFFORT
-
-Minimal allowing change:
-  Adjust the requested action to match an allowlisted resource, or request approval.
-```
-
-Same pipeline whether the caller is Claude Code over MCP, Codex over MCP, or an HTTP-integrated agent. Same fingerprint, same decision, same audit record.
-
-
 ## What Gets Blocked By Default
 
 Examples of actions Nomos can block or approval-gate with starter policy bundles:
