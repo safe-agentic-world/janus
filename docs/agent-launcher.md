@@ -43,9 +43,11 @@ Policy selection:
 The launcher writes a generated MCP client config at `.nomos/agent/session-*/<agent>.mcp.json` with the friendly tool surface and `--quiet`. How that config reaches the agent depends on the agent CLI:
 
 - **Claude Code** — the launcher passes `--mcp-config <generated path>` directly to the `claude` invocation, so Nomos is attached for the launched session by construction. The summary prints `MCP wiring: launcher passes --mcp-config to the agent (verified path)` and the `agent.launcher.session` audit event records `mcp_wiring_method: "mcp_config_flag"` along with the resolved `agent_launch_argv`.
-- **OpenAI Codex CLI** — Codex loads MCP servers from `~/.codex/config.toml` and has no documented one-shot equivalent of `--mcp-config`. The launcher does NOT silently set unverified env vars (the previous `CODEX_MCP_CONFIG` approach was a no-op). Instead the summary prints `MCP wiring: operator-managed (launcher cannot auto-wire MCP for this agent)` and instructs the operator to register the generated MCP config in `~/.codex/config.toml` before trusting the session. The audit event records `mcp_wiring_method: "operator_managed"`.
+- **OpenAI Codex CLI** — current Codex accepts per-invocation config overrides with `-c mcp_servers.nomos.command=...` and `-c mcp_servers.nomos.args=[...]`. The launcher passes those overrides directly, so Nomos is attached for the launched session without mutating `~/.codex/config.toml`. The summary prints `MCP wiring: launcher passes Codex MCP config overrides (verified path)` and the `agent.launcher.session` audit event records `mcp_wiring_method: "codex_config_override"` along with the resolved `agent_launch_argv`.
 
 After the agent starts, run `/mcp` (Claude Code) or the equivalent in your codex session and confirm `nomos` is listed as a connected server and the friendly tools are visible. If `nomos` is missing or those tools are absent, the session is NOT governed — exit and reconfigure before issuing prompts. The launcher cannot verify the agent loaded the MCP config (the agent is a separate process); the post-launch checklist is the operator's verification step.
+
+For Codex specifically, `/mcp` remains the proof point. If `nomos run codex` opens Codex and `/mcp` reports no Nomos tools, the session is ungoverned and the launcher has a wiring bug or the local Codex CLI no longer honors the config override. Do not issue file, shell, HTTP, git, or upstream MCP prompts until `/mcp` confirms `nomos` is connected.
 
 ## Tool Surface
 
@@ -125,7 +127,7 @@ When the launcher needs to load `<name>.yaml`, it tries three sources in order a
 2. **`repo`** — the same path under the calling process's git root. Covers `go run ./cmd/nomos run claude` from a subdirectory.
 3. **`embedded`** — materialized from the binary to `~/.nomos/profiles/<name>.yaml`. This is the path enterprise users hit: install via Homebrew/Scoop/installer, run `nomos run claude` from any project. The file is written atomically (tempfile + rename), with mode `0o600` where the platform supports it, and rewritten only when the on-disk content does not already match the embedded bytes.
 
-The materialized path is stable across launcher invocations, so a persistent agent MCP config (e.g. `~/.codex/config.toml`) can reference `~/.nomos/profiles/<name>.yaml` and continue to point at the right file after the session-scoped artifacts under `.nomos/agent/session-*/` are cleaned up. When you upgrade the nomos binary, the next invocation rewrites the materialized file to match the new embedded YAML; verify the printed `Policy hash:` matches the value pinned in `testdata/policy-profiles/hashes.json` for the version you intend to run.
+The materialized path is stable across launcher invocations, so per-invocation Codex overrides or a persistent agent MCP config can reference `~/.nomos/profiles/<name>.yaml` and continue to point at the right file after the session-scoped artifacts under `.nomos/agent/session-*/` are cleaned up. When you upgrade the nomos binary, the next invocation rewrites the materialized file to match the new embedded YAML; verify the printed `Policy hash:` matches the value pinned in `testdata/policy-profiles/hashes.json` for the version you intend to run.
 
 ## Generated Instructions
 

@@ -188,7 +188,7 @@ func TestInstructionFilesMentionBypassAvoidance(t *testing.T) {
 }
 
 func TestResolveAgentLaunchPlanClaudePassesMCPConfigFlag(t *testing.T) {
-	plan, err := resolveAgentLaunchPlan(AgentClaude, "/tmp/x/claude.mcp.json", []string{"--resume"})
+	plan, err := resolveAgentLaunchPlan(AgentClaude, "/tmp/x/claude.mcp.json", mcpClientServer{}, []string{"--resume"})
 	if err != nil {
 		t.Fatalf("resolve plan: %v", err)
 	}
@@ -215,16 +215,27 @@ func TestResolveAgentLaunchPlanClaudePassesMCPConfigFlag(t *testing.T) {
 	}
 }
 
-func TestResolveAgentLaunchPlanCodexIsOperatorManaged(t *testing.T) {
-	plan, err := resolveAgentLaunchPlan(AgentCodex, "/tmp/x/codex.mcp.json", []string{"some-arg"})
+func TestResolveAgentLaunchPlanCodexPassesMCPConfigOverrides(t *testing.T) {
+	server := mcpClientServer{
+		Command: "nomos",
+		Args:    []string{"mcp", "-c", `C:\tmp\nomos.json`, "-p", `C:\tmp\policy.yaml`, "--tool-surface", "friendly", "--quiet"},
+	}
+	plan, err := resolveAgentLaunchPlan(AgentCodex, "/tmp/x/codex.mcp.json", server, []string{"some-arg"})
 	if err != nil {
 		t.Fatalf("resolve plan: %v", err)
 	}
-	if plan.WiringMethod != mcpWiringOperatorManaged {
-		t.Fatalf("expected wiring method %q, got %q", mcpWiringOperatorManaged, plan.WiringMethod)
+	if plan.WiringMethod != mcpWiringCodexConfigOverride {
+		t.Fatalf("expected wiring method %q, got %q", mcpWiringCodexConfigOverride, plan.WiringMethod)
 	}
-	if len(plan.Argv) != 1 || plan.Argv[0] != "some-arg" {
-		t.Fatalf("expected argv to be user args only, got %+v", plan.Argv)
+	got := strings.Join(plan.Argv, "\x00")
+	for _, want := range []string{
+		"-c\x00mcp_servers.nomos.command=\"nomos\"",
+		"-c\x00mcp_servers.nomos.args=[\"mcp\",\"-c\",\"C:\\\\tmp\\\\nomos.json\",\"-p\",\"C:\\\\tmp\\\\policy.yaml\",\"--tool-surface\",\"friendly\",\"--quiet\"]",
+		"some-arg",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected argv to contain %q, got %+v", want, plan.Argv)
+		}
 	}
 	for _, e := range plan.Env {
 		if strings.HasPrefix(e, "CODEX_MCP_CONFIG=") {
@@ -234,13 +245,13 @@ func TestResolveAgentLaunchPlanCodexIsOperatorManaged(t *testing.T) {
 }
 
 func TestResolveAgentLaunchPlanRejectsEmptyMCPConfig(t *testing.T) {
-	if _, err := resolveAgentLaunchPlan(AgentClaude, "", nil); err == nil {
+	if _, err := resolveAgentLaunchPlan(AgentClaude, "", mcpClientServer{}, nil); err == nil {
 		t.Fatal("expected error for empty mcp config path")
 	}
 }
 
 func TestResolveAgentLaunchPlanRejectsUnknownAgent(t *testing.T) {
-	if _, err := resolveAgentLaunchPlan("not-a-real-agent", "/tmp/x.json", nil); err == nil {
+	if _, err := resolveAgentLaunchPlan("not-a-real-agent", "/tmp/x.json", mcpClientServer{}, nil); err == nil {
 		t.Fatal("expected error for unknown agent")
 	}
 }
@@ -280,7 +291,7 @@ func TestRunClaudePopulatesWiringMethodAndArgv(t *testing.T) {
 	}
 }
 
-func TestRunCodexRecordsOperatorManagedAndPrintsManualSetup(t *testing.T) {
+func TestRunCodexPassesConfigOverridesAndPrintsVerification(t *testing.T) {
 	workspace := t.TempDir()
 	var out bytes.Buffer
 	result, err := Run(Options{
@@ -295,15 +306,21 @@ func TestRunCodexRecordsOperatorManagedAndPrintsManualSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run launcher: %v", err)
 	}
-	if result.MCPWiringMethod != mcpWiringOperatorManaged {
-		t.Fatalf("expected MCPWiringMethod %q, got %q", mcpWiringOperatorManaged, result.MCPWiringMethod)
+	if result.MCPWiringMethod != mcpWiringCodexConfigOverride {
+		t.Fatalf("expected MCPWiringMethod %q, got %q", mcpWiringCodexConfigOverride, result.MCPWiringMethod)
+	}
+	gotArgv := strings.Join(result.AgentLaunchArgv, "\x00")
+	for _, want := range []string{"mcp_servers.nomos.command", "mcp_servers.nomos.args"} {
+		if !strings.Contains(gotArgv, want) {
+			t.Fatalf("expected codex argv override %q, got %+v", want, result.AgentLaunchArgv)
+		}
 	}
 	got := out.String()
 	for _, want := range []string{
-		"MCP wiring:    operator-managed",
+		"MCP wiring:    launcher passes Codex MCP config overrides",
 		"Verify after launch:",
-		"launcher does NOT auto-wire MCP for codex",
-		"~/.codex/config.toml",
+		"In codex, run `/mcp`",
+		"read_file, write_file, apply_patch, run_command, http_request",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)
