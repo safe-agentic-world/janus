@@ -193,6 +193,85 @@ func TestToolsListAuditMetadataRecorded(t *testing.T) {
 	}
 }
 
+// Regression for M63 vs M31 precedence: under a profile that allowlists
+// process.exec for legitimate inputs but denies the synthetic discovery probe
+// (argv=["echo","sample"]), the probe-based hider used to drop run_command from
+// tools/list — letting the agent escape to native shell. The rule-based
+// capability scan must keep run_command advertised because process.exec has
+// matching ALLOW rules for the calling identity.
+func TestToolsListAdvertisesRunCommandWhenProbeArgvIsNotAllowlisted(t *testing.T) {
+	bundle := `{"version":"v1","rules":[
+		{"id":"allow-exec-go-test","action_type":"process.exec","resource":"file://workspace/","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"],"exec_match":{"argv_patterns":[["go","test"],["go","test","**"]]}}
+	]}`
+	server := newToolDiscoveryTestServerWithOptions(t, bundle, RuntimeOptions{ToolSurface: ToolSurfaceFriendly})
+
+	tools := server.toolsList()
+	if !toolListHasName(tools, "run_command") {
+		t.Fatalf("expected run_command to be advertised under M63 precedence even though probe argv [echo sample] is not on the allowlist, got %+v", tools)
+	}
+	if toolListHasName(tools, "http_request") {
+		t.Fatalf("did not expect http_request to be advertised when no net.http_request rule matches identity, got %+v", tools)
+	}
+}
+
+// Regression for M63 vs M31 precedence: under a profile that allowlists
+// net.http_request for github.com only, the synthetic discovery probe to
+// example.com used to default-deny and hide http_request entirely. The
+// rule-based capability scan must keep http_request advertised because
+// net.http_request has at least one matching ALLOW rule for the identity.
+func TestToolsListAdvertisesHttpRequestWhenProbeHostIsNotAllowlisted(t *testing.T) {
+	bundle := `{"version":"v1","rules":[
+		{"id":"allow-http-github","action_type":"net.http_request","resource":"url://github.com/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}
+	]}`
+	server := newToolDiscoveryTestServerWithOptions(t, bundle, RuntimeOptions{ToolSurface: ToolSurfaceFriendly})
+
+	tools := server.toolsList()
+	if !toolListHasName(tools, "http_request") {
+		t.Fatalf("expected http_request to be advertised under M63 precedence even though probe url example.com is not on the allowlist, got %+v", tools)
+	}
+}
+
+// When net.http_request has only a REQUIRE_APPROVAL rule for the identity, the
+// tool is advertised with approval_required metadata (not hidden, not
+// immediately allowed).
+func TestToolsListAdvertisesApprovalRequiredHttpRequest(t *testing.T) {
+	bundle := `{"version":"v1","rules":[
+		{"id":"approval-http","action_type":"net.http_request","resource":"url://api.example.com/**","decision":"REQUIRE_APPROVAL","principals":["system"],"agents":["nomos"],"environments":["dev"]}
+	]}`
+	server := newToolDiscoveryTestServerWithOptions(t, bundle, RuntimeOptions{ToolSurface: ToolSurfaceFriendly})
+
+	tools := server.toolsList()
+	entry := toolListEntry(tools, "http_request")
+	if entry == nil {
+		t.Fatalf("expected http_request advertised when REQUIRE_APPROVAL rule matches identity, got %+v", tools)
+	}
+	meta, ok := entry["_meta"].(map[string]any)
+	if !ok || meta["approval_required"] != true {
+		t.Fatalf("expected approval_required metadata on http_request, got %+v", entry)
+	}
+}
+
+// When no rule references a given action_type for the calling identity at all,
+// the corresponding direct tool stays hidden — M63 advertises governed tools,
+// not ungoverned ones. This guards against regressing into "advertise
+// everything" behavior.
+func TestToolsListHidesDirectToolWhenNoRuleMatchesIdentity(t *testing.T) {
+	bundle := `{"version":"v1","rules":[
+		{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW","principals":["system"],"agents":["nomos"],"environments":["dev"]}
+	]}`
+	server := newToolDiscoveryTestServerWithOptions(t, bundle, RuntimeOptions{ToolSurface: ToolSurfaceFriendly})
+
+	tools := server.toolsList()
+	for _, hidden := range []string{"write_file", "apply_patch", "run_command", "http_request"} {
+		if toolListHasName(tools, hidden) {
+			t.Fatalf("expected %s hidden when no matching rule for its action_type exists, got %+v", hidden, tools)
+		}
+	}
+	if !toolListHasName(tools, "read_file") {
+		t.Fatalf("expected read_file advertised when fs.read rule matches identity, got %+v", tools)
+	}
+}
+
 type failingExternalPolicy struct {
 	err error
 }

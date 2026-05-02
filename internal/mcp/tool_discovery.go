@@ -7,6 +7,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/action"
 	"github.com/safe-agentic-world/nomos/internal/identity"
 	"github.com/safe-agentic-world/nomos/internal/policy"
+	"github.com/safe-agentic-world/nomos/internal/service"
 )
 
 type toolDiscoverySummary struct {
@@ -113,7 +114,7 @@ func (s *Server) toolsListForIdentityWithSummary(id identity.VerifiedIdentity, f
 		if spec.Exempt {
 			continue
 		}
-		discovery, err := s.discoverToolVisibility(id, spec.ActionType, spec.Resource, spec.Params)
+		discovery, err := s.discoverDirectToolVisibility(id, spec)
 		if err != nil || discovery == toolDiscoveryHidden {
 			summary.hidden++
 			continue
@@ -141,6 +142,63 @@ func (s *Server) toolsListForIdentityWithSummary(id identity.VerifiedIdentity, f
 		}
 	}
 	return tools, summary
+}
+
+// discoverDirectToolVisibility decides whether a Nomos-direct tool (one of the
+// friendly aliases or canonical nomos.* names) is advertised in tools/list under
+// the calling identity.
+//
+// Two-stage decision:
+//
+//  1. External-policy health probe — issue a synthetic EvaluateAction so that an
+//     error from a configured external policy backend (e.g. an unreachable OPA)
+//     causes the tool to be hidden. Decision outcomes from the probe are
+//     discarded; only the error path matters here. This preserves the
+//     fail-closed safety contract that an unhealthy policy backend must not
+//     advertise governed tools.
+//
+//  2. Rule-based capability scan — match the local policy bundle by
+//     action_type and identity only, ignoring resource pattern, params, and
+//     exec_match. If at least one ALLOW or REQUIRE_APPROVAL rule matches, the
+//     tool is advertised. This is M63's "Nomos becomes the default execution
+//     boundary" precedence over M31's resource-aware probe-based hiding: a
+//     synthetic probe with placeholder values (argv=["echo","sample"],
+//     url://example.com/status) must not cause governed tools to disappear
+//     from tools/list under realistic profiles like safe-dev, where those
+//     specific placeholders legitimately default-deny but the action_type as
+//     a whole has many legitimate allow paths.
+//
+// Resource-aware hiding still applies to upstream MCP fanout via
+// discoverToolVisibility, where each tool maps to a distinct mcp:// resource
+// and the resource pattern carries the visibility signal.
+func (s *Server) discoverDirectToolVisibility(id identity.VerifiedIdentity, spec toolDiscoverySpec) (toolDiscoveryMode, error) {
+	if strings.TrimSpace(spec.ActionType) == "" {
+		return toolDiscoveryAllowed, nil
+	}
+	if act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "mcp_discovery",
+		ActionType:    spec.ActionType,
+		Resource:      spec.Resource,
+		Params:        mustJSONBytes(spec.Params),
+		TraceID:       "mcp_discovery",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, id); err == nil {
+		if _, decision, evalErr := s.service.EvaluateAction(act); evalErr != nil {
+			return toolDiscoveryHidden, evalErr
+		} else if decision.ReasonCode == "deny_by_external_policy_error" {
+			return toolDiscoveryHidden, nil
+		}
+	}
+	cap := s.service.ActionCapability(spec.ActionType, id)
+	switch cap.State {
+	case service.ToolStateAllow, service.ToolStateMixed:
+		return toolDiscoveryAllowed, nil
+	case service.ToolStateRequireApproval:
+		return toolDiscoveryApprovalRequired, nil
+	default:
+		return toolDiscoveryHidden, nil
+	}
 }
 
 func (s *Server) discoverToolVisibility(id identity.VerifiedIdentity, actionType, resource string, params map[string]any) (toolDiscoveryMode, error) {

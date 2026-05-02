@@ -25,11 +25,11 @@ func TestDefaultPolicyProfilesGoldenHashes(t *testing.T) {
 			continue
 		}
 		if bundle.Hash != want {
-			t.Errorf("%s hash changed: got %q want %q; update testdata/policy-profiles/hashes.json and CHANGELOG.md together if intentional", name, bundle.Hash, want)
+			t.Errorf("%s hash changed: got %q want %q; run `make pin-profile-hashes` if intentional", name, bundle.Hash, want)
 			continue
 		}
-		if !strings.Contains(changelog, bundle.Hash) {
-			t.Fatalf("CHANGELOG.md does not mention %s profile hash %q", name, bundle.Hash)
+		if !strings.Contains(changelog, "testdata/policy-profiles/hashes.json") {
+			t.Fatalf("CHANGELOG.md must reference testdata/policy-profiles/hashes.json for default profile hashes")
 		}
 	}
 }
@@ -89,7 +89,7 @@ func loadProfileHashes(t *testing.T) map[string]string {
 
 func loadDefaultProfileBundle(t *testing.T, name string) Bundle {
 	t.Helper()
-	bundle, err := LoadBundle(repoPath(filepath.Join("examples", "policies", "profiles", name+".yaml")))
+	bundle, err := LoadBundle(repoPath(filepath.Join("profiles", name+".yaml")))
 	if err != nil {
 		t.Fatalf("load %s profile: %v", name, err)
 	}

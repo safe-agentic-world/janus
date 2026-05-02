@@ -24,7 +24,7 @@ This plan uses checked-in files wherever possible and calls out when a temporary
 This plan covers:
 
 - CLI commands: `version`, `policy test`, `policy explain`, `doctor`, `serve`, `mcp`, `run`, `approvals list`
-- policy bundles: JSON and YAML; the three default profiles under `examples/policies/profiles/`
+- policy bundles: JSON and YAML; the three default profiles under `profiles/`
 - transports: MCP stdio and HTTP
 - action types: `fs.read`, `fs.write`, `repo.apply_patch`, `process.exec`, `net.http_request`, `secrets.checkout`
 - friendly MCP tool surface: `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`
@@ -55,7 +55,7 @@ C:\Users\prudh\repos\safe-agentic-world\nomos
 
 ## Release Compatibility Note
 
-The example policy set uses `exec_match` for generic `process.exec` policy matching, the example config uses ordered multi-bundle loading, and the launcher resolves default profiles from `examples/policies/profiles/`.
+The example policy set uses `exec_match` for generic `process.exec` policy matching, the example config uses ordered multi-bundle loading, and the launcher resolves default profiles from `profiles/`.
 
 That means:
 
@@ -133,9 +133,9 @@ nomos policy test --action .\examples\quickstart\actions\deny-env.json --bundle 
 3. Confirm the three M63 default profiles parse and emit a stable bundle hash:
 
 ```powershell
-nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\examples\policies\profiles\safe-dev.yaml
-nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\examples\policies\profiles\ci-strict.yaml
-nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\examples\policies\profiles\prod-locked.yaml
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\profiles\safe-dev.yaml
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\profiles\ci-strict.yaml
+nomos policy test --action .\examples\quickstart\actions\allow-readme.json --bundle .\profiles\prod-locked.yaml
 ```
 
 Expected:
@@ -231,7 +231,7 @@ $ConfigAll = Join-Path $Repo "examples\configs\config.all-fields.example.json"
 $SafeYaml = Join-Path $Repo "examples\policies\safe.yaml"
 $SafeJson = Join-Path $Repo "examples\policies\safe.json"
 $AllFieldsYaml = Join-Path $Repo "examples\policies\all-fields.example.yaml"
-$ProfilesDir = Join-Path $Repo "examples\policies\profiles"
+$ProfilesDir = Join-Path $Repo "profiles"
 $SafeDevYaml = Join-Path $ProfilesDir "safe-dev.yaml"
 $CIStrictYaml = Join-Path $ProfilesDir "ci-strict.yaml"
 $ProdLockedYaml = Join-Path $ProfilesDir "prod-locked.yaml"
@@ -375,7 +375,7 @@ Expected:
 
 ## Phase 3: M63 Default Safe Policy Profiles
 
-The M63 launcher ships three hand-authored, enterprise-grade YAML profiles under `examples/policies/profiles/`. They are additive-only across releases — rule IDs and decisions must not silently drift. This phase exercises each profile against checked-in actions and a few inline ad-hoc actions.
+The M63 launcher ships three hand-authored, enterprise-grade YAML profiles under `profiles/`. They are additive-only across releases — rule IDs and decisions must not silently drift. This phase exercises each profile against checked-in actions and a few inline ad-hoc actions.
 
 ### Scenario 11: All three profiles parse and emit a stable bundle hash
 
@@ -545,7 +545,7 @@ Expected:
   - `Agent: claude`
   - `Workspace: <repo root>`
   - `Profile: safe-dev`
-  - `Policy bundle: ...\examples\policies\profiles\safe-dev.yaml`
+  - `Policy bundle: ...\profiles\safe-dev.yaml`
   - `Policy hash: <hash>` (matches Phase 3 Scenario 11)
   - `Assurance: BEST_EFFORT`
   - `MCP config: <dry-run>`
@@ -696,7 +696,7 @@ Expected:
 
 - `Bundle source: embedded (materialized to ~/.nomos/profiles/)`
 - `Policy bundle:` points at `~/.nomos/profiles/safe-dev.yaml` (`$env:USERPROFILE\.nomos\profiles\safe-dev.yaml` on Windows)
-- `Policy hash:` matches the safe-dev value pinned in `CHANGELOG.md` (currently `4d39231248c1f4887034b63745c7b8ec5ad3a3e78ccab4dffb3d31c7f9eaf93d`)
+- `Policy hash:` matches the safe-dev value pinned in `testdata/policy-profiles/hashes.json`
 
 Verify the materialized file persisted:
 
@@ -708,6 +708,8 @@ Expected:
 
 - file exists and is non-empty
 - a second invocation of `nomos run claude --no-launch --profile safe-dev` does NOT update `LastWriteTime` (idempotent rewrite)
+
+> **`sqlite3` prerequisite for the audit-DB inspection step below:** Windows does not ship `sqlite3.exe`. If `nomos doctor` works but `sqlite3 --version` fails, install the SQLite tools (`winget install SQLite.SQLite`, scoop, or download from sqlite.org) and add the install dir to `PATH` before running the inspection step. The launcher itself does not need sqlite3 — only the manual audit verification.
 
 ### Scenario 25b: Verify `--mcp-config` is passed to Claude Code
 
@@ -901,7 +903,7 @@ Expected:
 
 ### Scenario 35: Friendly aliases are advertised
 
-If you registered Nomos with `--tool-surface friendly`, the model-facing tool list should expose the M63 friendly aliases:
+If you registered Nomos with `--tool-surface friendly`, the model-facing tool list should expose all M63 friendly aliases under any profile (including `safe-dev`) where each action_type has at least one ALLOW or REQUIRE_APPROVAL rule for the calling identity:
 
 ```text
 List the MCP tools nomos exposes and show their names.
@@ -912,6 +914,8 @@ Expected:
 - `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request` appear
 - the canonical `nomos_*` tool names are NOT advertised in friendly mode
 - (with `--tool-surface both`, both forms appear)
+
+> **Why this works under `safe-dev`:** advertisement uses a rule-based capability scan (action_type + identity only) — not a synthetic probe. Tools whose action_type has at least one matching ALLOW or REQUIRE_APPROVAL rule appear, even if a placeholder probe (`echo sample`, `example.com`) would default-deny under the active profile. See **Tool Visibility Contract (M63 > M31 Precedence)** in `docs/agent-launcher.md`. If a profile has no rule at all for an action_type (e.g. a custom locked-down profile that omits `net.http_request`), the corresponding tool stays hidden.
 
 ### Scenario 36: Allowed read through Nomos
 

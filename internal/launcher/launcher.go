@@ -22,13 +22,10 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/version"
 )
 
-// embeddedProfiles ships the canonical default profile bundles inside the
-// binary so `nomos run` works for operators who installed nomos via Homebrew,
-// Scoop, the installer script, or `go install` and run it from any project
-// directory. The byte-for-byte equivalence with examples/policies/profiles/
-// is enforced by a unit test in this package; if the source profiles change,
-// the embedded copies must be updated in lockstep (and the hashes pinned in
-// testdata/policy-profiles/hashes.json updated through the policy test).
+// embeddedProfiles ships generated copies of the canonical default profiles
+// from /profiles so `nomos run` works for operators who installed nomos via
+// Homebrew, Scoop, the installer script, or `go install` and run it from any
+// project directory. Run `make pin-profile-hashes` after editing /profiles.
 //
 //go:embed embedded_profiles/*.yaml
 var embeddedProfiles embed.FS
@@ -299,28 +296,27 @@ func resolvePolicySelection(workspaceRoot, policyBundlePath, profile string, opt
 //
 // Lookup tiers, in order:
 //
-//  1. Workspace checkout: <workspaceRoot>/examples/policies/profiles/<name>.yaml.
+//  1. Workspace checkout: <workspaceRoot>/profiles/<name>.yaml.
 //     This lets a nomos developer iterate on a profile YAML inside their own
 //     checkout without rebuilding the binary.
 //
-//  2. Calling-process git root: <repoRootForProfileLookup()>/examples/policies/
-//     profiles/<name>.yaml. Covers `go run ./cmd/nomos run claude` from a
+//  2. Calling-process git root: <repoRootForProfileLookup()>/profiles/<name>.yaml.
+//     Covers `go run ./cmd/nomos run claude` from a
 //     subdirectory of a nomos checkout where the workspace root is not the
 //     repo root.
 //
 //  3. Embedded: materialize the profile baked into the binary to
 //     ~/.nomos/profiles/<name>.yaml. This is the path enterprise users hit:
 //     they install nomos via Homebrew/installer/`go install` and run from
-//     their own project directory which has no examples/policies/profiles/
+//     their own project directory which has no profiles/
 //     anywhere on disk. Without this tier, `nomos run` is broken outside a
 //     nomos source checkout.
 //
-// Tier 3 is the integrity-critical path. The embedded YAML is byte-for-byte
-// identical to the repo-shipped source — guarded by
-// TestEmbeddedProfilesMatchRepoSourceByteForByte — and the resulting bundle
-// hash matches the value pinned in testdata/policy-profiles/hashes.json.
+// Tier 3 is the integrity-critical path. The embedded YAML is generated from
+// /profiles by `make pin-profile-hashes`, and tests verify generated outputs
+// are current.
 func locateOrMaterializeProfile(profile, workspaceRoot string, opts Options) (string, string, error) {
-	candidate := filepath.Join(workspaceRoot, "examples", "policies", "profiles", profile+".yaml")
+	candidate := filepath.Join(workspaceRoot, "profiles", profile+".yaml")
 	if _, err := os.Stat(candidate); err == nil {
 		abs, err := filepath.Abs(candidate)
 		if err != nil {
@@ -329,7 +325,7 @@ func locateOrMaterializeProfile(profile, workspaceRoot string, opts Options) (st
 		return abs, profileSourceWorkspace, nil
 	}
 	if root := strings.TrimSpace(repoRootForProfileLookup()); root != "" {
-		candidate := filepath.Join(root, "examples", "policies", "profiles", profile+".yaml")
+		candidate := filepath.Join(root, "profiles", profile+".yaml")
 		if _, err := os.Stat(candidate); err == nil {
 			abs, err := filepath.Abs(candidate)
 			if err != nil {
@@ -360,7 +356,7 @@ func locateOrMaterializeProfile(profile, workspaceRoot string, opts Options) (st
 //
 // This function is the integrity-critical materialization path for the embed
 // fallback; the byte-equivalence test in this package guarantees the embed
-// content equals the canonical YAML in examples/policies/profiles/.
+// content equals the generated YAML derived from /profiles.
 func materializeEmbeddedProfile(name string, getenv func(string) string) (string, error) {
 	data, err := embeddedProfiles.ReadFile("embedded_profiles/" + name + ".yaml")
 	if err != nil {
@@ -641,7 +637,7 @@ func displayPolicyBundleSource(source string) string {
 	case profileSourceCustom:
 		return "custom (--policy-bundle path provided by operator)"
 	case profileSourceWorkspace:
-		return "workspace (./examples/policies/profiles/)"
+		return "workspace (./profiles/)"
 	case profileSourceRepo:
 		return "nomos repo checkout"
 	case profileSourceEmbedded:

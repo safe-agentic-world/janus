@@ -380,22 +380,16 @@ func TestLauncherAuditMetadataReflectsWiringTruthfully(t *testing.T) {
 	}
 }
 
-// TestEmbeddedProfilesMatchRepoSourceByteForByte is the drift guard that
-// keeps internal/launcher/embedded_profiles/<name>.yaml byte-identical to
-// examples/policies/profiles/<name>.yaml. The launcher embeds the YAML so
-// the binary works for enterprise installs where the repo source is not on
-// disk; this test prevents the embedded copies from silently drifting away
-// from the canonical hand-authored bundles. If you intentionally update a
-// profile, copy the change into both locations and update
-// testdata/policy-profiles/hashes.json + CHANGELOG.md (asserted by
-// TestDefaultPolicyProfilesGoldenHashes in internal/policy).
-func TestEmbeddedProfilesMatchRepoSourceByteForByte(t *testing.T) {
+// TestEmbeddedProfilesGeneratedFromCanonicalProfiles keeps the generated
+// embedded launcher profiles byte-identical to the canonical bundles in
+// /profiles. If this fails, run `make pin-profile-hashes`.
+func TestEmbeddedProfilesGeneratedFromCanonicalProfiles(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}
 	for _, name := range []string{"safe-dev", "ci-strict", "prod-locked"} {
-		repoBytes, err := os.ReadFile(filepath.Join(repoRoot, "examples", "policies", "profiles", name+".yaml"))
+		repoBytes, err := os.ReadFile(filepath.Join(repoRoot, "profiles", name+".yaml"))
 		if err != nil {
 			t.Fatalf("read repo profile %s: %v", name, err)
 		}
@@ -404,7 +398,7 @@ func TestEmbeddedProfilesMatchRepoSourceByteForByte(t *testing.T) {
 			t.Fatalf("read embedded profile %s: %v", name, err)
 		}
 		if !bytes.Equal(repoBytes, embedBytes) {
-			t.Fatalf("embedded profile %s.yaml has drifted from examples/policies/profiles/%s.yaml; copy the canonical YAML into internal/launcher/embedded_profiles/", name, name)
+			t.Fatalf("embedded profile %s.yaml has drifted from profiles/%s.yaml; run `make pin-profile-hashes`", name, name)
 		}
 	}
 }
@@ -474,7 +468,7 @@ func TestMaterializeEmbeddedProfileRejectsUnknownName(t *testing.T) {
 }
 
 // TestRunFallsBackToEmbeddedProfileWhenNotOnDisk simulates the enterprise
-// install path: a workspace without examples/policies/profiles/ and a
+// install path: a workspace without profiles/ and a
 // process working directory whose git root also has no profiles. Before the
 // embed fix, this scenario produced the operator's reported error
 // (`policy bundle path invalid: GetFileAttributesEx ...`). After the fix,
@@ -517,10 +511,7 @@ func TestRunFallsBackToEmbeddedProfileWhenNotOnDisk(t *testing.T) {
 	}
 	// The materialized bundle must produce the canonical hash pinned in
 	// testdata/policy-profiles/hashes.json. If this assertion ever fails,
-	// the embedded YAML drifted from the source — the byte-equivalence
-	// test above would catch that earlier, but this is a defense-in-depth
-	// check that the runtime hash is identical regardless of materialize
-	// path.
+	// the generated embedded YAML drifted from the canonical profile.
 	const safeDevPinnedHash = "4d39231248c1f4887034b63745c7b8ec5ad3a3e78ccab4dffb3d31c7f9eaf93d"
 	if result.PolicyBundleHash != safeDevPinnedHash {
 		t.Fatalf("embedded safe-dev hash drift: got %s want %s", result.PolicyBundleHash, safeDevPinnedHash)
@@ -536,7 +527,7 @@ func TestRunPrefersWorkspaceProfileWhenPresent(t *testing.T) {
 	// Drop a workspace-local profile that shadows the embedded one. The
 	// launcher must prefer the on-disk file (tier 1) so nomos developers
 	// can iterate on profile YAML without rebuilding the binary.
-	profilesDir := filepath.Join(workspace, "examples", "policies", "profiles")
+	profilesDir := filepath.Join(workspace, "profiles")
 	if err := os.MkdirAll(profilesDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
