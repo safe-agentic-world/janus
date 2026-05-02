@@ -71,6 +71,25 @@ func LoadBundle(path string) (Bundle, error) {
 	return LoadBundleWithOptions(path, LoadOptions{})
 }
 
+func LoadBundleBytes(data []byte, sourceName string) (Bundle, error) {
+	if strings.TrimSpace(sourceName) == "" {
+		sourceName = "bundle.yaml"
+	}
+	bundle, err := decodeBundle(data, sourceName)
+	if err != nil {
+		return Bundle{}, err
+	}
+	if err := bundle.Validate(); err != nil {
+		return Bundle{}, err
+	}
+	canonical, err := canonicalBundleBytes(bundle)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("canonicalize bundle: %w", err)
+	}
+	bundle.Hash = canonicaljson.HashSHA256(canonical)
+	return bundle, nil
+}
+
 func LoadBundleWithOptions(path string, options LoadOptions) (Bundle, error) {
 	if path == "" {
 		return Bundle{}, errors.New("bundle path is required")
@@ -79,24 +98,12 @@ func LoadBundleWithOptions(path string, options LoadOptions) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, fmt.Errorf("read bundle: %w", err)
 	}
-	bundle, err := decodeBundle(data, path)
-	if err != nil {
-		return Bundle{}, err
-	}
-	if err := bundle.Validate(); err != nil {
-		return Bundle{}, err
-	}
 	if options.VerifySignature {
 		if err := verifyBundleSignature(data, options.SignaturePath, options.PublicKeyPath); err != nil {
 			return Bundle{}, err
 		}
 	}
-	canonical, err := canonicalBundleBytes(bundle)
-	if err != nil {
-		return Bundle{}, fmt.Errorf("canonicalize bundle: %w", err)
-	}
-	bundle.Hash = canonicaljson.HashSHA256(canonical)
-	return bundle, nil
+	return LoadBundleBytes(data, path)
 }
 
 func decodeBundle(data []byte, path string) (Bundle, error) {

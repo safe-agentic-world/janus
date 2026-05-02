@@ -166,11 +166,78 @@ func TestHelpTextStability(t *testing.T) {
 	if !strings.Contains(root, "doctor") {
 		t.Fatalf("expected doctor command in root help: %q", root)
 	}
+	if !strings.Contains(root, "profiles") {
+		t.Fatalf("expected profiles command in root help: %q", root)
+	}
 	if !strings.Contains(mcp, "-c, --config") || !strings.Contains(mcp, "-p, --policy-bundle") || !strings.Contains(mcp, "-l, --log-level") || !strings.Contains(mcp, "-q, --quiet") {
 		t.Fatalf("missing short/long flags in mcp help: %q", mcp)
 	}
 	if !strings.Contains(mcp, "nomos mcp serve --http --listen 127.0.0.1:8090") {
 		t.Fatalf("expected mcp serve example in help: %q", mcp)
+	}
+}
+
+func TestProfilesListShowsEmbeddedHashes(t *testing.T) {
+	var out bytes.Buffer
+	if err := executeProfilesList([]string{"--format", "json"}, &out); err != nil {
+		t.Fatalf("profiles list: %v", err)
+	}
+	var records []profileListRecord
+	if err := json.Unmarshal(out.Bytes(), &records); err != nil {
+		t.Fatalf("decode profiles list: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected three default profiles, got %+v", records)
+	}
+	found := map[string]bool{}
+	for _, record := range records {
+		found[record.Name] = true
+		if record.Hash == "" || record.Summary == "" {
+			t.Fatalf("profile record missing hash or summary: %+v", record)
+		}
+	}
+	for _, name := range []string{"safe-dev", "ci-strict", "prod-locked"} {
+		if !found[name] {
+			t.Fatalf("missing profile %s in %+v", name, records)
+		}
+	}
+}
+
+func TestProfilesShowReturnsYAML(t *testing.T) {
+	var out bytes.Buffer
+	if err := executeProfilesShow([]string{"safe-dev"}, &out); err != nil {
+		t.Fatalf("profiles show: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "version: v1") || !strings.Contains(got, "safe-dev-deny-root-env-read") {
+		t.Fatalf("unexpected profile YAML:\n%s", got)
+	}
+}
+
+func TestProfilesVerifyComparesCanonicalSourceWhenPresent(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Chdir(filepath.Join(wd, "..", ".."))
+	var out bytes.Buffer
+	if err := executeProfilesVerify([]string{"--format", "json"}, &out); err != nil {
+		t.Fatalf("profiles verify: %v", err)
+	}
+	var records []profileVerifyRecord
+	if err := json.Unmarshal(out.Bytes(), &records); err != nil {
+		t.Fatalf("decode profiles verify: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected three default profiles, got %+v", records)
+	}
+	for _, record := range records {
+		if !record.EmbeddedValid || record.EmbeddedHash == "" {
+			t.Fatalf("embedded profile invalid: %+v", record)
+		}
+		if !record.SourcePresent || !record.SourceMatches {
+			t.Fatalf("canonical source should be present and match in repo tests: %+v", record)
+		}
 	}
 }
 

@@ -12,7 +12,7 @@
 </div>
 
 <div align="center">
-  <h3>Nomos is an execution firewall for AI agents.</h3>
+  <h3>Secure every action your AI agents take.</h3>
 </div>
 
 <div align="center">

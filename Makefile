@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint release-build
+.PHONY: build test fmt lint pin-profile-hashes release-build
 
 VERSION ?= v1.0.0
 COMMIT ?= $(shell git rev-parse --short HEAD)
@@ -16,6 +16,9 @@ fmt:
 
 lint:
 	go vet ./...
+
+pin-profile-hashes:
+	go run ./scripts/pin_profile_hashes.go
 
 release-build:
 	go build -ldflags "$(LDFLAGS)" -o bin/nomos ./cmd/nomos

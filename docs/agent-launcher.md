@@ -59,6 +59,18 @@ The launcher configures MCP with the friendly tool surface:
 
 Audit, policy, explain, and approvals still use canonical action types. Existing compatibility names such as `nomos_fs_read` remain available outside friendly-only profile mode.
 
+## Tool Visibility Contract (M63 > M31 Precedence)
+
+Direct governed tools (`read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`, and their `nomos.*` canonical equivalents) are advertised in MCP `tools/list` whenever the active policy bundle has at least one `ALLOW` or `REQUIRE_APPROVAL` rule whose `action_type`, `principals`, `agents`, and `environments` fields match the calling identity. Resource pattern, params, and `exec_match` are deliberately ignored at advertisement time.
+
+This is M63's "Nomos becomes the default execution boundary" precedence over M31's earlier probe-based hiding. The earlier behavior synthesized a stand-in action (e.g. `argv=["echo","sample"]` for `process.exec`, `url://example.com/status` for `net.http_request`) and ran it through full policy evaluation; if the probe hit default-deny, the tool was hidden from `tools/list`. Under realistic profiles like `safe-dev` whose exec allowlist excludes `echo` and whose HTTP allowlist excludes `example.com`, that behavior silently dropped governed tools the policy was perfectly willing to allow for legitimate inputs — and the agent escaped to native shell or HTTP to do the work, defeating the default-boundary promise.
+
+The current behavior keeps the tool advertised so the agent uses the governed path, and policy still adjudicates each real call at execute time. Tools advertised under a profile whose only matching rule is `REQUIRE_APPROVAL` are surfaced with `_meta.approval_required: true`; the agent calls the tool normally and Nomos returns the approval gate.
+
+Resource-aware hiding still applies to upstream MCP fanout (`mcp.call`), where each forwarded tool maps to a distinct `mcp://<server>/<tool>` resource and the per-tool resource pattern is the right granularity for visibility.
+
+External-policy backend health is independent of this contract and remains fail-closed: when a configured external policy backend (e.g. an unreachable OPA) returns `deny_by_external_policy_error` on the discovery probe, the tool is hidden regardless of local capability scan, because the gateway cannot trust a future allow decision when the policy authority is unhealthy.
+
 ## Tool Surface Clarity
 
 In workspace profile mode, Nomos should be the only exposed path for governed capabilities where possible.
@@ -89,23 +101,31 @@ Stronger guarantees require controlled runtimes such as containers, CI, or remot
 
 ## Default Profiles
 
-The launcher ships three standalone profiles. The canonical YAML is at `examples/policies/profiles/<name>.yaml`; the same bytes are also embedded in the binary so the launcher works without a nomos source checkout on disk:
+The launcher ships three standalone profiles. The canonical YAML is at `profiles/<name>.yaml`; generated copies are embedded in the binary so the launcher works without a nomos source checkout on disk:
 
 - `safe-dev`: local development, workspace edits allowed, secrets denied, risky publish/infra actions require approval, unknown egress denied.
 - `ci-strict`: deterministic validation and structured artifact publishing allowed, package installs and mutations denied, unknown egress denied.
 - `prod-locked`: read-only production inspection, writes/patches/mutations denied, narrow break-glass rollout approval.
 
-Profile hashes are pinned in `testdata/policy-profiles/hashes.json` and mentioned in `CHANGELOG.md`. If a profile changes, update both intentionally; the embedded copy at `internal/launcher/embedded_profiles/<name>.yaml` must remain byte-for-byte identical (enforced by `TestEmbeddedProfilesMatchRepoSourceByteForByte`).
+Profile hashes are pinned in `testdata/policy-profiles/hashes.json`. If a profile changes, run `make pin-profile-hashes`; this regenerates the embedded copies at `internal/launcher/embedded_profiles/<name>.yaml` and refreshes the hash pins. `TestEmbeddedProfilesGeneratedFromCanonicalProfiles` fails if generated embedded YAMLs drift from `profiles/`.
+
+Operators can inspect the profile set embedded in the running binary:
+
+```bash
+nomos profiles list
+nomos profiles show safe-dev
+nomos profiles verify
+```
 
 ### Profile Bundle Source Resolution
 
 When the launcher needs to load `<name>.yaml`, it tries three sources in order and prints the result as `Bundle source:` in its summary (and `profile_source` in the `agent.launcher.session` audit event):
 
-1. **`workspace`** — `<workspaceRoot>/examples/policies/profiles/<name>.yaml`. Lets a nomos developer iterate on a profile YAML without rebuilding.
+1. **`workspace`** — `<workspaceRoot>/profiles/<name>.yaml`. Lets a nomos developer iterate on a profile YAML without rebuilding.
 2. **`repo`** — the same path under the calling process's git root. Covers `go run ./cmd/nomos run claude` from a subdirectory.
 3. **`embedded`** — materialized from the binary to `~/.nomos/profiles/<name>.yaml`. This is the path enterprise users hit: install via Homebrew/Scoop/installer, run `nomos run claude` from any project. The file is written atomically (tempfile + rename), with mode `0o600` where the platform supports it, and rewritten only when the on-disk content does not already match the embedded bytes.
 
-The materialized path is stable across launcher invocations, so a persistent agent MCP config (e.g. `~/.codex/config.toml`) can reference `~/.nomos/profiles/<name>.yaml` and continue to point at the right file after the session-scoped artifacts under `.nomos/agent/session-*/` are cleaned up. When you upgrade the nomos binary, the next invocation rewrites the materialized file to match the new embedded YAML; verify the printed `Policy hash:` matches the value pinned in `CHANGELOG.md` for the version you intend to run.
+The materialized path is stable across launcher invocations, so a persistent agent MCP config (e.g. `~/.codex/config.toml`) can reference `~/.nomos/profiles/<name>.yaml` and continue to point at the right file after the session-scoped artifacts under `.nomos/agent/session-*/` are cleaned up. When you upgrade the nomos binary, the next invocation rewrites the materialized file to match the new embedded YAML; verify the printed `Policy hash:` matches the value pinned in `testdata/policy-profiles/hashes.json` for the version you intend to run.
 
 ## Generated Instructions
 

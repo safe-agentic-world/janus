@@ -52,6 +52,8 @@ func main() {
 		runAgentLauncher(os.Args[2:])
 	case "policy":
 		runPolicy(os.Args[2:])
+	case "profiles":
+		runProfiles(os.Args[2:])
 	case "approvals":
 		runApprovals(os.Args[2:])
 	case "doctor":
@@ -437,6 +439,188 @@ func runApprovals(args []string) {
 		}
 	default:
 		cliFatal("approvals command required: list")
+	}
+}
+
+type profileListRecord struct {
+	Name    string `json:"name"`
+	Hash    string `json:"hash"`
+	Summary string `json:"summary"`
+}
+
+type profileShowRecord struct {
+	Name    string `json:"name"`
+	Hash    string `json:"hash"`
+	Summary string `json:"summary"`
+	YAML    string `json:"yaml"`
+}
+
+type profileVerifyRecord struct {
+	Name          string `json:"name"`
+	EmbeddedHash  string `json:"embedded_hash"`
+	EmbeddedValid bool   `json:"embedded_valid"`
+	SourcePath    string `json:"source_path,omitempty"`
+	SourceHash    string `json:"source_hash,omitempty"`
+	SourcePresent bool   `json:"source_present"`
+	SourceMatches bool   `json:"source_matches"`
+	Error         string `json:"error,omitempty"`
+}
+
+func runProfiles(args []string) {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		writeHelpText(os.Stderr, profilesHelpText())
+		if len(args) == 0 {
+			os.Exit(2)
+		}
+		return
+	}
+	var err error
+	switch args[0] {
+	case "list":
+		err = executeProfilesList(args[1:], os.Stdout)
+	case "show":
+		err = executeProfilesShow(args[1:], os.Stdout)
+	case "verify":
+		err = executeProfilesVerify(args[1:], os.Stdout)
+	default:
+		cliFatal("profiles command required: list|show|verify")
+	}
+	if err != nil {
+		cliFatalf("profiles %s: %v", args[0], err)
+	}
+}
+
+func executeProfilesList(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("profiles list", flag.ExitOnError)
+	format := fs.String("format", "text", "output format: text|json")
+	fs.Parse(args)
+	profiles, err := launcher.EmbeddedProfiles()
+	if err != nil {
+		return err
+	}
+	records := make([]profileListRecord, 0, len(profiles))
+	for _, profile := range profiles {
+		records = append(records, profileListRecord{Name: profile.Name, Hash: profile.Hash, Summary: profile.Summary})
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+		for _, record := range records {
+			if _, err := fmt.Fprintf(stdout, "%-12s %s  %s\n", record.Name, record.Hash, record.Summary); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "json":
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(records)
+	default:
+		return errors.New("--format must be text or json")
+	}
+}
+
+func executeProfilesShow(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("profiles show", flag.ExitOnError)
+	format := fs.String("format", "yaml", "output format: yaml|json")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("profile name is required")
+	}
+	name := fs.Arg(0)
+	data, err := launcher.EmbeddedProfileYAML(name)
+	if err != nil {
+		return err
+	}
+	bundle, err := launcher.EmbeddedProfileBundle(name)
+	if err != nil {
+		return err
+	}
+	profiles, err := launcher.EmbeddedProfiles()
+	if err != nil {
+		return err
+	}
+	summary := ""
+	for _, profile := range profiles {
+		if profile.Name == name {
+			summary = profile.Summary
+			break
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "yaml":
+		_, err := stdout.Write(data)
+		return err
+	case "json":
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(profileShowRecord{Name: name, Hash: bundle.Hash, Summary: summary, YAML: string(data)})
+	default:
+		return errors.New("--format must be yaml or json")
+	}
+}
+
+func executeProfilesVerify(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("profiles verify", flag.ExitOnError)
+	format := fs.String("format", "text", "output format: text|json")
+	fs.Parse(args)
+	records := make([]profileVerifyRecord, 0)
+	for _, name := range launcher.EmbeddedProfileNames() {
+		record := profileVerifyRecord{Name: name}
+		embedded, err := launcher.EmbeddedProfileBundle(name)
+		if err != nil {
+			record.Error = err.Error()
+			records = append(records, record)
+			continue
+		}
+		record.EmbeddedHash = embedded.Hash
+		record.EmbeddedValid = true
+		sourcePath := filepath.Join("profiles", name+".yaml")
+		record.SourcePath = sourcePath
+		if _, err := os.Stat(sourcePath); err == nil {
+			record.SourcePresent = true
+			source, err := policy.LoadBundle(sourcePath)
+			if err != nil {
+				record.Error = err.Error()
+			} else {
+				record.SourceHash = source.Hash
+				record.SourceMatches = source.Hash == embedded.Hash
+			}
+		} else if !os.IsNotExist(err) {
+			record.Error = err.Error()
+		}
+		records = append(records, record)
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+		for _, record := range records {
+			status := "OK"
+			if !record.EmbeddedValid || record.Error != "" || (record.SourcePresent && !record.SourceMatches) {
+				status = "FAIL"
+			}
+			if _, err := fmt.Fprintf(stdout, "%-12s %s embedded=%s", record.Name, status, record.EmbeddedHash); err != nil {
+				return err
+			}
+			if record.SourcePresent {
+				if _, err := fmt.Fprintf(stdout, " source=%s match=%t", record.SourceHash, record.SourceMatches); err != nil {
+					return err
+				}
+			}
+			if record.Error != "" {
+				if _, err := fmt.Fprintf(stdout, " error=%q", record.Error); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(stdout); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "json":
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(records)
+	default:
+		return errors.New("--format must be text or json")
 	}
 }
 
@@ -1375,6 +1559,7 @@ func rootHelpText() string {
 		"  mcp        start MCP stdio server\n" +
 		"  run        launch codex or claude with a Nomos workspace profile\n" +
 		"  policy     policy test/explain\n" +
+		"  profiles   inspect embedded default profiles\n" +
 		"  approvals  list pending approvals\n" +
 		"  doctor     deterministic preflight checks\n\n" +
 		"example:\n" +
@@ -1394,6 +1579,18 @@ func runHelpText() string {
 		"examples:\n" +
 		"  nomos run codex --dry-run --print-config\n" +
 		"  nomos run claude --profile ci-strict --no-launch\n"
+}
+
+func profilesHelpText() string {
+	return "usage: nomos profiles <list|show|verify> [flags]\n" +
+		"  list                 list embedded default profile hashes\n" +
+		"  show <name>          print embedded profile YAML\n" +
+		"  verify               verify embedded profiles and compare ./profiles when present\n" +
+		"      --format <fmt>   text|json for list/verify, yaml|json for show\n\n" +
+		"examples:\n" +
+		"  nomos profiles list\n" +
+		"  nomos profiles show safe-dev\n" +
+		"  nomos profiles verify --format json\n"
 }
 
 func serveHelpText() string {
