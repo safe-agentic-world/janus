@@ -94,9 +94,14 @@ const (
 	// startup. Used for Claude Code.
 	mcpWiringMCPConfigFlag = "mcp_config_flag"
 	// mcpWiringOperatorManaged indicates the launcher cannot auto-wire MCP for
-	// this agent and the operator is responsible for registering the generated
-	// MCP config in the agent's persistent configuration. Used for Codex.
+	// an agent and the operator is responsible for registering the generated
+	// MCP config in the agent's persistent configuration. Kept for audit
+	// compatibility and future agent integrations that lack a per-launch hook.
 	mcpWiringOperatorManaged = "operator_managed"
+	// mcpWiringCodexConfigOverride indicates Nomos passed per-invocation Codex
+	// config overrides for mcp_servers.nomos.*. Used for Codex versions whose
+	// CLI supports `-c mcp_servers.<name>...` overrides.
+	mcpWiringCodexConfigOverride = "codex_config_override"
 	// mcpWiringSkipped indicates dry-run or no-launch: no wiring was attempted
 	// because no agent process was started.
 	mcpWiringSkipped = "skipped"
@@ -197,8 +202,14 @@ func Run(opts Options) (Result, error) {
 	}
 	wiringMethod := mcpWiringSkipped
 	var plannedArgv []string
+	var mcpServer mcpClientServer
 	if mcpConfigPath != "" {
-		plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, opts.Args)
+		server, err := mcpServerFromConfigJSON(mcpConfigJSON)
+		if err != nil {
+			return Result{}, err
+		}
+		mcpServer = server
+		plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, server, opts.Args)
 		if err != nil {
 			return Result{}, err
 		}
@@ -240,7 +251,7 @@ func Run(opts Options) (Result, error) {
 	if opts.DryRun || opts.NoLaunch {
 		return result, nil
 	}
-	if err := launchAgent(agent, mcpConfigPath, opts.Args); err != nil {
+	if err := launchAgent(agent, mcpConfigPath, mcpServer, opts.Args); err != nil {
 		return result, err
 	}
 	result.Launched = true
@@ -657,6 +668,8 @@ func displayMCPWiringMethod(method string, dryRun bool) string {
 	switch method {
 	case mcpWiringMCPConfigFlag:
 		return "launcher passes --mcp-config to the agent (verified path)"
+	case mcpWiringCodexConfigOverride:
+		return "launcher passes Codex MCP config overrides (verified path)"
 	case mcpWiringOperatorManaged:
 		return "operator-managed (launcher cannot auto-wire MCP for this agent)"
 	case mcpWiringSkipped, "":
@@ -681,10 +694,15 @@ func writeVerifyAfterLaunch(out io.Writer, result Result, opts Options) {
 		_, _ = fmt.Fprintln(out, "  - In Claude Code, run `/mcp` and confirm `nomos` appears as a connected server.")
 		_, _ = fmt.Fprintln(out, "  - Confirm the MCP tool list includes read_file, write_file, apply_patch, run_command, http_request.")
 	case AgentCodex:
-		_, _ = fmt.Fprintln(out, "  - The launcher does NOT auto-wire MCP for codex. Register the generated MCP config")
-		_, _ = fmt.Fprintf(out, "    (%s) in ~/.codex/config.toml before trusting this session.\n", result.MCPConfigPath)
-		_, _ = fmt.Fprintln(out, "  - In codex, list MCP servers and confirm `nomos` is connected and exposes read_file,")
-		_, _ = fmt.Fprintln(out, "    write_file, apply_patch, run_command, http_request.")
+		if result.MCPWiringMethod == mcpWiringCodexConfigOverride {
+			_, _ = fmt.Fprintln(out, "  - In codex, run `/mcp` and confirm `nomos` appears as a connected server.")
+			_, _ = fmt.Fprintln(out, "  - Confirm the MCP tool list includes read_file, write_file, apply_patch, run_command, http_request.")
+		} else {
+			_, _ = fmt.Fprintln(out, "  - The launcher does NOT auto-wire MCP for codex. Register the generated MCP config")
+			_, _ = fmt.Fprintf(out, "    (%s) in ~/.codex/config.toml before trusting this session.\n", result.MCPConfigPath)
+			_, _ = fmt.Fprintln(out, "  - In codex, list MCP servers and confirm `nomos` is connected and exposes read_file,")
+			_, _ = fmt.Fprintln(out, "    write_file, apply_patch, run_command, http_request.")
+		}
 	}
 	_, _ = fmt.Fprintln(out, "  - If `nomos` is missing or those tools are absent, the session is NOT governed —")
 	_, _ = fmt.Fprintln(out, "    exit and reconfigure before issuing prompts.")
@@ -818,14 +836,12 @@ type agentLaunchPlan struct {
 //     the launched session is governed by Nomos by construction. WiringMethod
 //     is "mcp_config_flag".
 //
-//   - The OpenAI Codex CLI loads MCP servers from ~/.codex/config.toml; it has
-//     no documented one-shot equivalent of --mcp-config, and the previous
-//     CODEX_MCP_CONFIG environment variable was unverified and silently
-//     ignored. Rather than ship a false integrity claim, the launcher records
-//     "operator_managed": the operator is responsible for registering the
-//     generated MCP config in their codex configuration. The launched agent
-//     still runs, but the launcher is honest that it did not attach Nomos.
-func resolveAgentLaunchPlan(agent, mcpConfigPath string, userArgs []string) (agentLaunchPlan, error) {
+//   - The OpenAI Codex CLI accepts per-invocation config overrides via
+//     `-c mcp_servers.nomos.command=...` and
+//     `-c mcp_servers.nomos.args=[...]`. The launcher passes those overrides
+//     directly, so the launched session should see Nomos in `/mcp` without
+//     mutating ~/.codex/config.toml. WiringMethod is "codex_config_override".
+func resolveAgentLaunchPlan(agent, mcpConfigPath string, server mcpClientServer, userArgs []string) (agentLaunchPlan, error) {
 	if strings.TrimSpace(mcpConfigPath) == "" {
 		return agentLaunchPlan{}, errors.New("mcp config path required")
 	}
@@ -841,20 +857,27 @@ func resolveAgentLaunchPlan(agent, mcpConfigPath string, userArgs []string) (age
 		plan.Env = append(plan.Env, "CLAUDE_MCP_CONFIG="+mcpConfigPath)
 		plan.WiringMethod = mcpWiringMCPConfigFlag
 	case AgentCodex:
-		plan.Argv = append([]string(nil), userArgs...)
-		plan.WiringMethod = mcpWiringOperatorManaged
+		if strings.TrimSpace(server.Command) == "" {
+			return agentLaunchPlan{}, errors.New("mcp server command required for codex launch")
+		}
+		overrides := []string{
+			"-c", "mcp_servers.nomos.command=" + tomlString(server.Command),
+			"-c", "mcp_servers.nomos.args=" + tomlStringArray(server.Args),
+		}
+		plan.Argv = append(overrides, userArgs...)
+		plan.WiringMethod = mcpWiringCodexConfigOverride
 	default:
 		return agentLaunchPlan{}, fmt.Errorf("unknown agent %q", agent)
 	}
 	return plan, nil
 }
 
-func launchAgent(agent, mcpConfigPath string, args []string) error {
+func launchAgent(agent, mcpConfigPath string, server mcpClientServer, args []string) error {
 	bin, err := exec.LookPath(agent)
 	if err != nil {
 		return fmt.Errorf("%s executable not found; rerun with --no-launch or configure the client with %s: %w", agent, mcpConfigPath, err)
 	}
-	plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, args)
+	plan, err := resolveAgentLaunchPlan(agent, mcpConfigPath, server, args)
 	if err != nil {
 		return err
 	}
@@ -864,6 +887,34 @@ func launchAgent(agent, mcpConfigPath string, args []string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), plan.Env...)
 	return cmd.Run()
+}
+
+func mcpServerFromConfigJSON(data []byte) (mcpClientServer, error) {
+	var cfg mcpClientConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return mcpClientServer{}, fmt.Errorf("decode generated mcp config: %w", err)
+	}
+	server, ok := cfg.MCPServers["nomos"]
+	if !ok {
+		return mcpClientServer{}, errors.New("generated mcp config missing nomos server")
+	}
+	return server, nil
+}
+
+func tomlString(value string) string {
+	quoted, err := json.Marshal(value)
+	if err != nil {
+		return `""`
+	}
+	return string(quoted)
+}
+
+func tomlStringArray(values []string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, tomlString(value))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 func ensureAgentTempDir(workspaceRoot string) (string, error) {

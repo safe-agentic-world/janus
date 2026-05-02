@@ -40,37 +40,6 @@ Nomos can:
 
 Nomos is **agent-agnostic** and **model-agnostic**. It does not constrain reasoning. It governs execution authority, resource usage, and side effects.
 
-### One decision in one place
-
-Real output from `nomos policy explain` against the checked-in quickstart fixtures:
-
-```
-$ nomos policy explain \
-    --action ./examples/quickstart/actions/deny-env.json \
-    --bundle ./examples/policies/safe.yaml
-
-Agent requested:
-  fs.read  file://workspace/.env
-
-Decision:
-  DENY  (reason_code = deny_by_rule)
-
-Matched rules:
-  safe-deny-root-env
-  safe-deny-nested-env
-
-Audit:
-  trace_id           = quickstart-deny-env
-  policy_bundle_hash = 7ec7bd2481d8cb07eed2c21c21563a62e6fe6277ae8333d1cbf9c01bd8b0bafb
-  assurance_level    = BEST_EFFORT
-
-Minimal allowing change:
-  Adjust the requested action to match an allowlisted resource, or request approval.
-```
-
-Same pipeline whether the caller is Claude Code over MCP, Codex over MCP, or an HTTP-integrated agent. Same fingerprint, same decision, same audit record.
-
-
 ## What Gets Blocked By Default
 
 Examples of actions Nomos can block or approval-gate with starter policy bundles:
@@ -229,54 +198,6 @@ Do not register raw filesystem, shell, GitHub, Kubernetes, or other upstream MCP
 Local laptop mode is best-effort. Stronger guarantees require controlled runtimes such as containers, CI, or remote workspaces.
 
 See [docs/agent-launcher.md](./docs/agent-launcher.md).
-
-
-## MCP-Native Agent Demo
-
-Beyond coding agents, the same pipeline governs business agents reaching real systems over MCP. The retail support example compares the same agent before and after Nomos.
-
-Before Nomos, the agent follows the customer request directly. A damaged-item refund plus extra compensation goes through with no execution boundary enforcing policy.
-
-<br>
-
-<img src="docs/assets/before_nomos.png" alt="Retail support demo before Nomos where the agent approves refund and extra compensation" width="100%" style="border: 1px solid #d0d7de; border-radius: 8px;">
-
-<br>
-<br>
-
-After Nomos, the exact same agent is routed through Nomos over MCP. Order lookup is still allowed, but refund handling is policy-governed and extra compensation can be denied or approval-gated based on your policy bundle.
-
-<br>
-<br>
-
-<img src="docs/assets/after_nomos.png" alt="Retail support demo after Nomos where the same agent is governed by policy" width="100%" style="border: 1px solid #d0d7de; border-radius: 8px;">
-
-Same agent, same user request, different outcome at the execution boundary.
-
-To run it yourself, see [demo-langchain-nomos](https://github.com/safe-agentic-world/demo-langchain-nomos) and follow the before/after Nomos runbook.
-
-
-## Why Nomos Exists
-
-Agents are useful, but they are still one bad tool call away from:
-
-- wrong business actions (refunds, free bookings, sent messages) under prompt injection
-- pushing code, shipping changes, or running destructive commands like `terraform destroy`, `git push origin main`, or `kubectl delete`
-- changing or deleting files you did not ask them to touch
-- using powerful credentials in ways you never intended
-
-Without governance at the execution boundary, prompt injection, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real.
-
-With Nomos:
-
-- routed actions hit **one control point** before they happen
-- the same normalized action gets the same decision under the same identity, environment, and policy bundle
-- sensitive actions can be routed to **manual approval**
-- agents do not need to hold **long-lived enterprise credentials** on the Nomos-governed path
-- outputs can be **redacted** and governed actions produce **audit evidence**
-- the same control model works across **MCP** and **HTTP** integrations
-- behavior stays flexible because you shape it with your own **policies** and **configs**
-
 
 ## Architecture In One Picture
 
