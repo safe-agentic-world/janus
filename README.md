@@ -199,54 +199,6 @@ Local laptop mode is best-effort. Stronger guarantees require controlled runtime
 
 See [docs/agent-launcher.md](./docs/agent-launcher.md).
 
-
-## MCP-Native Agent Demo
-
-Beyond coding agents, the same pipeline governs business agents reaching real systems over MCP. The retail support example compares the same agent before and after Nomos.
-
-Before Nomos, the agent follows the customer request directly. A damaged-item refund plus extra compensation goes through with no execution boundary enforcing policy.
-
-<br>
-
-<img src="docs/assets/before_nomos.png" alt="Retail support demo before Nomos where the agent approves refund and extra compensation" width="100%" style="border: 1px solid #d0d7de; border-radius: 8px;">
-
-<br>
-<br>
-
-After Nomos, the exact same agent is routed through Nomos over MCP. Order lookup is still allowed, but refund handling is policy-governed and extra compensation can be denied or approval-gated based on your policy bundle.
-
-<br>
-<br>
-
-<img src="docs/assets/after_nomos.png" alt="Retail support demo after Nomos where the same agent is governed by policy" width="100%" style="border: 1px solid #d0d7de; border-radius: 8px;">
-
-Same agent, same user request, different outcome at the execution boundary.
-
-To run it yourself, see [demo-langchain-nomos](https://github.com/safe-agentic-world/demo-langchain-nomos) and follow the before/after Nomos runbook.
-
-
-## Why Nomos Exists
-
-Agents are useful, but they are still one bad tool call away from:
-
-- wrong business actions (refunds, free bookings, sent messages) under prompt injection
-- pushing code, shipping changes, or running destructive commands like `terraform destroy`, `git push origin main`, or `kubectl delete`
-- changing or deleting files you did not ask them to touch
-- using powerful credentials in ways you never intended
-
-Without governance at the execution boundary, prompt injection, tool misuse, and over-broad credentials turn into real side effects fast. Nomos applies **zero-trust controls** at the moment an agent tries to do something real.
-
-With Nomos:
-
-- routed actions hit **one control point** before they happen
-- the same normalized action gets the same decision under the same identity, environment, and policy bundle
-- sensitive actions can be routed to **manual approval**
-- agents do not need to hold **long-lived enterprise credentials** on the Nomos-governed path
-- outputs can be **redacted** and governed actions produce **audit evidence**
-- the same control model works across **MCP** and **HTTP** integrations
-- behavior stays flexible because you shape it with your own **policies** and **configs**
-
-
 ## Architecture In One Picture
 
 ```mermaid
