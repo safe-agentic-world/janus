@@ -265,7 +265,7 @@ func toolDiscoveryDescription(name, advertisedName string) string {
 		case "apply_patch":
 			return "Default governed patch tool for repository changes. Backed by Nomos repo.apply_patch policy, approval, and audit."
 		case "run_command":
-			return "Default governed shell command tool for local process execution. Backed by Nomos process.exec policy, approval, and audit."
+			return "Default governed command tool for local process execution. Pass direct argv tokens such as [\"git\",\"status\"]; simple shell wrappers are normalized, complex shell syntax is rejected. Backed by Nomos process.exec policy, approval, and audit."
 		case "http_request":
 			return "Default governed HTTP tool for network requests. Backed by Nomos net.http_request policy, approval, and audit."
 		}
@@ -280,7 +280,7 @@ func toolDiscoveryDescription(name, advertisedName string) string {
 	case "nomos.apply_patch":
 		return "Apply deterministic patch payload. Check nomos.capabilities for current allow versus approval state."
 	case "nomos.exec":
-		return "Run a bounded process action. Check nomos.capabilities for current allow versus approval state."
+		return "Run a bounded process action with direct argv tokens. Simple shell wrappers are normalized; complex shell syntax is rejected. Check nomos.capabilities for current allow versus approval state."
 	case "nomos.http_request":
 		return "Run a policy-gated HTTP request. Check nomos.capabilities for current allow versus approval state."
 	case "repo.validate_change_set":
