@@ -40,11 +40,13 @@ func TestQuickstartDocsReferenceExistingFilesAndCurrentFlags(t *testing.T) {
 		"docs/http-integration-kit.md",
 		"docs/integration-patterns.md",
 		"docs/custom-actions.md",
+		"docs/agent-launcher.md",
+		"docs/local-validation-plan.md",
+		"docs/decisions/profile-and-launcher-artifacts.md",
+		"examples/README.md",
 		"docs/openapi/nomos-http-v1.yaml",
 		"docs/schemas/action-request.v1.json",
 		"docs/schemas/action-response.v1.json",
-		"examples/local-tooling/codex.mcp.json",
-		"examples/local-tooling/claude-code-mcp.json",
 	}
 	for _, rel := range requiredFiles {
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
@@ -65,7 +67,8 @@ func TestQuickstartDocsReferenceExistingFilesAndCurrentFlags(t *testing.T) {
 	}
 
 	requiredIntegrationCommands := []string{
-		`nomos mcp -c .\examples\quickstart\config.quickstart.json`,
+		`nomos run codex -c .\examples\quickstart\config.quickstart.json -p .\examples\policies\safe.yaml`,
+		`nomos run claude -c .\examples\quickstart\config.quickstart.json -p .\examples\policies\safe.yaml`,
 		`nomos doctor -c .\examples\quickstart\config.quickstart.json --format json`,
 		`nomos serve -c .\examples\quickstart\config.quickstart.json`,
 	}
@@ -167,9 +170,21 @@ func repoRoot(t *testing.T) string {
 
 func TestExampleJSONFilesStayValid(t *testing.T) {
 	root := repoRoot(t)
-	paths := []string{
-		filepath.Join(root, "examples", "local-tooling", "codex.mcp.json"),
-		filepath.Join(root, "examples", "local-tooling", "claude-code-mcp.json"),
+	var paths []string
+	err := filepath.WalkDir(filepath.Join(root, "examples"), func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(path), ".json") {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk examples: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("expected example JSON files")
 	}
 	for _, path := range paths {
 		var data map[string]any

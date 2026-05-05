@@ -65,23 +65,26 @@ type Options struct {
 }
 
 type Result struct {
-	Agent               string
-	WorkspaceRoot       string
-	ConfigPath          string
-	GeneratedConfig     bool
-	PolicyBundlePath    string
-	PolicyBundleSource  string // "custom", "workspace", "repo", or "embedded"
-	Profile             string
-	ProfileSummary      string
-	PolicyBundleHash    string
-	AssuranceLevel      string
-	MCPConfigPath       string
-	MCPConfigJSON       []byte
-	MCPWiringMethod     string
-	AgentLaunchArgv     []string
-	InstructionsWritten []string
-	Warnings            []string
-	Launched            bool
+	Agent                string
+	WorkspaceRoot        string
+	ConfigPath           string
+	GeneratedConfig      bool
+	PolicyBundlePath     string
+	PolicyBundleSource   string // "custom", "workspace", "repo", or "embedded"
+	Profile              string
+	ProfileSummary       string
+	PolicyBundleHash     string
+	AssuranceLevel       string
+	ApprovalsEnabled     bool
+	ApprovalStorePath    string
+	ApprovalStoreBackend string
+	MCPConfigPath        string
+	MCPConfigJSON        []byte
+	MCPWiringMethod      string
+	AgentLaunchArgv      []string
+	InstructionsWritten  []string
+	Warnings             []string
+	Launched             bool
 }
 
 // MCP wiring methods recorded in audit and printed in the launcher summary.
@@ -169,7 +172,7 @@ func Run(opts Options) (Result, error) {
 	}
 	var cfg gateway.Config
 	if generatedConfig && opts.DryRun {
-		cfg = dryRunGeneratedConfig()
+		cfg = dryRunGeneratedConfig(workspaceRoot)
 	} else {
 		cfg, err = gateway.LoadConfig(configPath, opts.Getenv, policySelection.BundlePath)
 		if err != nil {
@@ -217,21 +220,24 @@ func Run(opts Options) (Result, error) {
 		plannedArgv = plan.Argv
 	}
 	result := Result{
-		Agent:              agent,
-		WorkspaceRoot:      workspaceRoot,
-		ConfigPath:         configPath,
-		GeneratedConfig:    generatedConfig,
-		PolicyBundlePath:   policySelection.BundlePath,
-		PolicyBundleSource: policySelection.Source,
-		Profile:            policySelection.Profile,
-		ProfileSummary:     policySelection.Summary,
-		PolicyBundleHash:   bundle.Hash,
-		AssuranceLevel:     "BEST_EFFORT",
-		MCPConfigPath:      mcpConfigPath,
-		MCPConfigJSON:      mcpConfigJSON,
-		MCPWiringMethod:    wiringMethod,
-		AgentLaunchArgv:    plannedArgv,
-		Warnings:           warnings,
+		Agent:                agent,
+		WorkspaceRoot:        workspaceRoot,
+		ConfigPath:           configPath,
+		GeneratedConfig:      generatedConfig,
+		PolicyBundlePath:     policySelection.BundlePath,
+		PolicyBundleSource:   policySelection.Source,
+		Profile:              policySelection.Profile,
+		ProfileSummary:       policySelection.Summary,
+		PolicyBundleHash:     bundle.Hash,
+		AssuranceLevel:       "BEST_EFFORT",
+		ApprovalsEnabled:     cfg.Approvals.Enabled,
+		ApprovalStorePath:    cfg.Approvals.StorePath,
+		ApprovalStoreBackend: cfg.Approvals.Backend,
+		MCPConfigPath:        mcpConfigPath,
+		MCPConfigJSON:        mcpConfigJSON,
+		MCPWiringMethod:      wiringMethod,
+		AgentLaunchArgv:      plannedArgv,
+		Warnings:             warnings,
 	}
 	if opts.WriteInstructions {
 		written, err := writeInstructionFiles(workspaceRoot)
@@ -498,7 +504,7 @@ func minimalConfig(workspaceRoot, policyBundlePath string) map[string]any {
 		"rate_limits": map[string]any{"enabled": false},
 		"mcp":         map[string]any{"enabled": true},
 		"upstream":    map[string]any{"routes": []any{}},
-		"approvals":   map[string]any{"enabled": false, "backend": "file", "store_path": filepath.Join(workspaceRoot, ".nomos", "approvals.json"), "ttl_seconds": 900, "webhook_token": "", "slack_token": "", "teams_token": ""},
+		"approvals":   map[string]any{"enabled": true, "backend": "file", "store_path": filepath.Join(workspaceRoot, ".nomos", "approvals.json"), "ttl_seconds": 900, "webhook_token": "", "slack_token": "", "teams_token": ""},
 		"identity": map[string]any{
 			"principal":       "system",
 			"agent":           "nomos",
@@ -513,9 +519,15 @@ func minimalConfig(workspaceRoot, policyBundlePath string) map[string]any {
 	}
 }
 
-func dryRunGeneratedConfig() gateway.Config {
+func dryRunGeneratedConfig(workspaceRoot string) gateway.Config {
 	return gateway.Config{
 		Audit: gateway.AuditConfig{Sink: ""},
+		Approvals: gateway.ApprovalsConfig{
+			Enabled:    true,
+			Backend:    "file",
+			StorePath:  filepath.Join(workspaceRoot, ".nomos", "approvals.json"),
+			TTLSeconds: 900,
+		},
 		Identity: gateway.IdentityConfig{
 			Principal:   "system",
 			Agent:       "nomos",
@@ -610,6 +622,11 @@ func writeSummary(out io.Writer, result Result, opts Options, defaulted bool) {
 	_, _ = fmt.Fprintf(out, "Bundle source: %s\n", displayPolicyBundleSource(result.PolicyBundleSource))
 	_, _ = fmt.Fprintf(out, "Policy hash:   %s\n", result.PolicyBundleHash)
 	_, _ = fmt.Fprintf(out, "Assurance:     %s\n", result.AssuranceLevel)
+	if result.ApprovalsEnabled {
+		_, _ = fmt.Fprintf(out, "Approvals:     enabled (%s store: %s)\n", displayApprovalStoreBackend(result.ApprovalStoreBackend), result.ApprovalStorePath)
+	} else {
+		_, _ = fmt.Fprintln(out, "Approvals:     disabled")
+	}
 	if opts.DryRun {
 		_, _ = fmt.Fprintln(out, "MCP config:    <dry-run>")
 	} else {
@@ -679,6 +696,14 @@ func displayMCPWiringMethod(method string, dryRun bool) string {
 	}
 }
 
+func displayApprovalStoreBackend(backend string) string {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		return "auto"
+	}
+	return backend
+}
+
 // writeVerifyAfterLaunch prints the post-launch verification checklist. The
 // launcher cannot prove the agent loaded the MCP config (the agent is a
 // separate process the launcher does not control), so we tell the operator
@@ -706,6 +731,11 @@ func writeVerifyAfterLaunch(out io.Writer, result Result, opts Options) {
 	}
 	_, _ = fmt.Fprintln(out, "  - If `nomos` is missing or those tools are absent, the session is NOT governed —")
 	_, _ = fmt.Fprintln(out, "    exit and reconfigure before issuing prompts.")
+	if result.ApprovalsEnabled && strings.TrimSpace(result.ApprovalStorePath) != "" {
+		_, _ = fmt.Fprintln(out, "  - For approval-gated actions, inspect and decide pending requests with:")
+		_, _ = fmt.Fprintf(out, "    nomos approvals list --store %s\n", result.ApprovalStorePath)
+		_, _ = fmt.Fprintf(out, "    nomos approvals approve --store %s <approval_id>\n", result.ApprovalStorePath)
+	}
 }
 
 func writeInstructionFiles(workspaceRoot string) ([]string, error) {

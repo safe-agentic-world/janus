@@ -118,7 +118,7 @@ Migration from older deployments:
 2. For the default backend, use `backend: "file"` and a path such as `nomos-approvals.json`.
 3. To keep an existing SQLite approval database, set `backend: "sqlite"` and point `store_path` at the existing `.db` file.
 4. Keep `ttl_seconds` at least as long as the previous approval TTL window.
-5. Restart Nomos and verify `nomos approvals list --store <path> --backend <file|sqlite>` before routing approval-gated actions.
+5. Restart Nomos and verify `nomos approvals list --store <path> --backend <file|sqlite>` and a non-production `approve` / `deny` decision before routing approval-gated actions.
 
 ## Approval CLI
 
@@ -130,6 +130,15 @@ nomos approvals list --store ./nomos-approvals.db --backend sqlite
 ```
 
 The JSON output includes `argument_preview` for `mcp.call` approvals and omits it for non-MCP approvals.
+
+Operators can decide a pending approval from the same durable store:
+
+```bash
+nomos approvals approve --store ./nomos-approvals.json --backend file <approval_id>
+nomos approvals deny --store ./nomos-approvals.json --backend file <approval_id>
+```
+
+`approve` and `deny` accept `--format text|json`. The `approval_id` may appear before or after the flags.
 
 ## Params Patch (Future)
 

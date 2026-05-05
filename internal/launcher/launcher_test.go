@@ -73,6 +73,9 @@ func TestRunClaudeNoLaunchWritesGeneratedConfigAndAudit(t *testing.T) {
 	if result.GeneratedConfig != true {
 		t.Fatalf("expected generated Nomos config: %+v", result)
 	}
+	if !result.ApprovalsEnabled || result.ApprovalStorePath != filepath.Join(workspace, ".nomos", "approvals.json") {
+		t.Fatalf("expected generated launcher config to enable local approvals: %+v", result)
+	}
 	for _, path := range []string{result.ConfigPath, result.MCPConfigPath, filepath.Join(workspace, ".nomos", "agent", "audit.db")} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected generated file %s: %v", path, err)
@@ -104,8 +107,17 @@ func TestRunClaudeNoLaunchWritesGeneratedConfigAndAudit(t *testing.T) {
 			t.Fatalf("generated args missing %q: %+v", want, nomos.Args)
 		}
 	}
-	if !strings.Contains(out.String(), "Profile:       ci-strict") {
+	if !strings.Contains(out.String(), "Profile:       ci-strict") ||
+		!strings.Contains(out.String(), "Approvals:     enabled") ||
+		!strings.Contains(out.String(), "nomos approvals approve --store") {
 		t.Fatalf("expected ci-strict summary, got:\n%s", out.String())
+	}
+	generatedConfig, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	if !strings.Contains(string(generatedConfig), `"enabled": true`) || !strings.Contains(string(generatedConfig), `approvals.json`) {
+		t.Fatalf("expected generated config to enable file approvals, got:\n%s", string(generatedConfig))
 	}
 }
 

@@ -260,11 +260,10 @@ For MCP file tools, Nomos accepts canonical resources like `file://workspace/REA
 
 See:
 
+- [docs/agent-launcher.md](./docs/agent-launcher.md)
 - [docs/integration-kit.md](./docs/integration-kit.md)
 - [docs/upstream-mcp-gateway.md](./docs/upstream-mcp-gateway.md)
 - [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
-- [examples/local-tooling/claude-code-mcp.json](./examples/local-tooling/claude-code-mcp.json)
-- [examples/local-tooling/codex.mcp.json](./examples/local-tooling/codex.mcp.json)
 
 Nomos can also run as an additive MCP governance gateway in front of configured upstream MCP servers. In that mode, downstream agents keep their MCP client architecture while Nomos governs forwarded tools as `mcp.call` actions. Upstream `stdio` compatibility is hardened for real newline-delimited JSON MCP servers, with framed upstream responses still accepted for compatibility.
 
@@ -429,7 +428,7 @@ nomos policy test --action ./examples/quickstart/actions/deny-env.json --bundle 
 See:
 
 - [TESTING.md](./TESTING.md)
-- [docs/local-test-plan.md](./docs/local-test-plan.md)
+- [docs/local-validation-plan.md](./docs/local-validation-plan.md)
 
 
 ## More Use Cases
@@ -463,33 +462,41 @@ See:
 Start here:
 
 - [docs/quickstart.md](./docs/quickstart.md)
-- [docs/http-sdk.md](./docs/http-sdk.md)
-- [docs/http-integration-kit.md](./docs/http-integration-kit.md)
-- [docs/integration-patterns.md](./docs/integration-patterns.md)
-- [docs/custom-actions.md](./docs/custom-actions.md)
+- [docs/agent-launcher.md](./docs/agent-launcher.md)
 - [docs/integration-kit.md](./docs/integration-kit.md)
-- [docs/local-test-plan.md](./docs/local-test-plan.md)
-- [docs/operator-ui.md](./docs/operator-ui.md)
+- [docs/local-validation-plan.md](./docs/local-validation-plan.md)
+- [examples/README.md](./examples/README.md)
 
 Policy and behavior:
 
 - [docs/policy-language.md](./docs/policy-language.md)
 - [docs/policy-explain.md](./docs/policy-explain.md)
-- [docs/obligations.md](./docs/obligations.md)
 - [docs/approvals.md](./docs/approvals.md)
+- [docs/obligations.md](./docs/obligations.md)
+- [docs/custom-actions.md](./docs/custom-actions.md)
 
-Architecture and guarantees:
+MCP, HTTP, and SDKs:
+
+- [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
+- [docs/upstream-mcp-gateway.md](./docs/upstream-mcp-gateway.md)
+- [docs/http-sdk.md](./docs/http-sdk.md)
+- [docs/http-integration-kit.md](./docs/http-integration-kit.md)
+- [docs/integration-patterns.md](./docs/integration-patterns.md)
+
+Architecture, operations, and guarantees:
 
 - [docs/reference-architecture.md](./docs/reference-architecture.md)
 - [docs/assurance-levels.md](./docs/assurance-levels.md)
+- [docs/threat-model.md](./docs/threat-model.md)
 - [docs/audit-schema.md](./docs/audit-schema.md)
 - [docs/observability.md](./docs/observability.md)
+- [docs/operator-ui.md](./docs/operator-ui.md)
 
-Security and standards:
+Release and decisions:
 
-- [docs/threat-model.md](./docs/threat-model.md)
-- [docs/mcp-compatibility.md](./docs/mcp-compatibility.md)
 - [docs/release-verification.md](./docs/release-verification.md)
+- [docs/launch-checklist.md](./docs/launch-checklist.md)
+- [docs/decisions/profile-and-launcher-artifacts.md](./docs/decisions/profile-and-launcher-artifacts.md)
 - [docs/owasp-agentic-mapping.md](./docs/owasp-agentic-mapping.md)
 
 

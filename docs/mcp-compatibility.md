@@ -60,7 +60,7 @@ Exposed tools:
 - `nomos_http_request`
 - `repo_validate_change_set`
 
-Nomos advertises MCP tool names using a conservative cross-vendor-safe character set. Legacy dotted names such as `nomos.fs_read` remain accepted for backward compatibility, but new clients should use the advertised names from `tools/list`.
+Nomos advertises MCP tool names using a conservative cross-vendor-safe character set. Canonical dotted names such as `nomos.capabilities` and `nomos.fs_read` remain accepted for direct JSON-RPC and backward compatibility, but clients should call the names returned by `tools/list`.
 
 Launcher/workspace-profile mode can request `--tool-surface friendly`, which advertises natural aliases for the five primary governed capabilities:
 
@@ -75,12 +75,12 @@ Launcher/workspace-profile mode can request `--tool-surface friendly`, which adv
 Tool surfacing semantics:
 
 - `tools/list` is static and returns the full advertised Nomos MCP surface
-- current policy state is exposed through `nomos_capabilities`
-- clients should use `nomos_capabilities` to distinguish:
+- current policy state is exposed through the capabilities tool (`nomos_capabilities` when advertised, canonical alias `nomos.capabilities` when calling directly)
+- clients should use the capabilities tool to distinguish:
   - tools callable now
   - tools available only with approval
   - tools currently unavailable for the active identity/environment
-- `nomos_capabilities` is advisory only; every action is still evaluated live
+- the capabilities response is advisory only; every action is still evaluated live
 - capability evolution is additive and versioned through `contract_version`
 - clients may watch `capability_set_hash` to detect deterministic contract changes within the current runtime
 - `tool_states[*].constraints` exposes bounded safe summaries only; Nomos does not expose raw policy internals or sensitive resource names by default
@@ -88,7 +88,7 @@ Tool surfacing semantics:
 For `tools/call`:
 
 - action tools return text content with a concise decision line (`ALLOW`, `APPROVAL`, or `DENY`) and relevant output details when present
-- non-action utility responses such as `nomos_capabilities` and `repo_validate_change_set` remain JSON text payloads
+- non-action utility responses such as `nomos_capabilities` / `nomos.capabilities` and `repo_validate_change_set` remain JSON text payloads
 
 ## Stdout / Stderr Guarantees
 

@@ -49,6 +49,18 @@ After the agent starts, run `/mcp` (Claude Code) or the equivalent in your codex
 
 For Codex specifically, `/mcp` remains the proof point. If `nomos run codex` opens Codex and `/mcp` reports no Nomos tools, the session is ungoverned and the launcher has a wiring bug or the local Codex CLI no longer honors the config override. Do not issue file, shell, HTTP, git, or upstream MCP prompts until `/mcp` confirms `nomos` is connected.
 
+## Local Approvals
+
+When the launcher generates a Nomos config, it enables a local file-backed approval store at `.nomos/approvals.json`. The launcher summary prints the resolved store path and the exact commands to inspect or approve pending requests:
+
+```bash
+nomos approvals list --store <workspace>/.nomos/approvals.json
+nomos approvals approve --store <workspace>/.nomos/approvals.json <approval_id>
+nomos approvals deny --store <workspace>/.nomos/approvals.json <approval_id>
+```
+
+Custom configs keep their own `approvals` settings. If a custom config disables approvals, `REQUIRE_APPROVAL` policy decisions remain visible as policy outcomes, but there may be no pending approval record to decide from the CLI.
+
 ## Tool Surface
 
 The launcher configures MCP with the friendly tool surface:
