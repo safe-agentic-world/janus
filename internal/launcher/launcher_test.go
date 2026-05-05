@@ -109,7 +109,9 @@ func TestRunClaudeNoLaunchWritesGeneratedConfigAndAudit(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Profile:       ci-strict") ||
 		!strings.Contains(out.String(), "Approvals:     enabled") ||
-		!strings.Contains(out.String(), "nomos approvals approve --store") {
+		!strings.Contains(out.String(), "nomos approvals approve --store") ||
+		!strings.Contains(out.String(), "nomos approvals deny --store") ||
+		!strings.Contains(out.String(), "run_command    -> process.exec") {
 		t.Fatalf("expected ci-strict summary, got:\n%s", out.String())
 	}
 	generatedConfig, err := os.ReadFile(result.ConfigPath)
@@ -192,7 +194,7 @@ func TestInstructionFilesMentionBypassAvoidance(t *testing.T) {
 		t.Fatalf("read AGENTS.md: %v", err)
 	}
 	text := string(data)
-	for _, want := range []string{"read_file", "run_command", "Do not use native shell", "raw upstream MCP servers", "bypass risk"} {
+	for _, want := range []string{"read_file", "run_command", "Do not use native shell", "raw upstream MCP servers", "bypass risk", "Native client approvals are not Nomos approvals", "do not retry the same action through a native tool"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("instruction text missing %q:\n%s", want, text)
 		}
@@ -295,7 +297,9 @@ func TestRunClaudePopulatesWiringMethodAndArgv(t *testing.T) {
 		"Verify after launch:",
 		"In Claude Code, run `/mcp`",
 		"read_file, write_file, apply_patch, run_command, http_request",
+		"run_command    -> process.exec",
 		"the session is NOT governed",
+		"Native client approvals are outside Nomos policy",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)
@@ -333,6 +337,9 @@ func TestRunCodexPassesConfigOverridesAndPrintsVerification(t *testing.T) {
 		"Verify after launch:",
 		"In codex, run `/mcp`",
 		"read_file, write_file, apply_patch, run_command, http_request",
+		"run_command    -> process.exec",
+		"Do NOT approve native client shell",
+		"Native client approvals are outside Nomos policy",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)

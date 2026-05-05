@@ -30,6 +30,8 @@ Preview guarantees:
 
 Approval previews are presentation data only. Operator UI, CLI, and explain rendering do not re-evaluate policy and do not provide an alternate execution path.
 
+Native client approvals are outside this model. A Codex or Claude prompt that asks the user to approve a native shell, file, HTTP, patch, or git action is not bound to Nomos' action fingerprint and does not satisfy a Nomos `REQUIRE_APPROVAL` decision.
+
 ## Scope
 
 Nomos supports two narrowly scoped bindings:

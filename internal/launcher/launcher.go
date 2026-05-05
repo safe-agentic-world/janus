@@ -560,6 +560,7 @@ func launcherWarnings(opts Options, cfg gateway.Config) []string {
 	warnings := []string{
 		"Local machine mode is BEST_EFFORT: Nomos cannot prevent deliberate bypass while native file, shell, HTTP, or patch tools remain enabled.",
 		"Dual-tool ambiguity: if native tools or raw MCP servers expose the same capabilities beside Nomos, actions may bypass governance.",
+		"Native client approvals are not Nomos approvals; approving a native shell, file, HTTP, patch, or git action can bypass Nomos policy.",
 		"Do not register raw filesystem, shell, GitHub, Kubernetes, or other upstream MCP servers directly beside Nomos in workspace profile mode.",
 		"Future enforcement mode will be able to exclude non-Nomos MCP servers from generated configs.",
 	}
@@ -731,10 +732,14 @@ func writeVerifyAfterLaunch(out io.Writer, result Result, opts Options) {
 	}
 	_, _ = fmt.Fprintln(out, "  - If `nomos` is missing or those tools are absent, the session is NOT governed —")
 	_, _ = fmt.Fprintln(out, "    exit and reconfigure before issuing prompts.")
+	_, _ = fmt.Fprintln(out, "  - Do NOT approve native client shell, file, patch, HTTP, or git prompts for governed actions.")
+	_, _ = fmt.Fprintln(out, "    Native client approvals are outside Nomos policy; after a Nomos DENY or approval gate,")
+	_, _ = fmt.Fprintln(out, "    use Nomos approvals or change policy instead of retrying through native tools.")
 	if result.ApprovalsEnabled && strings.TrimSpace(result.ApprovalStorePath) != "" {
 		_, _ = fmt.Fprintln(out, "  - For approval-gated actions, inspect and decide pending requests with:")
 		_, _ = fmt.Fprintf(out, "    nomos approvals list --store %s\n", result.ApprovalStorePath)
 		_, _ = fmt.Fprintf(out, "    nomos approvals approve --store %s <approval_id>\n", result.ApprovalStorePath)
+		_, _ = fmt.Fprintf(out, "    nomos approvals deny --store %s <approval_id>\n", result.ApprovalStorePath)
 	}
 }
 
@@ -780,6 +785,8 @@ Use the governed default tools:
 Do not use native shell, native file, native patch, native internet, or raw upstream MCP servers directly for governed capabilities when Nomos equivalents are available.
 
 If both native tools and Nomos tools are visible, treat the native path as a bypass risk and prefer the Nomos tool.
+
+Native client approvals are not Nomos approvals. If a Nomos tool returns DENY or REQUIRE_APPROVAL, do not retry the same action through a native tool. Ask the user to decide the request with nomos approvals or change the policy.
 
 Source: generated for %s by nomos run.
 `, target)
