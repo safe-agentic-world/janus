@@ -61,6 +61,8 @@ nomos approvals deny --store <workspace>/.nomos/approvals.json <approval_id>
 
 Custom configs keep their own `approvals` settings. If a custom config disables approvals, `REQUIRE_APPROVAL` policy decisions remain visible as policy outcomes, but there may be no pending approval record to decide from the CLI.
 
+Native client approvals are separate from Nomos approvals. If Codex or Claude asks you to approve a native shell, file, patch, HTTP, or git action after Nomos returned `DENY` or `REQUIRE_APPROVAL`, approving that native request leaves the Nomos boundary. Decide the pending request with `nomos approvals ...`, change policy, or stop the session; do not retry the same action through a native tool and call it governed.
+
 ## Tool Surface
 
 The launcher configures MCP with the friendly tool surface:
@@ -90,6 +92,8 @@ External-policy backend health is independent of this contract and remains fail-
 In workspace profile mode, Nomos should be the only exposed path for governed capabilities where possible.
 
 If native or upstream tools remain available, the launcher warns explicitly. Dual-tool ambiguity, where both native and Nomos tools expose the same capability, is a bypass risk and must be surfaced to the user.
+
+Native Codex/Claude approval prompts are part of that ambiguity. A native client approval is not cryptographically or semantically bound to the Nomos action fingerprint, so it cannot satisfy a Nomos approval gate and must be treated as an explicit bypass path.
 
 Do not register raw filesystem, shell, GitHub, Kubernetes, or other upstream MCP servers directly beside Nomos in the client. If an existing MCP config contains both Nomos and raw MCP servers, run:
 
@@ -150,3 +154,5 @@ With `--write-instructions`, Nomos emits:
 - `.codex/instructions.md`
 
 The generated instructions tell agents to use the governed tools and avoid native shell, native file, native patch, native internet, and raw upstream MCP paths when Nomos equivalents are available.
+
+They also instruct agents not to retry a Nomos `DENY` or `REQUIRE_APPROVAL` through native tools. This is a local `BEST_EFFORT` control: it improves default behavior, but hard prevention requires an environment where native tools are unavailable or separately blocked.

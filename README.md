@@ -195,6 +195,8 @@ The launcher detects the workspace, selects a policy profile, generates an MCP c
 
 Do not register raw filesystem, shell, GitHub, Kubernetes, or other upstream MCP servers directly beside Nomos when Nomos should govern those actions. If native tools or raw MCP servers remain enabled, Nomos warns because those are possible bypass paths.
 
+If your agent asks you to approve a native shell, file, HTTP, patch, or git action after Nomos denied or approval-gated it, that approval bypasses Nomos. Use `nomos approvals ...`, change policy, or stop the session.
+
 Local laptop mode is best-effort. Stronger guarantees require controlled runtimes such as containers, CI, or remote workspaces.
 
 See [docs/agent-launcher.md](./docs/agent-launcher.md).
