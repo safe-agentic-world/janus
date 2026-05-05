@@ -1104,6 +1104,11 @@ func (s *Server) handleExec(req Request, session *downstreamSession) Response {
 	if err := dec.Decode(&params); err != nil || len(params.Argv) == 0 {
 		return Response{ID: req.ID, Error: "invalid_params"}
 	}
+	var err error
+	params, err = normalizeExecParams(params)
+	if err != nil {
+		return Response{ID: req.ID, Error: "invalid_params"}
+	}
 	actionReq := action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "mcp_" + req.ID,

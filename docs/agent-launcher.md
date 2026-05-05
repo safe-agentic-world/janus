@@ -73,6 +73,8 @@ The launcher configures MCP with the friendly tool surface:
 - `run_command` -> `process.exec`
 - `http_request` -> `net.http_request`
 
+`run_command` expects direct argv tokens, for example `["git","status"]`. Some clients wrap commands as `pwsh -Command "git status"` or `cmd /c "git status"`; Nomos unwraps only simple one-command wrappers before policy evaluation and execution. Complex shell syntax such as pipes, command chaining, redirection, interpolation, and comments is rejected instead of being run through a shell.
+
 Audit, policy, explain, and approvals still use canonical action types. Existing compatibility names such as `nomos_fs_read` remain available outside friendly-only profile mode.
 
 ## Tool Visibility Contract (M63 > M31 Precedence)

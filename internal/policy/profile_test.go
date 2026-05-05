@@ -54,6 +54,7 @@ func TestDefaultPolicyProfileDecisions(t *testing.T) {
 		{name: "safe dev denies auth header dump", profile: "safe-dev", actionType: "net.http_request", resource: "url://github.com/api", params: httpParamsForTest("GET", map[string]string{"Authorization": "Bearer token"}), want: DecisionDeny},
 		{name: "safe dev denies unknown egress by default", profile: "safe-dev", actionType: "net.http_request", resource: "url://evil.example.com/api", params: httpParamsForTest("GET", nil), want: DecisionDeny},
 		{name: "ci strict denies dotenv", profile: "ci-strict", actionType: "fs.read", resource: "file://workspace/.env", params: map[string]any{"resource": ".env"}, want: DecisionDeny},
+		{name: "ci strict allows git status", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "status"), want: DecisionAllow},
 		{name: "ci strict denies git push", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "push", "origin", "main"), want: DecisionDeny},
 		{name: "ci strict denies terraform destroy", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("terraform", "destroy"), want: DecisionDeny},
 		{name: "ci strict allows go test", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("go", "test", "./..."), want: DecisionAllow},
