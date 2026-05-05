@@ -300,10 +300,36 @@ func TestDecorateHelpTextPlainForNonTerminalWriters(t *testing.T) {
 	}
 }
 
+func TestDecorateHelpTextANSIUsesConsistentSemanticStyles(t *testing.T) {
+	input := rootHelpText() + "\n" + runHelpText()
+	got := decorateHelpTextANSI(input)
+	for _, want := range []string{
+		colorizeBold(ansiCyan, "nomos commands:"),
+		colorizeBold(ansiCyan, "usage:"),
+		colorizeBold(ansiGreen, "run"),
+		colorizeBold(ansiGreen, "profiles"),
+		colorizeBold(ansiGreen, "approvals"),
+		colorize(ansiCyan, "--config"),
+		colorize(ansiCyan, "--profile"),
+		colorize(ansiYellow, "<name>"),
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("decorated help missing semantic style %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, colorize(ansiCyan, "-c")+",") {
+		t.Fatalf("expected short flag punctuation to remain outside color span:\n%s", got)
+	}
+}
+
 func TestDocumentedArtifactsExist(t *testing.T) {
 	required := []string{
+		filepath.Join("..", "..", "docs", "agent-launcher.md"),
+		filepath.Join("..", "..", "docs", "local-validation-plan.md"),
 		filepath.Join("..", "..", "docs", "obligations.md"),
 		filepath.Join("..", "..", "docs", "policy-explain.md"),
+		filepath.Join("..", "..", "docs", "decisions", "profile-and-launcher-artifacts.md"),
+		filepath.Join("..", "..", "examples", "README.md"),
 		filepath.Join("..", "..", "examples", "policies", "safe.json"),
 		filepath.Join("..", "..", "examples", "policies", "safe.yaml"),
 		filepath.Join("..", "..", "examples", "policies", "all-fields.example.json"),
@@ -424,6 +450,85 @@ func TestApprovalsListShowsStoredArgumentPreview(t *testing.T) {
 	}
 	if strings.Contains(text, "very-secret-token") {
 		t.Fatalf("approval CLI leaked secret: %s", text)
+	}
+}
+
+func TestApprovalsApproveAndDenyUpdateStore(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "approvals.json")
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	store, err := approval.OpenBackend(approval.Options{Backend: approval.BackendFile, Path: storePath, TTL: 5 * time.Minute, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("open approvals: %v", err)
+	}
+	approveRec, err := store.CreateOrGetPending(context.Background(), approval.PendingRequest{
+		Fingerprint: "fp-approve",
+		ScopeType:   approval.ScopeFingerprint,
+		ScopeKey:    "fp-approve",
+		TraceID:     "trace-approve",
+		ActionID:    "act-approve",
+		ActionType:  "process.exec",
+		Resource:    "file://workspace/",
+		ParamsHash:  "params-approve",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if err != nil {
+		t.Fatalf("create approve request: %v", err)
+	}
+	denyRec, err := store.CreateOrGetPending(context.Background(), approval.PendingRequest{
+		Fingerprint: "fp-deny",
+		ScopeType:   approval.ScopeFingerprint,
+		ScopeKey:    "fp-deny",
+		TraceID:     "trace-deny",
+		ActionID:    "act-deny",
+		ActionType:  "process.exec",
+		Resource:    "file://workspace/",
+		ParamsHash:  "params-deny",
+		Principal:   "system",
+		Agent:       "nomos",
+		Environment: "dev",
+	})
+	if err != nil {
+		t.Fatalf("create deny request: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close approvals: %v", err)
+	}
+
+	var approveOut bytes.Buffer
+	if err := executeApprovalsDecision([]string{approveRec.ApprovalID, "--store", storePath}, &approveOut, func(string) string { return "" }, func() time.Time { return now }, "APPROVE"); err != nil {
+		t.Fatalf("approve request: %v", err)
+	}
+	if !strings.Contains(approveOut.String(), "APPROVED") || !strings.Contains(approveOut.String(), approveRec.ApprovalID) {
+		t.Fatalf("expected approved text output, got %s", approveOut.String())
+	}
+	var denyOut bytes.Buffer
+	if err := executeApprovalsDecision([]string{"--store", storePath, "--format", "json", denyRec.ApprovalID}, &denyOut, func(string) string { return "" }, func() time.Time { return now }, "DENY"); err != nil {
+		t.Fatalf("deny request: %v", err)
+	}
+	if !strings.Contains(denyOut.String(), `"status": "DENIED"`) || !strings.Contains(denyOut.String(), denyRec.ApprovalID) {
+		t.Fatalf("expected denied json output, got %s", denyOut.String())
+	}
+	reopened, err := approval.OpenBackend(approval.Options{Backend: approval.BackendFile, Path: storePath, TTL: 5 * time.Minute, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("reopen approvals: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	approved, err := reopened.Lookup(context.Background(), approveRec.ApprovalID)
+	if err != nil {
+		t.Fatalf("lookup approved: %v", err)
+	}
+	if approved.Status != approval.StatusApproved {
+		t.Fatalf("expected approved status, got %+v", approved)
+	}
+	denied, err := reopened.Lookup(context.Background(), denyRec.ApprovalID)
+	if err != nil {
+		t.Fatalf("lookup denied: %v", err)
+	}
+	if denied.Status != approval.StatusDenied {
+		t.Fatalf("expected denied status, got %+v", denied)
 	}
 }
 

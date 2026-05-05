@@ -429,16 +429,28 @@ func runPolicy(args []string) {
 }
 
 func runApprovals(args []string) {
-	if len(args) == 0 {
-		cliFatal("approvals command required: list")
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		writeHelpText(os.Stderr, approvalsHelpText())
+		if len(args) == 0 {
+			os.Exit(2)
+		}
+		return
 	}
 	switch args[0] {
 	case "list":
 		if err := executeApprovalsList(args[1:], os.Stdout, os.Getenv, time.Now); err != nil {
 			cliFatalf("approvals list: %v", err)
 		}
+	case "approve":
+		if err := executeApprovalsDecision(args[1:], os.Stdout, os.Getenv, time.Now, "APPROVE"); err != nil {
+			cliFatalf("approvals approve: %v", err)
+		}
+	case "deny":
+		if err := executeApprovalsDecision(args[1:], os.Stdout, os.Getenv, time.Now, "DENY"); err != nil {
+			cliFatalf("approvals deny: %v", err)
+		}
 	default:
-		cliFatal("approvals command required: list")
+		cliFatal("approvals command required: list|approve|deny")
 	}
 }
 
@@ -641,6 +653,19 @@ type approvalListRecord struct {
 	ArgumentPreview any    `json:"argument_preview,omitempty"`
 }
 
+type approvalDecisionRecord struct {
+	ApprovalID  string `json:"approval_id"`
+	Status      string `json:"status"`
+	ExpiresAt   string `json:"expires_at"`
+	ActionType  string `json:"action_type"`
+	Resource    string `json:"resource"`
+	ScopeType   string `json:"scope_type"`
+	TraceID     string `json:"trace_id"`
+	ActionID    string `json:"action_id"`
+	ParamsHash  string `json:"params_hash"`
+	Fingerprint string `json:"fingerprint"`
+}
+
 func executeApprovalsList(args []string, stdout io.Writer, getenv func(string) string, now func() time.Time) error {
 	if getenv == nil {
 		getenv = os.Getenv
@@ -654,26 +679,10 @@ func executeApprovalsList(args []string, stdout io.Writer, getenv func(string) s
 	limit := fs.Int("limit", 50, "maximum pending approvals to list")
 	format := fs.String("format", "json", "output format: json|text")
 	fs.Parse(args)
-	resolvedStore := strings.TrimSpace(*storePath)
-	if resolvedStore == "" {
-		resolvedStore = strings.TrimSpace(getenv("NOMOS_APPROVALS_STORE_PATH"))
-	}
-	resolvedBackend := strings.TrimSpace(*storeBackend)
-	if value := strings.TrimSpace(getenv("NOMOS_APPROVALS_BACKEND")); value != "" && resolvedBackend == "auto" {
-		resolvedBackend = value
-	}
-	if resolvedStore == "" {
-		return errors.New("--store is required unless NOMOS_APPROVALS_STORE_PATH is set")
-	}
 	if *limit <= 0 {
 		return errors.New("--limit must be > 0")
 	}
-	store, err := approval.OpenBackend(approval.Options{
-		Backend: resolvedBackend,
-		Path:    resolvedStore,
-		TTL:     15 * time.Minute,
-		Now:     now,
-	})
+	store, err := openApprovalStore(*storePath, *storeBackend, getenv, now)
 	if err != nil {
 		return err
 	}
@@ -729,6 +738,111 @@ func executeApprovalsList(args []string, stdout io.Writer, getenv func(string) s
 	default:
 		return errors.New("--format must be json or text")
 	}
+}
+
+func executeApprovalsDecision(args []string, stdout io.Writer, getenv func(string) string, now func() time.Time, decision string) error {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if now == nil {
+		now = time.Now
+	}
+	approvalID, storePath, storeBackend, format, err := parseApprovalDecisionArgs(args)
+	if err != nil {
+		return err
+	}
+	if approvalID == "" {
+		return errors.New("approval_id is required")
+	}
+	store, err := openApprovalStore(storePath, storeBackend, getenv, now)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	rec, err := store.Decide(context.Background(), approvalID, decision)
+	if err != nil {
+		return err
+	}
+	item := approvalDecisionRecord{
+		ApprovalID:  rec.ApprovalID,
+		Status:      rec.Status,
+		ExpiresAt:   rec.ExpiresAt.Format(time.RFC3339Nano),
+		ActionType:  rec.ActionType,
+		Resource:    rec.Resource,
+		ScopeType:   rec.ScopeType,
+		TraceID:     rec.TraceID,
+		ActionID:    rec.ActionID,
+		ParamsHash:  rec.ParamsHash,
+		Fingerprint: rec.Fingerprint,
+	}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "text":
+		_, err := fmt.Fprintf(stdout, "%s %s %s %s expires=%s\n", item.ApprovalID, item.Status, item.ActionType, item.Resource, item.ExpiresAt)
+		return err
+	case "json":
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(item)
+	default:
+		return errors.New("--format must be text or json")
+	}
+}
+
+func parseApprovalDecisionArgs(args []string) (approvalID, storePath, storeBackend, format string, err error) {
+	storeBackend = "auto"
+	format = "text"
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch arg {
+		case "--store":
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
+				return "", "", "", "", errors.New("--store requires a value")
+			}
+			storePath = args[i]
+		case "--backend":
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
+				return "", "", "", "", errors.New("--backend requires a value")
+			}
+			storeBackend = args[i]
+		case "--format":
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
+				return "", "", "", "", errors.New("--format requires a value")
+			}
+			format = args[i]
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", "", "", "", fmt.Errorf("unknown flag %q", arg)
+			}
+			if approvalID != "" {
+				return "", "", "", "", errors.New("only one approval_id is allowed")
+			}
+			approvalID = arg
+		}
+	}
+	return approvalID, storePath, storeBackend, format, nil
+}
+
+func openApprovalStore(storePath, storeBackend string, getenv func(string) string, now func() time.Time) (approval.Backend, error) {
+	resolvedStore := strings.TrimSpace(storePath)
+	if resolvedStore == "" {
+		resolvedStore = strings.TrimSpace(getenv("NOMOS_APPROVALS_STORE_PATH"))
+	}
+	resolvedBackend := strings.TrimSpace(storeBackend)
+	if value := strings.TrimSpace(getenv("NOMOS_APPROVALS_BACKEND")); value != "" && (resolvedBackend == "" || resolvedBackend == "auto") {
+		resolvedBackend = value
+	}
+	if resolvedStore == "" {
+		return nil, errors.New("--store is required unless NOMOS_APPROVALS_STORE_PATH is set")
+	}
+	return approval.OpenBackend(approval.Options{
+		Backend: resolvedBackend,
+		Path:    resolvedStore,
+		TTL:     15 * time.Minute,
+		Now:     now,
+	})
 }
 
 const (
@@ -1560,7 +1674,7 @@ func rootHelpText() string {
 		"  run        launch codex or claude with a Nomos workspace profile\n" +
 		"  policy     policy test/explain\n" +
 		"  profiles   inspect embedded default profiles\n" +
-		"  approvals  list pending approvals\n" +
+		"  approvals  list, approve, or deny pending approvals\n" +
 		"  doctor     deterministic preflight checks\n\n" +
 		"example:\n" +
 		"  nomos mcp -c ./examples/configs/config.example.json -p ./examples/policies/your-policy-bundle.json\n"
@@ -1591,6 +1705,20 @@ func profilesHelpText() string {
 		"  nomos profiles list\n" +
 		"  nomos profiles show safe-dev\n" +
 		"  nomos profiles verify --format json\n"
+}
+
+func approvalsHelpText() string {
+	return "usage: nomos approvals <list|approve|deny> [flags]\n" +
+		"  list                         list pending approvals\n" +
+		"  approve <approval_id>        approve a pending request\n" +
+		"  deny <approval_id>           deny a pending request\n" +
+		"      --store <path>           approval store path (or NOMOS_APPROVALS_STORE_PATH)\n" +
+		"      --backend <backend>      auto|file|sqlite (or NOMOS_APPROVALS_BACKEND)\n" +
+		"      --format <fmt>           text|json\n\n" +
+		"examples:\n" +
+		"  nomos approvals list --store ./.nomos/approvals.json --format text\n" +
+		"  nomos approvals approve --store ./.nomos/approvals.json apr_123\n" +
+		"  nomos approvals deny --store ./.nomos/approvals.json apr_123\n"
 }
 
 func serveHelpText() string {
@@ -1720,23 +1848,22 @@ func decorateHelpText(w io.Writer, text string) string {
 	if !supportsColor(w) {
 		return text
 	}
+	return decorateHelpTextANSI(text)
+}
+
+func decorateHelpTextANSI(text string) string {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "usage:"):
-			lines[i] = colorize(ansiCyan, ansiBold+line+ansiReset)
-		case trimmed == "example:":
-			lines[i] = colorize(ansiYellow, ansiBold+line+ansiReset)
-		case trimmed == "nomos commands:":
-			lines[i] = colorize(ansiCyan, ansiBold+line+ansiReset)
+			lines[i] = decorateUsageLine(line)
+		case isHelpSectionHeader(trimmed):
+			lines[i] = colorizeBold(ansiCyan, line)
 		case strings.HasPrefix(line, "  nomos "):
-			lines[i] = colorize(ansiGreen, line)
-		case strings.HasPrefix(line, "  version") || strings.HasPrefix(line, "  serve") || strings.HasPrefix(line, "  mcp") || strings.HasPrefix(line, "  policy") || strings.HasPrefix(line, "  doctor"):
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				lines[i] = strings.Replace(line, fields[0], colorize(ansiGreen, fields[0]), 1)
-			}
+			lines[i] = decorateInvocationLine(line)
+		case isHelpCommandRow(line):
+			lines[i] = decorateCommandRow(line)
 		case strings.HasPrefix(line, "  -") || strings.HasPrefix(line, "      --"):
 			lines[i] = decorateFlagLine(line)
 		}
@@ -1744,19 +1871,161 @@ func decorateHelpText(w io.Writer, text string) string {
 	return strings.Join(lines, "\n")
 }
 
-func decorateFlagLine(line string) string {
-	start := 0
-	for start < len(line) && line[start] == ' ' {
-		start++
+func isHelpSectionHeader(trimmed string) bool {
+	switch trimmed {
+	case "nomos commands:", "example:", "examples:":
+		return true
+	default:
+		return false
 	}
-	end := start
-	for end < len(line) && line[end] != ' ' {
-		end++
+}
+
+func decorateUsageLine(line string) string {
+	const prefix = "usage:"
+	idx := strings.Index(line, prefix)
+	if idx < 0 {
+		return decorateHelpTokens(line, true)
 	}
-	if end <= start {
+	return line[:idx] + colorizeBold(ansiCyan, prefix) + decorateHelpTokens(line[idx+len(prefix):], true)
+}
+
+func decorateInvocationLine(line string) string {
+	return decorateHelpTokens(line, true)
+}
+
+func isHelpCommandRow(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "  -") || strings.HasPrefix(line, "      --") || fields[0] == "nomos" {
+		return false
+	}
+	return isHelpCommandToken(fields[0])
+}
+
+func decorateCommandRow(line string) string {
+	start := firstNonSpaceIndex(line)
+	if start < 0 {
 		return line
 	}
-	return line[:start] + colorize(ansiGreen, line[start:end]) + line[end:]
+	end := start
+	for end < len(line) && line[end] != ' ' && line[end] != '\t' {
+		end++
+	}
+	return line[:start] + colorizeBold(ansiGreen, line[start:end]) + decorateMetaTokens(line[end:])
+}
+
+func decorateFlagLine(line string) string {
+	return decorateMetaTokens(line)
+}
+
+func decorateHelpTokens(line string, colorCommands bool) string {
+	return decorateTokens(line, func(token string) string {
+		if colorCommands && isHelpCommandToken(token) {
+			return colorizeBold(ansiGreen, token)
+		}
+		return decorateMetaToken(token)
+	})
+}
+
+func decorateMetaTokens(line string) string {
+	return decorateTokens(line, decorateMetaToken)
+}
+
+func decorateTokens(line string, style func(string) string) string {
+	var b strings.Builder
+	for i := 0; i < len(line); {
+		if line[i] == ' ' || line[i] == '\t' {
+			b.WriteByte(line[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(line) && line[j] != ' ' && line[j] != '\t' {
+			j++
+		}
+		b.WriteString(style(line[i:j]))
+		i = j
+	}
+	return b.String()
+}
+
+func decorateMetaToken(token string) string {
+	if isFlagToken(token) {
+		return decorateTokenPrefix(token, flagTokenLength(token), ansiCyan, false)
+	}
+	if isMetaToken(token) {
+		return colorize(ansiYellow, token)
+	}
+	return token
+}
+
+func decorateTokenPrefix(token string, prefixLen int, color string, bold bool) string {
+	if prefixLen <= 0 || prefixLen > len(token) {
+		return token
+	}
+	if bold {
+		return colorizeBold(color, token[:prefixLen]) + token[prefixLen:]
+	}
+	return colorize(color, token[:prefixLen]) + token[prefixLen:]
+}
+
+func isHelpCommandToken(token string) bool {
+	switch strings.Trim(token, "[]<>.,:") {
+	case "nomos", "version", "serve", "mcp", "run", "policy", "profiles", "approvals", "doctor",
+		"list", "show", "verify", "approve", "deny", "test", "explain", "codex", "claude":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFlagToken(token string) bool {
+	return flagTokenLength(token) > 0
+}
+
+func flagTokenLength(token string) int {
+	if strings.HasPrefix(token, "--") {
+		return trimTrailingTokenPunctuation(token)
+	}
+	if strings.HasPrefix(token, "-") && len(token) > 1 && token[1] != '-' {
+		return trimTrailingTokenPunctuation(token)
+	}
+	return 0
+}
+
+func trimTrailingTokenPunctuation(token string) int {
+	end := len(token)
+	for end > 0 {
+		switch token[end-1] {
+		case ',', '.', ':', ';':
+			end--
+		default:
+			return end
+		}
+	}
+	return end
+}
+
+func isMetaToken(token string) bool {
+	token = strings.Trim(token, ",.")
+	if strings.HasPrefix(token, "<") && strings.HasSuffix(token, ">") {
+		return true
+	}
+	if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
+		return true
+	}
+	return false
+}
+
+func firstNonSpaceIndex(line string) int {
+	for i := 0; i < len(line); i++ {
+		if line[i] != ' ' && line[i] != '\t' {
+			return i
+		}
+	}
+	return -1
 }
 
 func supportsColor(w io.Writer) bool {
@@ -1779,4 +2048,8 @@ func supportsColor(w io.Writer) bool {
 
 func colorize(color, value string) string {
 	return color + value + ansiReset
+}
+
+func colorizeBold(color, value string) string {
+	return color + ansiBold + value + ansiReset
 }

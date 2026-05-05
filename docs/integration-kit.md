@@ -29,15 +29,13 @@ Shared quickstart assets used below:
 nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
-2. Start the MCP server:
+2. Launch Codex through the Nomos workspace launcher:
 
 ```powershell
-nomos mcp -c .\examples\quickstart\config.quickstart.json
+nomos run codex -c .\examples\quickstart\config.quickstart.json -p .\examples\policies\safe.yaml
 ```
 
-3. Register Nomos in Codex MCP configuration with the checked-in example:
-
-- [codex.mcp.json](../examples/local-tooling/codex.mcp.json)
+3. In Codex, run `/mcp` and confirm `nomos` is connected with friendly tools such as `read_file`, `write_file`, `apply_patch`, `run_command`, and `http_request`.
 
 4. In Codex, issue one allowed and one denied request:
 
@@ -51,9 +49,9 @@ Expected behavior:
 
 Troubleshooting:
 
-- if MCP registration fails, confirm the command uses the current `mcp -c ...` example and not stale flags
-- if actions are denied unexpectedly, confirm Codex is targeting `examples/quickstart/workspace`
-- if you see no startup banner, check whether `--quiet` is set
+- if `/mcp` does not show `nomos`, exit the session and rerun the `nomos run codex ...` launcher command
+- if actions are denied unexpectedly, confirm Codex is running from the intended workspace
+- if native tools appear beside Nomos tools, treat the session as best-effort and avoid prompts that can bypass Nomos
 
 ## Claude Code Setup
 
@@ -63,15 +61,13 @@ Troubleshooting:
 nomos doctor -c .\examples\quickstart\config.quickstart.json --format json
 ```
 
-2. Start the MCP server:
+2. Launch Claude Code through the Nomos workspace launcher:
 
 ```powershell
-nomos mcp -c .\examples\quickstart\config.quickstart.json
+nomos run claude -c .\examples\quickstart\config.quickstart.json -p .\examples\policies\safe.yaml
 ```
 
-3. Register Nomos using the checked-in example:
-
-- [claude-code-mcp.json](../examples/local-tooling/claude-code-mcp.json)
+3. In Claude Code, run `/mcp` and confirm `nomos` is connected with friendly tools such as `read_file`, `write_file`, `apply_patch`, `run_command`, and `http_request`.
 
 4. In Claude Code, run the same two requests using canonical Nomos file resources:
 

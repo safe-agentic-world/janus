@@ -191,6 +191,7 @@ Expected:
 - `Policy bundle:` points at `demo-langchain-nomos\nomos\policy.demo.yaml`
 - `Bundle source: custom (--policy-bundle path provided by operator)`
 - `MCP wiring: launcher passes --mcp-config to the agent (verified path)`
+- `Approvals:` reflects the demo config's approval-store settings
 - generated MCP config runs `nomos mcp ... --tool-surface friendly --quiet`
 - governed tools are listed as `read_file`, `write_file`, `apply_patch`, `run_command`, and `http_request`
 
@@ -386,7 +387,8 @@ nomos run claude --no-launch --print-config
 Expected:
 
 - prints `No policy provided` and defaults to `safe-dev`
-- prints profile summary, bundle source, policy hash, assurance level, MCP config path, and MCP wiring method
+- prints profile summary, bundle source, policy hash, assurance level, approval store, MCP config path, and MCP wiring method
+- generated configs enable local file approvals at `.nomos\approvals.json`
 
 Profile selection:
 
@@ -598,12 +600,15 @@ Manual CLI shape:
 
 ```powershell
 nomos approvals list --store .\.nomos\approvals.json --backend file --format json
+nomos approvals approve --store .\.nomos\approvals.json --backend file <approval_id>
+nomos approvals deny --store .\.nomos\approvals.json --backend file <approval_id>
 ```
 
 Expected:
 
-- if the store does not exist, command fails clearly
-- if a store exists, pending approvals are listed with bounded metadata and redacted argument previews where applicable
+- if the file store does not exist, Nomos creates an empty durable store and returns an empty pending list
+- pending approvals are listed with bounded metadata and redacted argument previews where applicable
+- approve and deny decisions persist in the same store and reject missing, expired, or already-finalized approval ids clearly
 
 ### J. Release-Readiness Checks
 
@@ -621,7 +626,7 @@ Expected:
 - full tests pass
 - vet passes
 - embedded profiles verify
-- launcher output matches M63/M64 expectations
+- launcher output matches M63/M64 expectations, including MCP wiring and local approval-store guidance
 
 ## Pass Criteria
 
@@ -634,7 +639,7 @@ Nomos is locally validated when:
 - embedded profile verification passes
 - profile hash pins match generated embedded copies
 - focused and full Go tests pass
-- launcher defaults to `safe-dev` and prints the policy hash and MCP wiring method
+- launcher defaults to `safe-dev` and prints the policy hash, approval store, and MCP wiring method
 - demo config doctor returns `READY`
 - demo policy allows `git status`, denies `git push`, approval-gates checkout, and denies direct order placement
 - Claude launched from `demo-langchain-nomos` through `nomos run claude -c .\nomos\config.demo.json -p .\nomos\policy.demo.yaml` shows `nomos` in `/mcp`

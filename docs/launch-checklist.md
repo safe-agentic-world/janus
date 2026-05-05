@@ -15,7 +15,10 @@ This checklist is optimized for shipping Nomos publicly to Hacker News and Reddi
 - freeze launch branch and avoid late behavioral changes
 - rerun release gate (`go test`, `-race`, `go vet`, `doctor`)
 - ensure README top section reflects exact current commands
+- ensure README docs map points to the current primary path: quickstart, agent launcher, integration kit, local validation, policy language, approvals, MCP gateway
 - verify policy starter bundles and config examples load cleanly
+- verify `examples/README.md` matches the current examples tree
+- verify launcher/profile/MCP changes updated `docs/agent-launcher.md`, `docs/integration-kit.md`, `docs/local-validation-plan.md`, and `docs/decisions/`
 - prepare post drafts and screenshots
 
 ## Launch Day
