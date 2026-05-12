@@ -7,6 +7,7 @@ The `examples/` tree contains runnable fixtures and integration references. Thes
 - `quickstart/` contains the deterministic local allow/deny workspace used by quickstart docs and smoke tests.
 - `policies/` contains starter and reference policy bundles used by docs, CI, and policy compatibility tests.
 - `configs/` contains gateway, MCP, layered-policy, and upstream gateway config examples.
+- `ci/` contains CI boundary smoke fixtures for GitHub Actions and GitLab CI.
 - `http-contract/` contains request and response examples validated against the HTTP contract schemas.
 - `http-sdk/` contains minimal Go, Python, and TypeScript SDK usage examples.
 - `openai-compatible/` contains the small HTTP loop used by the quickstart gateway demo.

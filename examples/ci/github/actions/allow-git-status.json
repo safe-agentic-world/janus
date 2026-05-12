@@ -1,0 +1,21 @@
+{
+  "schema_version": "v1",
+  "action_id": "ci-smoke-allow-git-status",
+  "action_type": "process.exec",
+  "resource": "file://workspace/",
+  "params": {
+    "argv": [
+      "git",
+      "status"
+    ],
+    "cwd": "",
+    "env_allowlist_keys": []
+  },
+  "principal": "system",
+  "agent": "nomos",
+  "environment": "ci",
+  "context": {
+    "extensions": {}
+  },
+  "trace_id": "ci-smoke-allow-git-status"
+}

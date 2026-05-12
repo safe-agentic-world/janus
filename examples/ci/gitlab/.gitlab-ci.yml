@@ -1,0 +1,21 @@
+stages:
+  - nomos-smoke
+
+nomos_ci_smoke:
+  stage: nomos-smoke
+  image: golang:1.25
+  variables:
+    GOFLAGS: "-mod=readonly"
+  script:
+    - mkdir -p bin artifacts/nomos-ci-smoke
+    - go build -o ./bin/nomos ./cmd/nomos
+    - ./bin/nomos doctor -c ./examples/ci/github/config.ci.json --format json > artifacts/nomos-ci-smoke/doctor.json
+    - ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/allow-git-status.json > artifacts/nomos-ci-smoke/allow-git-status.json
+    - ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/deny-git-push.json > artifacts/nomos-ci-smoke/deny-git-push.json
+    - ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/deny-secret-read.json > artifacts/nomos-ci-smoke/deny-secret-read.json
+    - go test ./internal/mcp -run TestNormalizeExecParamsUnwrapsPowerShellCommand -count=1
+  artifacts:
+    when: always
+    paths:
+      - artifacts/nomos-ci-smoke/
+    expire_in: 7 days

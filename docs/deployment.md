@@ -10,6 +10,7 @@ For higher-assurance deployment guidance, also see:
 - `docs/reference-architecture.md`
 - `docs/egress-and-identity.md`
 - `docs/hot-reload.md`
+- `docs/ci-boundary-smoke.md`
 
 ## Stateless Mode
 
@@ -170,6 +171,7 @@ For horizontal scaling:
 Primary workflows:
 
 - `.github/workflows/ci.yml` (`Enterprise CI`)
+- `.github/workflows/nomos-ci-smoke.yml` (`Nomos CI Boundary Smoke`)
 - `.github/workflows/codeql.yml` (`CodeQL`)
 - `.github/workflows/auto-tag-release.yml` (`Auto Tag Release`)
 - `.github/workflows/release.yml` (`Release`)
@@ -185,6 +187,8 @@ Checks:
 - `govulncheck`
 - release dry-run build on pull requests
 - CodeQL analysis on `main` and pull requests
+
+The CI boundary smoke is intentionally agent-free. It builds Nomos, runs `nomos doctor` with `examples/ci/github/config.ci.json`, evaluates `ci-strict` action fixtures, and uploads deterministic artifacts. See `docs/ci-boundary-smoke.md`.
 
 ## Kubernetes Readiness
 
