@@ -21,6 +21,12 @@ nomos_ci_smoke:
     - grep -q "Profile:       ci-strict" artifacts/nomos-ci-smoke/claude-launcher.txt
     - grep -q "MCP wiring:" artifacts/nomos-ci-smoke/claude-launcher.txt
     - grep -q "Native client approvals are not Nomos approvals" artifacts/nomos-ci-smoke/claude-launcher.txt
+    - ./bin/nomos job run --agent codex --profile ci-strict --task ./examples/ci/tasks/noop.md --dry-run --artifact-dir artifacts/nomos-ci-smoke/job-codex-dry-run
+    - ./bin/nomos job run --agent claude --profile ci-strict --task ./examples/ci/tasks/noop.md --dry-run --artifact-dir artifacts/nomos-ci-smoke/job-claude-dry-run
+    - grep -q '"agent": "codex"' artifacts/nomos-ci-smoke/job-codex-dry-run/job-metadata.json
+    - grep -q '"exit_reason": "dry_run"' artifacts/nomos-ci-smoke/job-codex-dry-run/job-metadata.json
+    - grep -q '"agent": "claude"' artifacts/nomos-ci-smoke/job-claude-dry-run/job-metadata.json
+    - grep -q '"exit_reason": "dry_run"' artifacts/nomos-ci-smoke/job-claude-dry-run/job-metadata.json
     - go test ./internal/mcp -run TestNormalizeExecParamsUnwrapsPowerShellCommand -count=1
   artifacts:
     when: always

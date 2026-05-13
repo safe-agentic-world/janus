@@ -104,6 +104,44 @@ jobs:
                   assert needle in text, f"{name} missing {needle!r}"
           PY
 
+      - name: Governed job runner dry-run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./bin/nomos job run \
+            --agent codex \
+            --profile ci-strict \
+            --task ./examples/ci/tasks/noop.md \
+            --dry-run \
+            --artifact-dir artifacts/nomos-ci-smoke/job-codex-dry-run
+
+          ./bin/nomos job run \
+            --agent claude \
+            --profile ci-strict \
+            --task ./examples/ci/tasks/noop.md \
+            --dry-run \
+            --artifact-dir artifacts/nomos-ci-smoke/job-claude-dry-run
+
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          for name, agent in [("job-codex-dry-run", "codex"), ("job-claude-dry-run", "claude")]:
+              root = pathlib.Path("artifacts/nomos-ci-smoke", name)
+              metadata = json.loads((root / "job-metadata.json").read_text())
+              assert metadata["agent"] == agent, metadata
+              assert metadata["profile"] == "ci-strict", metadata
+              assert metadata["exit_reason"] == "dry_run", metadata
+              assert metadata["policy_bundle_hash"], metadata
+              assert metadata["assurance_level"], metadata
+              assert metadata["mcp_wiring_method"] == "skipped", metadata
+              assert (root / "mcp-config.json").exists(), metadata
+              assert (root / "audit.jsonl").exists(), metadata
+              assert (root / "changed-files.json").exists(), metadata
+              assert (root / "policy-summary.json").exists(), metadata
+          PY
+
       - name: MCP process smoke
         run: go test ./internal/mcp -run TestNormalizeExecParamsUnwrapsPowerShellCommand -count=1
 

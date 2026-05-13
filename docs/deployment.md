@@ -11,6 +11,7 @@ For higher-assurance deployment guidance, also see:
 - `docs/egress-and-identity.md`
 - `docs/hot-reload.md`
 - `docs/ci-boundary-smoke.md`
+- `docs/job-runner.md`
 
 ## Stateless Mode
 
@@ -188,7 +189,7 @@ Checks:
 - release dry-run build on pull requests
 - CodeQL analysis on `main` and pull requests
 
-The CI boundary smoke is intentionally agent-free. It builds Nomos, runs `nomos doctor` with `examples/ci/github/config.ci.json`, evaluates `ci-strict` action fixtures, generates Codex/Claude launcher configs with `--no-launch --print-config`, and uploads deterministic artifacts. See `docs/ci-boundary-smoke.md`.
+The CI boundary smoke is intentionally agent-free. It builds Nomos, runs `nomos doctor` with `examples/ci/github/config.ci.json`, evaluates `ci-strict` action fixtures, generates Codex/Claude launcher configs with `--no-launch --print-config`, runs `nomos job run --dry-run` for both agents, and uploads deterministic artifacts. See `docs/ci-boundary-smoke.md` and `docs/job-runner.md`.
 
 ## Kubernetes Readiness
 

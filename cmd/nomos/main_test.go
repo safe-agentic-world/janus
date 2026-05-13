@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/safe-agentic-world/nomos/internal/canonicaljson"
 	"github.com/safe-agentic-world/nomos/internal/doctor"
 	"github.com/safe-agentic-world/nomos/internal/gateway"
+	jobpkg "github.com/safe-agentic-world/nomos/internal/job"
 	"github.com/safe-agentic-world/nomos/internal/mcp"
 	"github.com/safe-agentic-world/nomos/internal/normalize"
 	"github.com/safe-agentic-world/nomos/internal/policy"
@@ -169,12 +171,63 @@ func TestHelpTextStability(t *testing.T) {
 	if !strings.Contains(root, "profiles") {
 		t.Fatalf("expected profiles command in root help: %q", root)
 	}
+	if !strings.Contains(root, "job") {
+		t.Fatalf("expected job command in root help: %q", root)
+	}
 	if !strings.Contains(mcp, "-c, --config") || !strings.Contains(mcp, "-p, --policy-bundle") || !strings.Contains(mcp, "-l, --log-level") || !strings.Contains(mcp, "-q, --quiet") {
 		t.Fatalf("missing short/long flags in mcp help: %q", mcp)
 	}
 	if !strings.Contains(mcp, "nomos mcp serve --http --listen 127.0.0.1:8090") {
 		t.Fatalf("expected mcp serve example in help: %q", mcp)
 	}
+}
+
+func TestJobRunCommandParsing(t *testing.T) {
+	saved := executeJobRun
+	defer func() { executeJobRun = saved }()
+	var got jobpkg.Options
+	executeJobRun = func(opts jobpkg.Options) (jobpkg.Result, error) {
+		got = opts
+		return jobpkg.Result{ExitCode: jobpkg.ExitSuccess}, nil
+	}
+	workspace := t.TempDir()
+	artifactDir := filepath.Join(workspace, "artifacts", "job")
+	code := runJobCommand([]string{
+		"run",
+		"--agent", "codex",
+		"--profile", "ci-strict",
+		"--task", "examples/ci/tasks/noop.md",
+		"--workspace", workspace,
+		"--artifact-dir", artifactDir,
+		"--dry-run",
+	}, io.Discard, io.Discard, func(string) string { return "" }, fixedMainTestNow)
+	if code != 0 {
+		t.Fatalf("expected success exit code, got %d", code)
+	}
+	if got.Agent != "codex" || got.Profile != "ci-strict" || got.TaskPath != "examples/ci/tasks/noop.md" || got.WorkspaceRoot != workspace || got.ArtifactDir != artifactDir || !got.DryRun {
+		t.Fatalf("unexpected parsed options: %+v", got)
+	}
+}
+
+func TestJobRunCommandPolicyAlias(t *testing.T) {
+	saved := executeJobRun
+	defer func() { executeJobRun = saved }()
+	var got jobpkg.Options
+	executeJobRun = func(opts jobpkg.Options) (jobpkg.Result, error) {
+		got = opts
+		return jobpkg.Result{ExitCode: jobpkg.ExitSuccess}, nil
+	}
+	code := runJobCommand([]string{"run", "--agent", "claude", "--policy", "nomos/policy.yaml", "--task", "task.md", "--no-launch"}, io.Discard, io.Discard, func(string) string { return "" }, fixedMainTestNow)
+	if code != 0 {
+		t.Fatalf("expected success exit code, got %d", code)
+	}
+	if got.Agent != "claude" || got.PolicyBundlePath != "nomos/policy.yaml" || got.TaskPath != "task.md" || !got.NoLaunch {
+		t.Fatalf("unexpected parsed options: %+v", got)
+	}
+}
+
+func fixedMainTestNow() time.Time {
+	return time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
 }
 
 func TestProfilesListShowsEmbeddedHashes(t *testing.T) {
