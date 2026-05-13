@@ -123,6 +123,146 @@ func TestRunClaudeNoLaunchWritesGeneratedConfigAndAudit(t *testing.T) {
 	}
 }
 
+func TestRunCILauncherPreflightNoLaunchPrintsInspectableConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		agent        string
+		wiringMethod string
+		wiringText   string
+	}{
+		{
+			name:         "codex",
+			agent:        AgentCodex,
+			wiringMethod: mcpWiringCodexConfigOverride,
+			wiringText:   "MCP wiring:    launcher passes Codex MCP config overrides",
+		},
+		{
+			name:         "claude",
+			agent:        AgentClaude,
+			wiringMethod: mcpWiringMCPConfigFlag,
+			wiringText:   "MCP wiring:    launcher passes --mcp-config to the agent",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			var out bytes.Buffer
+			result, err := Run(Options{
+				Agent:         tc.agent,
+				WorkspaceRoot: workspace,
+				Profile:       "ci-strict",
+				NoLaunch:      true,
+				PrintConfig:   true,
+				NomosCommand:  "nomos",
+				Stdout:        &out,
+				Getenv:        ciLikeEnv(t.TempDir()),
+				Now:           fixedTime,
+			})
+			if err != nil {
+				t.Fatalf("run launcher: %v", err)
+			}
+			if result.MCPWiringMethod != tc.wiringMethod {
+				t.Fatalf("expected wiring method %q, got %q", tc.wiringMethod, result.MCPWiringMethod)
+			}
+			assertOnlyNomosMCPServer(t, result.MCPConfigJSON)
+			if _, err := os.Stat(result.MCPConfigPath); err != nil {
+				t.Fatalf("expected generated MCP config path: %v", err)
+			}
+			got := out.String()
+			for _, want := range []string{
+				"Profile:       ci-strict",
+				"Assurance:",
+				"Approvals:",
+				tc.wiringText,
+				"run_command    -> process.exec",
+				"http_request   -> net.http_request",
+				"Native client approvals are not Nomos approvals",
+				"Generated MCP config:",
+				`"mcpServers"`,
+				`"--tool-surface"`,
+				`"friendly"`,
+				`"--quiet"`,
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("output missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRunCILauncherDryRunDoesNotCreateSessionArtifacts(t *testing.T) {
+	for _, agent := range []string{AgentCodex, AgentClaude} {
+		t.Run(agent, func(t *testing.T) {
+			workspace := t.TempDir()
+			var out bytes.Buffer
+			result, err := Run(Options{
+				Agent:         agent,
+				WorkspaceRoot: workspace,
+				Profile:       "ci-strict",
+				DryRun:        true,
+				PrintConfig:   true,
+				NomosCommand:  "nomos",
+				Stdout:        &out,
+				Getenv:        ciLikeEnv(t.TempDir()),
+				Now:           fixedTime,
+			})
+			if err != nil {
+				t.Fatalf("run launcher: %v", err)
+			}
+			if result.MCPConfigPath != "" || result.MCPWiringMethod != mcpWiringSkipped {
+				t.Fatalf("dry-run must not plan real MCP wiring: %+v", result)
+			}
+			assertOnlyNomosMCPServer(t, result.MCPConfigJSON)
+			if _, err := os.Stat(filepath.Join(workspace, ".nomos")); !os.IsNotExist(err) {
+				t.Fatalf("dry-run should not write .nomos directory, stat err=%v", err)
+			}
+			got := out.String()
+			for _, want := range []string{"Profile:       ci-strict", "MCP wiring:    <dry-run>", "Generated MCP config:"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("output missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRunCILauncherPreflightFallsBackToEmbeddedProfileWithoutCheckout(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	saved := repoRootForProfileLookup
+	repoRootForProfileLookup = func() string { return "" }
+	t.Cleanup(func() { repoRootForProfileLookup = saved })
+
+	var out bytes.Buffer
+	result, err := Run(Options{
+		Agent:         AgentCodex,
+		WorkspaceRoot: workspace,
+		Profile:       "ci-strict",
+		NoLaunch:      true,
+		PrintConfig:   true,
+		NomosCommand:  "nomos",
+		Stdout:        &out,
+		Getenv:        ciLikeEnv(home),
+		Now:           fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("run launcher: %v", err)
+	}
+	if result.PolicyBundleSource != profileSourceEmbedded {
+		t.Fatalf("expected embedded profile source, got %q", result.PolicyBundleSource)
+	}
+	if want := filepath.Join(home, ".nomos", "profiles", "ci-strict.yaml"); result.PolicyBundlePath != want {
+		t.Fatalf("expected materialized ci-strict profile %s, got %s", want, result.PolicyBundlePath)
+	}
+	assertOnlyNomosMCPServer(t, result.MCPConfigJSON)
+	got := out.String()
+	for _, want := range []string{"Bundle source: embedded", "Profile:       ci-strict", "Generated MCP config:"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestPolicyBundleAndProfileAreMutuallyExclusive(t *testing.T) {
 	_, err := Run(Options{
 		Agent:            AgentCodex,
@@ -610,8 +750,47 @@ func emptyEnv(string) string {
 	return ""
 }
 
+func ciLikeEnv(home string) func(string) string {
+	return func(key string) string {
+		switch key {
+		case "CI", "GITHUB_ACTIONS":
+			return "true"
+		case "GITHUB_WORKFLOW":
+			return "Nomos CI Boundary Smoke"
+		case "NOMOS_HOME_OVERRIDE":
+			return home
+		default:
+			return ""
+		}
+	}
+}
+
 func fixedTime() time.Time {
 	return time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+}
+
+func assertOnlyNomosMCPServer(t *testing.T, data []byte) {
+	t.Helper()
+	var cfg mcpClientConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode mcp config: %v", err)
+	}
+	if len(cfg.MCPServers) != 1 {
+		t.Fatalf("expected exactly one MCP server, got %+v", cfg.MCPServers)
+	}
+	nomos, ok := cfg.MCPServers["nomos"]
+	if !ok {
+		t.Fatalf("expected nomos MCP server, got %+v", cfg.MCPServers)
+	}
+	if nomos.Command != "nomos" {
+		t.Fatalf("unexpected nomos command: %+v", nomos)
+	}
+	gotArgs := strings.Join(nomos.Args, "\x00")
+	for _, want := range []string{"mcp", "-c", "-p", "--tool-surface", "friendly", "--quiet"} {
+		if !strings.Contains(gotArgs, want) {
+			t.Fatalf("generated nomos MCP args missing %q: %+v", want, nomos.Args)
+		}
+	}
 }
 
 func assertLauncherAuditEvent(t *testing.T, path string) {
