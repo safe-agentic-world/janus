@@ -1,0 +1,85 @@
+name: Nomos CI Boundary Smoke
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nomos-ci-smoke:
+    name: CI Boundary Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version: "1.25.10"
+          cache: true
+
+      - name: Build nomos
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin artifacts/nomos-ci-smoke
+          go build -o ./bin/nomos ./cmd/nomos
+
+      - name: Doctor CI posture
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./bin/nomos doctor -c ./examples/ci/github/config.ci.json --format json > artifacts/nomos-ci-smoke/doctor.json
+          cat artifacts/nomos-ci-smoke/doctor.json
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          payload = json.loads(pathlib.Path("artifacts/nomos-ci-smoke/doctor.json").read_text())
+          assert payload["overall_status"] == "READY", payload
+          assert payload["assurance_level"] in {"GUARDED", "BEST_EFFORT"}, payload
+          assert payload["policy_bundle_hash"], payload
+          PY
+
+      - name: Policy decision fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/allow-git-status.json > artifacts/nomos-ci-smoke/allow-git-status.json
+          ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/deny-git-push.json > artifacts/nomos-ci-smoke/deny-git-push.json
+          ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/deny-secret-read.json > artifacts/nomos-ci-smoke/deny-secret-read.json
+
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          expected = {
+              "allow-git-status.json": "ALLOW",
+              "deny-git-push.json": "DENY",
+              "deny-secret-read.json": "DENY",
+          }
+          root = pathlib.Path("artifacts/nomos-ci-smoke")
+          for name, decision in expected.items():
+              payload = json.loads((root / name).read_text())
+              assert payload["decision"] == decision, payload
+              assert payload["policy_bundle_hash"], payload
+          PY
+
+      - name: MCP process smoke
+        run: go test ./internal/mcp -run TestNormalizeExecParamsUnwrapsPowerShellCommand -count=1
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nomos-ci-smoke
+          path: artifacts/nomos-ci-smoke/
+          if-no-files-found: error

@@ -1,0 +1,23 @@
+{
+  "schema_version": "v1",
+  "action_id": "ci-smoke-deny-git-push",
+  "action_type": "process.exec",
+  "resource": "file://workspace/",
+  "params": {
+    "argv": [
+      "git",
+      "push",
+      "origin",
+      "main"
+    ],
+    "cwd": "",
+    "env_allowlist_keys": []
+  },
+  "principal": "system",
+  "agent": "nomos",
+  "environment": "ci",
+  "context": {
+    "extensions": {}
+  },
+  "trace_id": "ci-smoke-deny-git-push"
+}
