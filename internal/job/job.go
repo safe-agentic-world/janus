@@ -118,6 +118,7 @@ type policySummary struct {
 	ExitReason      string `json:"exit_reason"`
 	PolicyDenied    int    `json:"policy_denied"`
 	ApprovalPending int    `json:"approval_pending"`
+	AgentFailure    int    `json:"agent_failure"`
 }
 
 type auditEvent struct {
@@ -205,6 +206,14 @@ func Run(opts Options) (Result, error) {
 		return result, err
 	}
 	result.ArtifactDir = artifactDir
+	result.MCPConfigPath = filepath.Join(artifactDir, "mcp-config.json")
+	result.AuditPath = filepath.Join(artifactDir, "audit.jsonl")
+	result.ChangedFilesPath = filepath.Join(artifactDir, "changed-files.json")
+	result.PolicySummaryPath = filepath.Join(artifactDir, "policy-summary.json")
+	result.MetadataPath = filepath.Join(artifactDir, "job-metadata.json")
+	if !opts.DryRun && !opts.NoLaunch && (result.Agent == launcher.AgentCodex || result.Agent == launcher.AgentClaude) {
+		result.AgentTranscript = filepath.Join(artifactDir, "agent-final-message.txt")
+	}
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		result.ExitCode = ExitInternalError
 		result.ExitReason = ReasonInternalError
@@ -212,6 +221,17 @@ func Run(opts Options) (Result, error) {
 	}
 
 	before := gitStatus(workspace)
+	var agentStdout io.Writer
+	var transcriptFile *os.File
+	if result.Agent == launcher.AgentClaude && result.AgentTranscript != "" {
+		transcriptFile, err = os.Create(result.AgentTranscript)
+		if err != nil {
+			result.ExitCode = ExitInternalError
+			result.ExitReason = ReasonInternalError
+			return result, fmt.Errorf("create agent transcript artifact: %w", err)
+		}
+		agentStdout = transcriptFile
+	}
 	launcherResult, launchErr := opts.Launch(launcher.Options{
 		Agent:            result.Agent,
 		ConfigPath:       opts.ConfigPath,
@@ -223,10 +243,17 @@ func Run(opts Options) (Result, error) {
 		NomosCommand:     opts.NomosCommand,
 		Stdout:           io.Discard,
 		Stderr:           opts.Stderr,
+		AgentStdout:      agentStdout,
+		AgentStderr:      opts.Stderr,
 		Getenv:           opts.Getenv,
-		Args:             agentArgs(result.Agent, workspace, taskPath, taskText),
+		Args:             agentArgs(result.Agent, workspace, taskPath, taskText, result.AgentTranscript),
 		Now:              opts.Now,
 	})
+	if transcriptFile != nil {
+		if err := transcriptFile.Close(); err != nil && launchErr == nil {
+			launchErr = fmt.Errorf("close agent transcript artifact: %w", err)
+		}
+	}
 
 	result.Profile = launcherResult.Profile
 	result.PolicyBundlePath = launcherResult.PolicyBundlePath
@@ -235,11 +262,6 @@ func Run(opts Options) (Result, error) {
 	result.MCPWiringMethod = launcherResult.MCPWiringMethod
 	result.ApprovalStorePath = launcherResult.ApprovalStorePath
 	result.LauncherConfigPath = launcherResult.ConfigPath
-	result.MCPConfigPath = filepath.Join(artifactDir, "mcp-config.json")
-	result.AuditPath = filepath.Join(artifactDir, "audit.jsonl")
-	result.ChangedFilesPath = filepath.Join(artifactDir, "changed-files.json")
-	result.PolicySummaryPath = filepath.Join(artifactDir, "policy-summary.json")
-	result.MetadataPath = filepath.Join(artifactDir, "job-metadata.json")
 
 	if len(launcherResult.MCPConfigJSON) > 0 {
 		if err := os.WriteFile(result.MCPConfigPath, launcherResult.MCPConfigJSON, 0o600); err != nil {
@@ -249,7 +271,8 @@ func Run(opts Options) (Result, error) {
 		}
 	}
 
-	result.ExitCode, result.ExitReason = classifyLaunchOutcome(opts, launchErr)
+	agentTranscript, agentTranscriptFound := readOptionalText(result.AgentTranscript)
+	result.ExitCode, result.ExitReason = classifyLaunchOutcome(opts, launchErr, result.AgentTranscript != "", agentTranscriptFound, agentTranscript)
 	if launchErr != nil {
 		result.LauncherError = launchErr.Error()
 	}
@@ -334,13 +357,17 @@ func jobID(start time.Time, agent, workspace, taskPath string) string {
 	return "job-" + start.Format("20060102T150405Z") + "-" + hex.EncodeToString(sum[:])[:12]
 }
 
-func agentArgs(agent, workspace, taskPath, taskText string) []string {
+func agentArgs(agent, workspace, taskPath, taskText, transcriptPath string) []string {
 	prompt := "Run this Nomos-governed CI job in workspace " + workspace + ".\n" +
 		"Use only Nomos MCP tools for governed file, patch, shell, git, and HTTP actions.\n" +
 		"Task file: " + taskPath + "\n\n" + taskText
 	switch agent {
 	case launcher.AgentCodex:
-		return []string{"-C", workspace, "--ask-for-approval", "never", "--sandbox", "read-only", "exec", prompt}
+		args := []string{"-C", workspace, "--ask-for-approval", "never", "--sandbox", "read-only"}
+		if strings.TrimSpace(transcriptPath) != "" {
+			args = append(args, "-o", transcriptPath)
+		}
+		return append(args, "exec", prompt)
 	case launcher.AgentClaude:
 		return []string{"--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--print", prompt}
 	default:
@@ -348,13 +375,19 @@ func agentArgs(agent, workspace, taskPath, taskText string) []string {
 	}
 }
 
-func classifyLaunchOutcome(opts Options, err error) (int, string) {
+func classifyLaunchOutcome(opts Options, err error, agentTranscriptExpected, agentTranscriptFound bool, agentTranscript string) (int, string) {
 	if err == nil {
 		if opts.DryRun {
 			return ExitSuccess, ReasonDryRun
 		}
 		if opts.NoLaunch {
 			return ExitSuccess, ReasonNoLaunch
+		}
+		if agentTranscriptExpected && (!agentTranscriptFound || strings.TrimSpace(agentTranscript) == "") {
+			return ExitAgentFailure, ReasonAgentFailure
+		}
+		if agentTranscriptIndicatesFailure(agentTranscript) {
+			return ExitAgentFailure, ReasonAgentFailure
 		}
 		return ExitSuccess, ReasonSuccess
 	}
@@ -371,6 +404,46 @@ func classifyLaunchOutcome(opts Options, err error) (int, string) {
 	default:
 		return ExitInternalError, ReasonInternalError
 	}
+}
+
+func readOptionalText(path string) (string, bool) {
+	if strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+func agentTranscriptIndicatesFailure(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	normalized = strings.NewReplacer("\u2019", "'", "\u2018", "'", "\u201c", "\"", "\u201d", "\"").Replace(normalized)
+	if normalized == "" {
+		return false
+	}
+	markers := []string{
+		"user cancelled mcp tool call",
+		"user canceled mcp tool call",
+		"mcp tool call was cancelled",
+		"mcp tool call was canceled",
+		"nomos `read_file` call was cancelled",
+		"nomos `read_file` call was canceled",
+		"i can't proceed",
+		"i cannot proceed",
+		"required nomos mcp",
+		"required nomos tool",
+		"allow the nomos mcp",
+		"allow the nomos tool",
+		"switch the sandbox",
+	}
+	for _, marker := range markers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeArtifacts(result Result, opts Options, launcherResult launcher.Result, before, after changedFilesSummary) error {
@@ -393,6 +466,9 @@ func writeArtifacts(result Result, opts Options, launcherResult launcher.Result,
 	}
 	if result.ExitReason == ReasonApprovalPending {
 		summary.ApprovalPending = 1
+	}
+	if result.ExitReason == ReasonAgentFailure {
+		summary.AgentFailure = 1
 	}
 	if err := writeJSON(result.PolicySummaryPath, summary); err != nil {
 		return fmt.Errorf("write policy summary artifact: %w", err)
@@ -522,6 +598,9 @@ func writeSummary(out io.Writer, result Result) {
 	_, _ = fmt.Fprintf(out, "  audit:          %s\n", result.AuditPath)
 	_, _ = fmt.Fprintf(out, "  changed_files:  %s\n", result.ChangedFilesPath)
 	_, _ = fmt.Fprintf(out, "  policy_summary: %s\n", result.PolicySummaryPath)
+	if result.AgentTranscript != "" {
+		_, _ = fmt.Fprintf(out, "  agent_message:  %s\n", result.AgentTranscript)
+	}
 	if result.ApprovalStorePath != "" {
 		_, _ = fmt.Fprintln(out)
 		_, _ = fmt.Fprintln(out, "Approval commands:")

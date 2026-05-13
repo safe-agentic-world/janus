@@ -41,9 +41,9 @@ Each job writes:
 - `mcp-config.json`: generated client config that registers only Nomos MCP.
 - `audit.jsonl`: job-level audit event.
 - `changed-files.json`: best-effort git status summary before and after the job.
-- `policy-summary.json`: deterministic policy-denied and approval-pending counters for Nomos-observed outcomes.
+- `policy-summary.json`: deterministic counters for Nomos-observed policy denied, approval pending, and agent failure outcomes.
 
-If the selected agent exposes a transcript path in a future integration, the metadata has a dedicated `agent_transcript_path` field.
+Live agent jobs also write `agent-final-message.txt` and expose it through `agent_transcript_path` in `job-metadata.json`. For Codex, Nomos asks the CLI to write the final message artifact. For Claude Code, Nomos captures `--print` stdout into the same artifact. Nomos uses that final message to fail closed when the agent exits successfully but reports that required Nomos MCP calls were cancelled, produces no final message, or says it could not proceed.
 
 ## Exit Codes
 
@@ -51,10 +51,10 @@ If the selected agent exposes a transcript path in a future integration, the met
 - `2`: invalid job input, invalid config, invalid profile, or invalid policy bundle.
 - `10`: Nomos-observed policy denial.
 - `11`: Nomos-observed approval pending.
-- `12`: agent launch or agent process failure.
+- `12`: agent launch failure, agent process failure, or agent-reported inability to complete the governed task.
 - `1`: internal Nomos job runner error.
 
-Policy denials and approval-pending outcomes are deterministic when Nomos observes the failure at the boundary. A fully external agent process can still fail without structured policy detail; that is reported as agent failure unless the error is clearly classifiable.
+Policy denials and approval-pending outcomes are deterministic when Nomos observes the failure at the boundary. A fully external agent process can still fail without structured policy detail; that is reported as agent failure unless the error is clearly classifiable. For live Codex and Claude Code jobs, Nomos also captures the final agent message and treats missing output, explicit MCP cancellation, or cannot-proceed messages as agent failure instead of successful completion.
 
 ## GitHub Actions
 
