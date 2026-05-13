@@ -257,7 +257,7 @@ func Run(opts Options) (Result, error) {
 	if opts.DryRun || opts.NoLaunch {
 		return result, nil
 	}
-	if err := launchAgent(agent, mcpConfigPath, mcpServer, opts.Args); err != nil {
+	if err := launchAgent(agent, workspaceRoot, mcpConfigPath, mcpServer, opts.Args); err != nil {
 		return result, err
 	}
 	result.Launched = true
@@ -909,7 +909,7 @@ func resolveAgentLaunchPlan(agent, mcpConfigPath string, server mcpClientServer,
 	return plan, nil
 }
 
-func launchAgent(agent, mcpConfigPath string, server mcpClientServer, args []string) error {
+func launchAgent(agent, workspaceRoot, mcpConfigPath string, server mcpClientServer, args []string) error {
 	bin, err := exec.LookPath(agent)
 	if err != nil {
 		return fmt.Errorf("%s executable not found; rerun with --no-launch or configure the client with %s: %w", agent, mcpConfigPath, err)
@@ -919,6 +919,7 @@ func launchAgent(agent, mcpConfigPath string, server mcpClientServer, args []str
 		return err
 	}
 	cmd := exec.Command(bin, plan.Argv...)
+	cmd.Dir = workspaceRoot
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
