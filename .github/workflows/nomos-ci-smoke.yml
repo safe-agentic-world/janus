@@ -73,6 +73,37 @@ jobs:
               assert payload["policy_bundle_hash"], payload
           PY
 
+      - name: Agent launcher preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./bin/nomos run codex --profile ci-strict --no-launch --print-config > artifacts/nomos-ci-smoke/codex-launcher.txt
+          ./bin/nomos run claude --profile ci-strict --no-launch --print-config > artifacts/nomos-ci-smoke/claude-launcher.txt
+
+          python3 - <<'PY'
+          import pathlib
+
+          required = [
+              "Profile:       ci-strict",
+              "Assurance:",
+              "Approvals:",
+              "MCP wiring:",
+              "run_command    -> process.exec",
+              "http_request   -> net.http_request",
+              "Native client approvals are not Nomos approvals",
+              "\"mcpServers\"",
+              "\"nomos\"",
+              "\"--tool-surface\"",
+              "\"friendly\"",
+              "\"--quiet\"",
+          ]
+          for name in ["codex-launcher.txt", "claude-launcher.txt"]:
+              text = pathlib.Path("artifacts/nomos-ci-smoke", name).read_text()
+              for needle in required:
+                  assert needle in text, f"{name} missing {needle!r}"
+          PY
+
       - name: MCP process smoke
         run: go test ./internal/mcp -run TestNormalizeExecParamsUnwrapsPowerShellCommand -count=1
 

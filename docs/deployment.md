@@ -188,7 +188,7 @@ Checks:
 - release dry-run build on pull requests
 - CodeQL analysis on `main` and pull requests
 
-The CI boundary smoke is intentionally agent-free. It builds Nomos, runs `nomos doctor` with `examples/ci/github/config.ci.json`, evaluates `ci-strict` action fixtures, and uploads deterministic artifacts. See `docs/ci-boundary-smoke.md`.
+The CI boundary smoke is intentionally agent-free. It builds Nomos, runs `nomos doctor` with `examples/ci/github/config.ci.json`, evaluates `ci-strict` action fixtures, generates Codex/Claude launcher configs with `--no-launch --print-config`, and uploads deterministic artifacts. See `docs/ci-boundary-smoke.md`.
 
 ## Kubernetes Readiness
 

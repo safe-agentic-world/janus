@@ -13,6 +13,14 @@ nomos_ci_smoke:
     - ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/allow-git-status.json > artifacts/nomos-ci-smoke/allow-git-status.json
     - ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/deny-git-push.json > artifacts/nomos-ci-smoke/deny-git-push.json
     - ./bin/nomos policy test --bundle ./profiles/ci-strict.yaml --action ./examples/ci/github/actions/deny-secret-read.json > artifacts/nomos-ci-smoke/deny-secret-read.json
+    - ./bin/nomos run codex --profile ci-strict --no-launch --print-config > artifacts/nomos-ci-smoke/codex-launcher.txt
+    - ./bin/nomos run claude --profile ci-strict --no-launch --print-config > artifacts/nomos-ci-smoke/claude-launcher.txt
+    - grep -q "Profile:       ci-strict" artifacts/nomos-ci-smoke/codex-launcher.txt
+    - grep -q "MCP wiring:" artifacts/nomos-ci-smoke/codex-launcher.txt
+    - grep -q "Native client approvals are not Nomos approvals" artifacts/nomos-ci-smoke/codex-launcher.txt
+    - grep -q "Profile:       ci-strict" artifacts/nomos-ci-smoke/claude-launcher.txt
+    - grep -q "MCP wiring:" artifacts/nomos-ci-smoke/claude-launcher.txt
+    - grep -q "Native client approvals are not Nomos approvals" artifacts/nomos-ci-smoke/claude-launcher.txt
     - go test ./internal/mcp -run TestNormalizeExecParamsUnwrapsPowerShellCommand -count=1
   artifacts:
     when: always

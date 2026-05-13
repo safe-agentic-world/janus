@@ -82,6 +82,8 @@ func TestCIBoundarySmokeDocsAndWorkflowsReferenceExistingFiles(t *testing.T) {
 		"examples/ci/github/actions/deny-git-push.json",
 		"examples/ci/github/actions/deny-secret-read.json",
 		"does not launch an AI agent",
+		"codex-launcher.txt",
+		"claude-launcher.txt",
 	} {
 		if !strings.Contains(doc, snippet) {
 			t.Fatalf("ci boundary smoke doc missing %q", snippet)
@@ -94,6 +96,10 @@ func TestCIBoundarySmokeDocsAndWorkflowsReferenceExistingFiles(t *testing.T) {
 		"profiles/ci-strict.yaml",
 		"actions/upload-artifact",
 		"artifacts/nomos-ci-smoke",
+		"nomos run codex --profile ci-strict --no-launch --print-config",
+		"nomos run claude --profile ci-strict --no-launch --print-config",
+		"codex-launcher.txt",
+		"claude-launcher.txt",
 		"TestNormalizeExecParamsUnwrapsPowerShellCommand",
 	} {
 		if !strings.Contains(workflow, snippet) {
