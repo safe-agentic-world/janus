@@ -113,6 +113,42 @@ func TestJobRunUsesLauncherForRealAgentInvocation(t *testing.T) {
 	}
 }
 
+func TestCodexJobOutputFlagBelongsToExecSubcommand(t *testing.T) {
+	workspace, task := writeJobTask(t, "Fix tests.")
+	var got launcher.Options
+	_, err := Run(Options{
+		Agent:         launcher.AgentCodex,
+		TaskPath:      task,
+		Profile:       "ci-strict",
+		WorkspaceRoot: workspace,
+		Now:           fixedJobTime,
+		Launch: func(opts launcher.Options) (launcher.Result, error) {
+			got = opts
+			writeAgentTranscriptIfRequested(t, opts, "Completed.\n")
+			return fakeLauncherResult(opts), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("job run: %v", err)
+	}
+	execIndex := -1
+	outputIndex := -1
+	for i, arg := range got.Args {
+		switch arg {
+		case "exec":
+			execIndex = i
+		case "-o":
+			outputIndex = i
+		}
+	}
+	if execIndex == -1 || outputIndex == -1 {
+		t.Fatalf("expected codex exec args with -o output flag: %+v", got.Args)
+	}
+	if outputIndex < execIndex {
+		t.Fatalf("codex -o must be passed to exec, not top-level codex: %+v", got.Args)
+	}
+}
+
 func TestJobRunFailsClosedWhenAgentFinalMessageCannotProceed(t *testing.T) {
 	workspace, task := writeJobTask(t, "Fix tests.")
 	result, err := Run(Options{

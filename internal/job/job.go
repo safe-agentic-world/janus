@@ -363,11 +363,11 @@ func agentArgs(agent, workspace, taskPath, taskText, transcriptPath string) []st
 		"Task file: " + taskPath + "\n\n" + taskText
 	switch agent {
 	case launcher.AgentCodex:
-		args := []string{"-C", workspace, "--ask-for-approval", "never", "--sandbox", "read-only"}
+		args := []string{"-C", workspace, "--ask-for-approval", "never", "--sandbox", "read-only", "exec"}
 		if strings.TrimSpace(transcriptPath) != "" {
 			args = append(args, "-o", transcriptPath)
 		}
-		return append(args, "exec", prompt)
+		return append(args, prompt)
 	case launcher.AgentClaude:
 		return []string{"--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--print", prompt}
 	default:
