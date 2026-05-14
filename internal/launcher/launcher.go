@@ -59,6 +59,8 @@ type Options struct {
 	NomosCommand          string
 	Stdout                io.Writer
 	Stderr                io.Writer
+	AgentStdout           io.Writer
+	AgentStderr           io.Writer
 	Getenv                func(string) string
 	Args                  []string
 	Now                   func() time.Time
@@ -136,6 +138,12 @@ func Run(opts Options) (Result, error) {
 	}
 	if opts.Stderr == nil {
 		opts.Stderr = io.Discard
+	}
+	if opts.AgentStdout == nil {
+		opts.AgentStdout = opts.Stdout
+	}
+	if opts.AgentStderr == nil {
+		opts.AgentStderr = opts.Stderr
 	}
 	if opts.Getenv == nil {
 		opts.Getenv = os.Getenv
@@ -257,7 +265,7 @@ func Run(opts Options) (Result, error) {
 	if opts.DryRun || opts.NoLaunch {
 		return result, nil
 	}
-	if err := launchAgent(agent, workspaceRoot, mcpConfigPath, mcpServer, opts.Args); err != nil {
+	if err := launchAgent(agent, workspaceRoot, mcpConfigPath, mcpServer, opts.Args, opts.AgentStdout, opts.AgentStderr); err != nil {
 		return result, err
 	}
 	result.Launched = true
@@ -909,7 +917,7 @@ func resolveAgentLaunchPlan(agent, mcpConfigPath string, server mcpClientServer,
 	return plan, nil
 }
 
-func launchAgent(agent, workspaceRoot, mcpConfigPath string, server mcpClientServer, args []string) error {
+func launchAgent(agent, workspaceRoot, mcpConfigPath string, server mcpClientServer, args []string, stdout, stderr io.Writer) error {
 	bin, err := exec.LookPath(agent)
 	if err != nil {
 		return fmt.Errorf("%s executable not found; rerun with --no-launch or configure the client with %s: %w", agent, mcpConfigPath, err)
@@ -921,8 +929,8 @@ func launchAgent(agent, workspaceRoot, mcpConfigPath string, server mcpClientSer
 	cmd := exec.Command(bin, plan.Argv...)
 	cmd.Dir = workspaceRoot
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(), plan.Env...)
 	return cmd.Run()
 }

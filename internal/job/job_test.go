@@ -79,7 +79,7 @@ func TestJobRunUsesLauncherForRealAgentInvocation(t *testing.T) {
 		agent string
 		want  []string
 	}{
-		{agent: launcher.AgentCodex, want: []string{"-C", "exec", "Use only Nomos MCP tools"}},
+		{agent: launcher.AgentCodex, want: []string{"-C", "-o", "exec", "Use only Nomos MCP tools"}},
 		{agent: launcher.AgentClaude, want: []string{"--strict-mcp-config", "--print", "Use only Nomos MCP tools"}},
 	} {
 		t.Run(tc.agent, func(t *testing.T) {
@@ -93,6 +93,7 @@ func TestJobRunUsesLauncherForRealAgentInvocation(t *testing.T) {
 				Now:           fixedJobTime,
 				Launch: func(opts launcher.Options) (launcher.Result, error) {
 					got = opts
+					writeAgentTranscriptIfRequested(t, opts, "Completed.\n")
 					return fakeLauncherResult(opts), nil
 				},
 			})
@@ -109,6 +110,123 @@ func TestJobRunUsesLauncherForRealAgentInvocation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJobRunFailsClosedWhenAgentFinalMessageCannotProceed(t *testing.T) {
+	workspace, task := writeJobTask(t, "Fix tests.")
+	result, err := Run(Options{
+		Agent:         launcher.AgentCodex,
+		TaskPath:      task,
+		Profile:       "ci-strict",
+		WorkspaceRoot: workspace,
+		Now:           fixedJobTime,
+		Launch: func(opts launcher.Options) (launcher.Result, error) {
+			transcriptPath := codexTranscriptPath(opts)
+			if transcriptPath == "" {
+				t.Fatalf("codex launcher args missing final message output path: %+v", opts.Args)
+			}
+			text := "I can't proceed because the required Nomos `read_file` call was canceled twice.\n"
+			if err := os.WriteFile(transcriptPath, []byte(text), 0o600); err != nil {
+				t.Fatalf("write agent transcript: %v", err)
+			}
+			return fakeLauncherResult(opts), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("job run: %v", err)
+	}
+	if result.ExitCode != ExitAgentFailure || result.ExitReason != ReasonAgentFailure {
+		t.Fatalf("got code=%d reason=%s, want code=%d reason=%s", result.ExitCode, result.ExitReason, ExitAgentFailure, ReasonAgentFailure)
+	}
+	if result.AgentTranscript == "" {
+		t.Fatalf("expected agent transcript path in result")
+	}
+	assertMetadata(t, result.MetadataPath, map[string]any{
+		"agent_transcript_path": result.AgentTranscript,
+		"exit_reason":           ReasonAgentFailure,
+		"exit_code":             float64(ExitAgentFailure),
+	})
+	var summary policySummary
+	readJSON(t, result.PolicySummaryPath, &summary)
+	if summary.ExitReason != ReasonAgentFailure || summary.AgentFailure != 1 {
+		t.Fatalf("unexpected policy summary: %+v", summary)
+	}
+}
+
+func TestJobRunFailsClosedWhenCodexFinalMessageIsMissing(t *testing.T) {
+	workspace, task := writeJobTask(t, "Fix tests.")
+	result, err := Run(Options{
+		Agent:         launcher.AgentCodex,
+		TaskPath:      task,
+		Profile:       "ci-strict",
+		WorkspaceRoot: workspace,
+		Now:           fixedJobTime,
+		Launch: func(opts launcher.Options) (launcher.Result, error) {
+			if codexTranscriptPath(opts) == "" {
+				t.Fatalf("codex launcher args missing final message output path: %+v", opts.Args)
+			}
+			return fakeLauncherResult(opts), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("job run: %v", err)
+	}
+	if result.ExitCode != ExitAgentFailure || result.ExitReason != ReasonAgentFailure {
+		t.Fatalf("got code=%d reason=%s, want code=%d reason=%s", result.ExitCode, result.ExitReason, ExitAgentFailure, ReasonAgentFailure)
+	}
+}
+
+func TestJobRunFailsClosedWhenClaudePrintOutputCannotProceed(t *testing.T) {
+	workspace, task := writeJobTask(t, "Fix tests.")
+	result, err := Run(Options{
+		Agent:         launcher.AgentClaude,
+		TaskPath:      task,
+		Profile:       "ci-strict",
+		WorkspaceRoot: workspace,
+		Now:           fixedJobTime,
+		Launch: func(opts launcher.Options) (launcher.Result, error) {
+			if opts.AgentStdout == nil {
+				t.Fatalf("expected claude agent stdout capture")
+			}
+			if _, err := opts.AgentStdout.Write([]byte("I cannot proceed because the required Nomos MCP tool call was cancelled.\n")); err != nil {
+				t.Fatalf("write claude transcript: %v", err)
+			}
+			return fakeLauncherResult(opts), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("job run: %v", err)
+	}
+	if result.ExitCode != ExitAgentFailure || result.ExitReason != ReasonAgentFailure {
+		t.Fatalf("got code=%d reason=%s, want code=%d reason=%s", result.ExitCode, result.ExitReason, ExitAgentFailure, ReasonAgentFailure)
+	}
+	assertMetadata(t, result.MetadataPath, map[string]any{
+		"agent_transcript_path": result.AgentTranscript,
+		"exit_reason":           ReasonAgentFailure,
+	})
+}
+
+func TestJobRunFailsClosedWhenClaudePrintOutputIsEmpty(t *testing.T) {
+	workspace, task := writeJobTask(t, "Fix tests.")
+	result, err := Run(Options{
+		Agent:         launcher.AgentClaude,
+		TaskPath:      task,
+		Profile:       "ci-strict",
+		WorkspaceRoot: workspace,
+		Now:           fixedJobTime,
+		Launch: func(opts launcher.Options) (launcher.Result, error) {
+			if opts.AgentStdout == nil {
+				t.Fatalf("expected claude agent stdout capture")
+			}
+			return fakeLauncherResult(opts), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("job run: %v", err)
+	}
+	if result.ExitCode != ExitAgentFailure || result.ExitReason != ReasonAgentFailure {
+		t.Fatalf("got code=%d reason=%s, want code=%d reason=%s", result.ExitCode, result.ExitReason, ExitAgentFailure, ReasonAgentFailure)
 	}
 }
 
@@ -241,6 +359,7 @@ func TestAuditAndSessionMetadataForJobRun(t *testing.T) {
 		WorkspaceRoot: workspace,
 		Now:           fixedJobTime,
 		Launch: func(opts launcher.Options) (launcher.Result, error) {
+			writeAgentTranscriptIfRequested(t, opts, "Completed the requested work.\n")
 			return fakeLauncherResult(opts), nil
 		},
 	})
@@ -289,6 +408,30 @@ func fakeLauncherResult(opts launcher.Options) launcher.Result {
 		ApprovalStorePath: filepath.Join(opts.WorkspaceRoot, ".nomos", "approvals.json"),
 		MCPWiringMethod:   method,
 		MCPConfigJSON:     []byte(`{"mcpServers":{"nomos":{"command":"nomos","args":["mcp"]}}}` + "\n"),
+	}
+}
+
+func codexTranscriptPath(opts launcher.Options) string {
+	for i, arg := range opts.Args {
+		if arg == "-o" && i+1 < len(opts.Args) {
+			return opts.Args[i+1]
+		}
+	}
+	return ""
+}
+
+func writeAgentTranscriptIfRequested(t *testing.T, opts launcher.Options, text string) {
+	t.Helper()
+	path := codexTranscriptPath(opts)
+	if path != "" {
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatalf("write codex transcript: %v", err)
+		}
+	}
+	if opts.AgentStdout != nil {
+		if _, err := opts.AgentStdout.Write([]byte(text)); err != nil {
+			t.Fatalf("write agent stdout transcript: %v", err)
+		}
 	}
 }
 
